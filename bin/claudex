@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { run } from '../lib/exec.js';
+import { buildDigest, DEFAULTS } from '../lib/digest.js';
+import { buildSessions } from '../lib/sessions.js';
+import { getAgent } from '../lib/herdr.js';
+import { resolveTranscript, search } from '../lib/contextify.js';
+import { cutText, toIso } from '../lib/normalize.js';
+
+const USAGE = `claudex — сводка по сессиям Claude Code (Contextify + Herdr)
+
+  claudex sessions [--cwd <path>]
+  claudex <alias> [--limit N] [--chars N] [--tail-lines N]
+  claudex search <alias> "<запрос>" [--limit N] [--chars N]
+
+Алиас — это имя агента в Herdr. Задаётся один раз:
+  herdr agent rename <pane-id> <alias>
+
+Флаги:
+  --db-path <path>   база Contextify (умолчание: $CLAUDEX_CONTEXTIFY_DB
+                     или ~/Documents/Contextify/contextify.db)
+  --limit N          записей истории (${DEFAULTS.limit})
+  --chars N          символов на запись (${DEFAULTS.chars})
+  --tail-lines N     строк живого хвоста (${DEFAULTS.tailLines})
+  --cwd <path>       фильтр по рабочему каталогу для sessions
+  --pretty           JSON с отступами (по умолчанию компактный)
+
+Коды выхода: 0 успех · 2 неизвестный алиас · 3 Herdr недоступен · 4 ошибка вызова`;
+
+function parseArgs(argv) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') {
+      flags.help = true;
+    } else if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) {
+        flags[key] = true;
+      } else {
+        flags[key] = next;
+        i += 1;
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { flags, positional };
+}
+
+function num(value, fallback) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function emit(value, pretty) {
+  const text = pretty
+    ? JSON.stringify(value, null, 2)
+    : JSON.stringify(value);
+  process.stdout.write(text + '\n');
+}
+
+function fail(message, code) {
+  process.stderr.write(message + '\n');
+  process.exit(code);
+}
+
+function exitCodeFor(error) {
+  return error?.code === 'agent_not_found' ? 2 : 3;
+}
+
+function knownAliases(dbPath) {
+  const listed = buildSessions(run, dbPath, {});
+  if (!listed.ok) return [];
+  return listed.sessions.aliased.map((s) => s.alias);
+}
+
+const { flags, positional } = parseArgs(process.argv.slice(2));
+
+if (flags.help || positional.length === 0) {
+  process.stdout.write(USAGE + '\n');
+  process.exit(0);
+}
+
+const dbPath = flags['db-path'] ||
+  process.env.CLAUDEX_CONTEXTIFY_DB ||
+  join(homedir(), 'Documents', 'Contextify', 'contextify.db');
+
+const pretty = flags.pretty === true;
+const [command, ...rest] = positional;
+
+if (command === 'sessions') {
+  const built = buildSessions(run, dbPath, { cwd: flags.cwd || null });
+  if (!built.ok) fail(`Herdr недоступен: ${built.error.message}`, 3);
+  emit(built.sessions, pretty);
+  process.exit(0);
+}
+
+if (command === 'search') {
+  const [alias, query] = rest;
+  if (!alias || !query) fail('Нужны алиас и запрос: claudex search <alias> "<запрос>"', 4);
+
+  const live = getAgent(run, alias);
+  if (!live.ok) {
+    const code = exitCodeFor(live.error);
+    const hint = code === 2 ? ` Известные алиасы: ${knownAliases(dbPath).join(', ') || 'нет'}` : '';
+    fail(`${live.error.message}.${hint}`, code);
+  }
+
+  const resolved = resolveTranscript(run, dbPath, live.agent.session_id);
+  if (!resolved.ok) fail(`История недоступна: ${resolved.reason}`, 4);
+
+  const limit = num(flags.limit, DEFAULTS.limit);
+  const chars = num(flags.chars, DEFAULTS.chars);
+  const found = search(run, dbPath, resolved.transcriptId, query, limit, 60);
+  if (!found.ok) fail(`Поиск не удался: ${found.reason}`, 4);
+
+  emit({
+    alias,
+    transcript_id: resolved.transcriptId,
+    query,
+    results: found.results.map((r) => ({
+      id: r.id ?? null,
+      ts: toIso(r.timestamp),
+      role: r.kind ?? null,
+      score: r.score ?? null,
+      text: cutText(r.contentSnippet, chars).text,
+    })),
+  }, pretty);
+  process.exit(0);
+}
+
+const alias = command === 'digest' ? rest[0] : command;
+if (!alias) fail('Нужен алиас: claudex <alias>', 4);
+
+const built = buildDigest(run, dbPath, alias, {
+  limit: num(flags.limit, DEFAULTS.limit),
+  chars: num(flags.chars, DEFAULTS.chars),
+  tailLines: num(flags['tail-lines'], DEFAULTS.tailLines),
+});
+
+if (!built.ok) {
+  const code = exitCodeFor(built.error);
+  const hint = code === 2 ? ` Известные алиасы: ${knownAliases(dbPath).join(', ') || 'нет'}` : '';
+  fail(`${built.error.message}.${hint}`, code);
+}
+
+emit(built.digest, pretty);
