@@ -6,10 +6,29 @@
 ## Установка
 
 ```bash
-ln -sf ~/projects/claudex/bin/claudex ~/.local/bin/claudex
+./install.sh
 ```
 
-Зависимостей нет. Нужны `herdr`, `contextify` и `sqlite3` в `PATH`.
+Ставит симлинк на бинарь в `~/.local/bin` и симлинк на скилл в
+`$CODEX_HOME/skills` (по умолчанию `~/.codex/skills`). Зависимостей нет; нужны
+`herdr`, `contextify`, `sqlite3` и `node` в `PATH`.
+
+Если Codex не подхватит скилл по симлинку, скопируйте каталог:
+`cp -R skills/claudex ~/.codex/skills/claudex`.
+
+## Скилл для Codex
+
+`skills/claudex/SKILL.md` — обычный скилл Codex в каноне
+`~/.codex/skills/.system/skill-creator`. Проверка:
+
+```bash
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/claudex
+```
+
+Отдельный плагин не заводился: плагин в Codex — это связка скиллов, hooks, MCP
+и запись в `config.toml` (как `casino-toolkit`), а здесь одна возможность.
+Если понадобится собрать всё в плагин, каталог `skills/claudex` кладётся в его
+`skills/` без изменений — раскладка та же.
 
 ## Разовая настройка
 

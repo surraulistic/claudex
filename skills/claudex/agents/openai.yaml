@@ -1,0 +1,3 @@
+interface:
+  display_name: "claudex"
+  short_description: "State of a parallel Claude Code session by alias"
