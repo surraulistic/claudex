@@ -1,6 +1,6 @@
 ---
 name: claudex
-description: Read what the other Claude Code sessions on this machine are doing and what they already decided — live panes plus indexed history, including sessions that are closed. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work. Also the way to pick which session to drive.
+description: Read what the other Claude Code sessions on this machine are doing and what they already decided — live panes plus indexed history, including sessions that are closed. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work. Also the way to pick which session to drive, and to read a single entry or the conversation around it in full.
 metadata:
   short-description: State and history of the Claude Code sessions on this machine
 ---
@@ -31,14 +31,20 @@ claudex <target>          # full digest of one pane, with history entries
 
 ## Targets
 
-A target is a Herdr alias, a `pane_id`, a fragment of the pane title, or a cwd.
-**An alias is not required** — every pane in `sessions` carries a `target` field
-that is guaranteed to work, so an unnamed pane is addressed by its `pane_id`:
+A target is a Herdr alias, a `pane_id`, a `session_id`, a `transcript_id`, a
+fragment of the pane title, or a cwd. **An alias is not required** — every pane
+in `sessions` and every group in `find` carries a `target` field that is
+guaranteed to work:
 
 ```bash
 claudex wE:p13            # by pane
 claudex "кеш инвалидация" # by title fragment
+claudex 10ad0062-f332-…   # by session id, straight from find
 ```
+
+A target that is not a live pane but exists in the index returns a digest with
+`live: null` and no `tail` — that is how a **closed session** is read. Nothing
+else is needed to reach one.
 
 Aliases live in Herdr and nowhere else, so a name is cleared when the agent in
 that pane exits or is replaced. That is why `target` falls back to `pane_id`.
@@ -69,9 +75,15 @@ Each entry carries an `id`. When `truncated` is true and the content matters,
 fetch the full text rather than guessing:
 
 ```bash
-contextify entry <entry-id>      # full record
-contextify context <entry-id>    # surrounding conversation
+claudex entry <entry-id>              # the record, whole
+claudex context <entry-id>            # the conversation around it
+claudex context <entry-id> --before 4 --after 8
 ```
+
+Use these rather than `contextify` directly. Bare `contextify entry` fails —
+it looks for the database under the XDG path, while the real one lives in
+`~/Documents/Contextify/`; and even given `--db-path` it truncates anything over
+2 KB unless `--full-content` is also passed. `claudex` supplies both.
 
 ## Finding earlier context
 
@@ -84,11 +96,26 @@ claudex find "wallet currency" --days 14
 claudex search wE:p9 "MessageWhiz"       # within one session only
 ```
 
-Results carry `session_id`, `cwd` and `branch`, so a hit identifies which
-session and which worktree to look at next. Terms are ANDed; a trailing `*`
-makes a prefix. `--raw` passes FTS5 syntax through untouched.
+Hits come back grouped into `sessions`, newest first, each labelled with
+`project`, `cwd`, `branch`, `hits` and the window `first_hit`/`last_hit` — so
+one call answers "which session was this, and when". Every group carries a
+`target`; pass it straight to `claudex <target>` to read that session. Terms are
+ANDed; a trailing `*` makes a prefix. `--raw` passes FTS5 syntax through
+untouched.
+
+Do not grep the session files to find a session. Claude Code transcripts live
+under `~/.claude/projects/<slug>/<session-id>.jsonl` and Codex ones under
+`~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`. If a file really must be
+read directly, go to that day's directory — never sweep `~/Documents`, which
+holds tens of thousands of unrelated files.
 
 ## When history is missing
+
+`entry_count` is `null`, never `0`, when the history could not be read: `0`
+would read as "the session is quiet". Alongside it, `unindexed_mb` says how much
+text is sitting in the session file that the index does not cover — a pane
+showing `null` and `50.5` has a large conversation that is simply unreachable
+right now.
 
 `history` may arrive with a `reason` and no `entries`. This is a real condition,
 not an empty session — Contextify rejects a transcript whose first 20 lines lack

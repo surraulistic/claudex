@@ -57,7 +57,7 @@ test('панель без истории несёт причину, а не мо
   const { run } = fakeRun();
   const { panes } = buildPanes(run, '/db');
   const working = panes.find((p) => p.pane_id === 'wE:pB');
-  assert.equal(working.entry_count, 0);
+  assert.equal(working.entry_count, null, 'ноль читается как «в сессии тихо» — тут неизвестно');
   assert.match(working.history_reason, /не проиндексирован/);
 });
 

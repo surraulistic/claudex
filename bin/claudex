@@ -6,7 +6,8 @@ import { buildDigest, DEFAULTS } from '../lib/digest.js';
 import { buildBrief, BRIEF_DEFAULTS } from '../lib/brief.js';
 import { buildPanes } from '../lib/sessions.js';
 import { resolveTarget } from '../lib/target.js';
-import { readDigest, searchEntries } from '../lib/contextify.js';
+import { readDigest, searchEntries, readEntry, readContext } from '../lib/contextify.js';
+import { groupBySession } from '../lib/find.js';
 import { ftsQuery } from '../lib/sql.js';
 import { cutText, toIso } from '../lib/normalize.js';
 
@@ -17,9 +18,12 @@ const USAGE = `claudex — сводка по сессиям Claude Code (Context
   claudex <target>                       полный дайджест одной панели
   claudex search <target> "<запрос>"     поиск внутри одной сессии
   claudex find "<запрос>"                поиск по всем транскриптам, включая закрытые
+  claudex entry <id>                     запись целиком, без обрезки
+  claudex context <id>                   разговор вокруг записи
 
-Target — алиас Herdr, pane_id, кусок заголовка или cwd. Алиас не обязателен:
-безымянная панель адресуется своим pane_id из вывода sessions.
+Target — алиас Herdr, pane_id, session_id, transcript_id, кусок заголовка или
+cwd. Алиас не обязателен: безымянная панель адресуется своим pane_id из вывода
+sessions, а закрытая сессия — ключом target из вывода find.
 
 Флаги:
   --db-path <path>   база Contextify (умолчание: $CLAUDEX_CONTEXTIFY_DB
@@ -29,6 +33,8 @@ Target — алиас Herdr, pane_id, кусок заголовка или cwd. 
   --tail-lines N     строк живого хвоста (${DEFAULTS.tailLines}, brief ${BRIEF_DEFAULTS.tailLines})
   --cwd <path>       фильтр по рабочему каталогу
   --days N           find: не старше N дней
+  --before N         context: записей до якоря (10)
+  --after N          context: записей после якоря (20)
   --raw              запрос уходит в FTS5 как есть, без экранирования
   --pretty           JSON с отступами (по умолчанию компактный)
 
@@ -122,21 +128,51 @@ if (command === 'find') {
   });
   if (!found.ok) fail(`Поиск не удался: ${found.reason}`, 4);
 
-  emit({
-    query,
-    match,
-    results: found.results.map((r) => ({
-      id: r.id ?? null,
-      ts: toIso(r.ts),
-      role: r.kind ?? null,
-      session_id: r.session_id ?? null,
-      transcript_id: r.transcript_id ?? null,
-      project: r.project ?? null,
-      cwd: r.cwd ?? null,
-      branch: r.branch ?? null,
-      text: cutText(r.text, chars).text,
-    })),
-  }, pretty);
+  emit({ query, match, hits: found.results.length, sessions: groupBySession(found.results, chars) }, pretty);
+  process.exit(0);
+}
+
+if (command === 'entry' || command === 'context') {
+  const [id] = rest;
+  if (!id) fail(`Нужен id записи: claudex ${command} <entry-id>`, 4);
+
+  const got = command === 'entry'
+    ? readEntry(run, dbPath, id)
+    : readContext(run, dbPath, id, {
+      before: num(flags.before, 10),
+      after: num(flags.after, 20),
+    });
+  if (!got.ok) fail(got.reason, 4);
+
+  if (command === 'entry') {
+    const e = got.entry;
+    emit({
+      id: e.id,
+      ts: toIso(e.ts),
+      role: e.kind ?? null,
+      target: e.session_id || e.transcript_id,
+      transcript_id: e.transcript_id ?? null,
+      project: e.project ?? null,
+      cwd: e.cwd ?? null,
+      branch: e.branch ?? null,
+      chars: e.len ?? 0,
+      text: e.text ?? '',
+    }, pretty);
+  } else {
+    const c = got.context;
+    emit({
+      anchor: c.anchor,
+      transcript_id: c.transcript_id,
+      entries: (c.entries ?? []).map((e) => ({
+        id: e.id,
+        ts: toIso(e.ts),
+        role: e.kind ?? null,
+        anchor: e.anchor === 1,
+        chars: e.len ?? 0,
+        text: e.text ?? '',
+      })),
+    }, pretty);
+  }
   process.exit(0);
 }
 

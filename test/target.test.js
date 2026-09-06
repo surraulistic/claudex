@@ -70,3 +70,16 @@ test('недоступный herdr не превращается в «цель �
   assert.equal(got.ok, false);
   assert.notEqual(got.error.code, 'agent_not_found');
 });
+
+test('session_id живой панели ведёт на саму панель, а не на её историю', () => {
+  const got = resolveTarget(fakeRun(), 's2');
+  assert.equal(got.ok, true);
+  assert.equal(got.agent.pane_id, 'wE:p13');
+  assert.equal(got.matched, 'session_id');
+});
+
+test('session_id проверяется раньше подстроки заголовка', () => {
+  const got = resolveTarget(fakeRun(), 's1');
+  assert.equal(got.agent.pane_id, 'wE:pX');
+  assert.equal(got.matched, 'session_id');
+});

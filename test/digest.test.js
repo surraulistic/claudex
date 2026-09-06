@@ -90,7 +90,7 @@ test('непроиндексированная сессия отдаёт при�
   const { run } = fakeRun({ sqlite });
   const d = buildDigest(run, '/db', 'river').digest;
   assert.equal(d.history.transcript_id, 'T9');
-  assert.equal(d.history.entry_count, 0);
+  assert.equal(d.history.entry_count, null, 'ноль читается как «в сессии тихо» — тут неизвестно');
   assert.match(d.history.reason, /Invalid transcript format/);
   assert.equal('entries' in d.history, false);
 });
@@ -106,4 +106,33 @@ test('длина записи режется, исходный размер со
   const d = buildDigest(run, '/db', 'river', { chars: 5 }).digest;
   assert.equal(d.history.entries[0].truncated, true);
   assert.equal(d.history.entries[0].chars, 'bonuses!874 влит'.length);
+});
+
+test('закрытая сессия читается по session_id: истории есть, живого нет', () => {
+  const run = (cmd, args) => {
+    if (cmd === 'herdr' && args[1] === 'get') {
+      return { ok: true, code: 0, stdout: JSON.stringify({ error: { code: 'agent_not_found', message: 'нет' } }), stderr: '' };
+    }
+    if (cmd === 'herdr') return { ok: true, code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: '' };
+    return { ok: true, code: 0, stdout: JSON.stringify(HEALTHY), stderr: '' };
+  };
+  const got = buildDigest(run, '/db', '10ad0062-f332-4303-bcd5-a38084eae9c7');
+  assert.equal(got.ok, true);
+  assert.equal(got.digest.live, null);
+  assert.equal(got.digest.tail, null);
+  assert.equal(got.digest.history.entry_count, 11900);
+  assert.deepEqual(got.digest.signals.mr, ['bonuses!874']);
+});
+
+test('цель, которой нет ни среди панелей, ни в истории, остаётся ошибкой', () => {
+  const run = (cmd, args) => {
+    if (cmd === 'herdr' && args[1] === 'get') {
+      return { ok: true, code: 0, stdout: JSON.stringify({ error: { code: 'agent_not_found', message: 'нет' } }), stderr: '' };
+    }
+    if (cmd === 'herdr') return { ok: true, code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: '' };
+    return { ok: true, code: 0, stdout: '', stderr: '' };
+  };
+  const got = buildDigest(run, '/db', 'нетакой');
+  assert.equal(got.ok, false);
+  assert.equal(got.error.code, 'agent_not_found');
 });

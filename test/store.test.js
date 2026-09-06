@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../lib/exec.js';
-import { readDigest, readMany, searchEntries } from '../lib/contextify.js';
+import { readDigest, readMany, searchEntries, readEntry, readContext } from '../lib/contextify.js';
 import { ftsQuery } from '../lib/sql.js';
 
 const INDEXED = '11111111-2222-3333-4444-555555555555';
@@ -117,4 +117,52 @@ test('запрос с кавычкой не ломает SQL и ничего н�
   const got = searchEntries(run, db, ftsQuery("x' or '1'='1"), { limit: 5 });
   assert.equal(got.ok, true);
   assert.deepEqual(got.results, []);
+});
+
+test('entry отдаёт запись целиком, без обрезки на 2 КБ', () => {
+  const got = readEntry(run, db, 'e2');
+  assert.equal(got.ok, true, got.reason);
+  assert.equal(got.entry.text, 'влит bonuses!874');
+  assert.equal(got.entry.len, got.entry.text.length);
+  assert.equal(got.entry.session_id, INDEXED);
+  assert.equal(got.entry.project, 'GolandProjects');
+});
+
+test('entry по несуществующему id объясняет, а не отдаёт пустоту', () => {
+  const got = readEntry(run, db, 'e404');
+  assert.equal(got.ok, false);
+  assert.match(got.reason, /нет в базе/);
+});
+
+test('entry с кавычкой в id отсекается до обращения к базе', () => {
+  const got = readEntry(() => {
+    throw new Error('sqlite не должен вызываться');
+  }, db, "e1' or '1'='1");
+  assert.equal(got.reason, 'некорректный entry_id');
+});
+
+test('context отдаёт окно вокруг записи и помечает якорь', () => {
+  const got = readContext(run, db, 'e1', { before: 5, after: 5 });
+  assert.equal(got.ok, true, got.reason);
+  const ids = got.context.entries.map((e) => e.id);
+  assert.deepEqual(ids, ['e1', 'e2'], 'скрытая из таймлайна e3 в окно не входит');
+  assert.equal(got.context.entries.find((e) => e.id === 'e1').anchor, 1);
+});
+
+test('context держит границы окна', () => {
+  const got = readContext(run, db, 'e2', { before: 0, after: 0 });
+  assert.deepEqual(got.context.entries.map((e) => e.id), ['e2']);
+});
+
+test('запись адресуется по transcript_id, когда provider_session_id пуст', () => {
+  const got = readDigest(run, db, 'T-CLI', { limit: 8, chars: 400 });
+  assert.equal(got.ok, true, got.reason);
+  assert.equal(got.transcriptId, 'T-CLI');
+});
+
+test('нечитаемый файл на диске не мешает объяснить причину', () => {
+  const got = readDigest(run, db, 'broken-1', {});
+  assert.equal(got.ok, false);
+  assert.equal(typeof got.unindexedMb, 'number');
+  assert.match(got.reason, /МБ на диске/);
 });
