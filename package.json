@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "bin": { "claudex": "./bin/claudex" },
-  "scripts": { "test": "node --test test/" }
+  "scripts": { "test": "node --test test/*.test.js" }
 }

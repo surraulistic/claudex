@@ -1,16 +1,15 @@
 ---
 name: claudex
-description: Get the state of a parallel Claude Code session by alias (river, config, entitlements) in one call, or drive it. Use when the user asks what another session is doing, what it decided, or wants a prompt sent to it. Not for searching general project history — that is plain contextify.
+description: Read what the other Claude Code sessions on this machine are doing and what they already decided — live panes plus indexed history, including sessions that are closed. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work. Also the way to pick which session to drive.
 metadata:
-  short-description: State of a parallel Claude Code session by alias
+  short-description: State and history of the Claude Code sessions on this machine
 ---
 
 # claudex
 
-`claudex` collapses six manual calls into one: it joins Contextify history with
-live Herdr state for a named Claude Code session. Prefer it over assembling
-`contextify activity` and `herdr agent read` by hand — the join key it uses
-(`transcripts.provider_session_id`) is not reachable from either CLI.
+`claudex` joins Contextify history with live Herdr state. Both halves are
+addressable by one target, and the join key it uses
+(`transcripts.provider_session_id`) is not reachable from either CLI alone.
 
 Requires `claudex` in `PATH`. If it is missing, say so instead of falling back
 to hand-assembly; the fallback silently reads the wrong transcript when a pane's
@@ -19,29 +18,52 @@ session has rotated.
 ## Start here
 
 ```bash
-claudex sessions          # which aliases exist right now
-claudex river             # the digest for one alias
+claudex brief             # every live pane at once — status, tail, signals
 ```
 
-Aliases are Herdr agent names, not stored anywhere. Herdr clears a name when the
-agent in that pane exits or is replaced, so an alias that worked an hour ago may
-be gone. `sessions` lists such panes under `unaliased` with their `pane_id`;
-re-bind with `herdr agent rename <pane-id> <alias>`.
+One `brief` answers "what is everyone doing" in a single process. Reaching for
+`claudex <target>` per pane costs about five times as much for the same picture.
 
-## Reading the digest
+```bash
+claudex sessions          # lighter: which panes exist, which have history
+claudex <target>          # full digest of one pane, with history entries
+```
 
-Output is compact JSON (`--pretty` for humans) with four parts:
+## Targets
+
+A target is a Herdr alias, a `pane_id`, a fragment of the pane title, or a cwd.
+**An alias is not required** — every pane in `sessions` carries a `target` field
+that is guaranteed to work, so an unnamed pane is addressed by its `pane_id`:
+
+```bash
+claudex wE:p13            # by pane
+claudex "кеш инвалидация" # by title fragment
+```
+
+Aliases live in Herdr and nowhere else, so a name is cleared when the agent in
+that pane exits or is replaced. That is why `target` falls back to `pane_id`.
+Bind a name with `herdr agent rename <pane-id> <alias>` when a stable handle is
+wanted; nothing breaks without one. Exit code `2` with several candidates means
+the fragment was ambiguous — narrow it, do not guess.
+
+## Reading a digest
+
+Compact JSON (`--pretty` for humans) in four parts:
 
 - `live` — pane, session id, status, title, cwd. From Herdr.
 - `history` — transcript id plus recent `entries`, newest first. From Contextify.
-- `tail` — cleaned terminal output, **only when `live.status` is `working`**.
-  `null` on an idle pane is normal, not a failure: an idle Claude pane shows its
-  input box, not the conversation.
+- `tail` — cleaned terminal output. Read at **any** status: `--source recent`
+  returns scrollback, not the input box, so a finished pane shows its last
+  answer. `null` means the read failed or the pane is blank.
 - `signals` — extractions, not conclusions: `mr`, `tickets`, `repo`,
   `last_user_prompt`, `current_tool_call`.
 
 `signals` are regex hits. Report them as "the session mentions SD-8208", never
 as "SD-8208 is done". Conclusions come from reading `entries`.
+
+Signals from a narrow pane are deliberately sparse: a squeezed status line cuts
+ids mid-list (`SD-6613` arrives as `SD-66`), so those lines are skipped rather
+than guessed at. An empty `mr` is "nothing verifiable on screen", not "no MRs".
 
 Each entry carries an `id`. When `truncated` is true and the content matters,
 fetch the full text rather than guessing:
@@ -51,25 +73,35 @@ contextify entry <entry-id>      # full record
 contextify context <entry-id>    # surrounding conversation
 ```
 
+## Finding earlier context
+
+`find` searches every indexed transcript, including sessions that are long
+closed — this is the way to answer "where did we discuss this before".
+
+```bash
+claudex find "river миграция"            # across all sessions
+claudex find "wallet currency" --days 14
+claudex search wE:p9 "MessageWhiz"       # within one session only
+```
+
+Results carry `session_id`, `cwd` and `branch`, so a hit identifies which
+session and which worktree to look at next. Terms are ANDed; a trailing `*`
+makes a prefix. `--raw` passes FTS5 syntax through untouched.
+
 ## When history is missing
 
 `history` may arrive with a `reason` and no `entries`. This is a real condition,
 not an empty session — Contextify rejects a transcript whose first 20 lines lack
-`uuid`/`timestamp`, and marks it done, so it never recovers on its own. Say the
-history is unavailable and quote the reason. Do not report the session as quiet,
-and do not substitute a different transcript.
-
-## Digging further
-
-```bash
-claudex river --limit 12 --chars 600     # deeper slice
-claudex search config "MessageWhiz"      # full-text within that session only
-```
+`uuid`/`timestamp`, and marks it done, so it never recovers on its own. A live
+pane whose session was started after the last index pass is simply not there
+yet. Say the history is unavailable and quote the reason. Do not report the
+session as quiet, and do not substitute a different transcript. The `tail` is
+still trustworthy in that state and is often the only evidence available.
 
 ## Driving a session
 
 `claudex` is read-only by design. Live control is Herdr, addressed by the same
-alias:
+target:
 
 ```bash
 herdr agent prompt river "продолжай Payment, Prometheus не трогай" --wait --until idle
@@ -82,5 +114,5 @@ asked for it, and quote back what was sent.
 
 ## Exit codes
 
-`0` success, including a degraded `history` · `2` unknown alias — re-run
-`claudex sessions` · `3` Herdr unreachable · `4` bad invocation.
+`0` success, including a degraded `history` · `2` target not found or ambiguous
+— re-run `claudex sessions` · `3` Herdr unreachable · `4` bad invocation.

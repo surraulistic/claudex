@@ -1,32 +1,38 @@
 #!/usr/bin/env node
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { run } from '../lib/exec.js';
+import { run, runAll } from '../lib/exec.js';
 import { buildDigest, DEFAULTS } from '../lib/digest.js';
-import { buildSessions } from '../lib/sessions.js';
-import { getAgent } from '../lib/herdr.js';
-import { resolveTranscript, search } from '../lib/contextify.js';
+import { buildBrief, BRIEF_DEFAULTS } from '../lib/brief.js';
+import { buildPanes } from '../lib/sessions.js';
+import { resolveTarget } from '../lib/target.js';
+import { readDigest, searchEntries } from '../lib/contextify.js';
+import { ftsQuery } from '../lib/sql.js';
 import { cutText, toIso } from '../lib/normalize.js';
 
 const USAGE = `claudex — сводка по сессиям Claude Code (Contextify + Herdr)
 
-  claudex sessions [--cwd <path>]
-  claudex <alias> [--limit N] [--chars N] [--tail-lines N]
-  claudex search <alias> "<запрос>" [--limit N] [--chars N]
+  claudex sessions [--cwd <path>]        какие панели живы и что у них с историей
+  claudex brief [--cwd <path>]           все панели разом: хвост, сигналы, история
+  claudex <target>                       полный дайджест одной панели
+  claudex search <target> "<запрос>"     поиск внутри одной сессии
+  claudex find "<запрос>"                поиск по всем транскриптам, включая закрытые
 
-Алиас — это имя агента в Herdr. Задаётся один раз:
-  herdr agent rename <pane-id> <alias>
+Target — алиас Herdr, pane_id, кусок заголовка или cwd. Алиас не обязателен:
+безымянная панель адресуется своим pane_id из вывода sessions.
 
 Флаги:
   --db-path <path>   база Contextify (умолчание: $CLAUDEX_CONTEXTIFY_DB
                      или ~/Documents/Contextify/contextify.db)
-  --limit N          записей истории (${DEFAULTS.limit})
+  --limit N          записей истории (${DEFAULTS.limit}) / результатов поиска
   --chars N          символов на запись (${DEFAULTS.chars})
-  --tail-lines N     строк живого хвоста (${DEFAULTS.tailLines})
-  --cwd <path>       фильтр по рабочему каталогу для sessions
+  --tail-lines N     строк живого хвоста (${DEFAULTS.tailLines}, brief ${BRIEF_DEFAULTS.tailLines})
+  --cwd <path>       фильтр по рабочему каталогу
+  --days N           find: не старше N дней
+  --raw              запрос уходит в FTS5 как есть, без экранирования
   --pretty           JSON с отступами (по умолчанию компактный)
 
-Коды выхода: 0 успех · 2 неизвестный алиас · 3 Herdr недоступен · 4 ошибка вызова`;
+Коды выхода: 0 успех · 2 цель не найдена · 3 Herdr недоступен · 4 ошибка вызова`;
 
 function parseArgs(argv) {
   const flags = {};
@@ -57,10 +63,7 @@ function num(value, fallback) {
 }
 
 function emit(value, pretty) {
-  const text = pretty
-    ? JSON.stringify(value, null, 2)
-    : JSON.stringify(value);
-  process.stdout.write(text + '\n');
+  process.stdout.write((pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value)) + '\n');
 }
 
 function fail(message, code) {
@@ -69,13 +72,7 @@ function fail(message, code) {
 }
 
 function exitCodeFor(error) {
-  return error?.code === 'agent_not_found' ? 2 : 3;
-}
-
-function knownAliases(dbPath) {
-  const listed = buildSessions(run, dbPath, {});
-  if (!listed.ok) return [];
-  return listed.sessions.aliased.map((s) => s.alias);
+  return error?.code === 'agent_not_found' || error?.code === 'ambiguous_target' ? 2 : 3;
 }
 
 const { flags, positional } = parseArgs(process.argv.slice(2));
@@ -90,62 +87,102 @@ const dbPath = flags['db-path'] ||
   join(homedir(), 'Documents', 'Contextify', 'contextify.db');
 
 const pretty = flags.pretty === true;
+const raw = flags.raw === true;
 const [command, ...rest] = positional;
 
 if (command === 'sessions') {
-  const built = buildSessions(run, dbPath, { cwd: flags.cwd || null });
+  const built = buildPanes(run, dbPath, { cwd: flags.cwd || null });
   if (!built.ok) fail(`Herdr недоступен: ${built.error.message}`, 3);
-  emit(built.sessions, pretty);
+  emit({ panes: built.panes }, pretty);
   process.exit(0);
 }
 
-if (command === 'search') {
-  const [alias, query] = rest;
-  if (!alias || !query) fail('Нужны алиас и запрос: claudex search <alias> "<запрос>"', 4);
+if (command === 'brief') {
+  const built = await buildBrief(run, runAll, dbPath, {
+    cwd: flags.cwd || null,
+    limit: num(flags.limit, BRIEF_DEFAULTS.limit),
+    chars: num(flags.chars, BRIEF_DEFAULTS.chars),
+    tailLines: num(flags['tail-lines'], BRIEF_DEFAULTS.tailLines),
+  });
+  if (!built.ok) fail(`Herdr недоступен: ${built.error.message}`, 3);
+  emit(built.brief, pretty);
+  process.exit(0);
+}
 
-  const live = getAgent(run, alias);
-  if (!live.ok) {
-    const code = exitCodeFor(live.error);
-    const hint = code === 2 ? ` Известные алиасы: ${knownAliases(dbPath).join(', ') || 'нет'}` : '';
-    fail(`${live.error.message}.${hint}`, code);
-  }
+if (command === 'find') {
+  const query = rest.join(' ');
+  const match = ftsQuery(query, { raw });
+  if (!match) fail('Нужен запрос: claudex find "<запрос>"', 4);
 
-  const resolved = resolveTranscript(run, dbPath, live.agent.session_id);
-  if (!resolved.ok) fail(`История недоступна: ${resolved.reason}`, 4);
-
-  const limit = num(flags.limit, DEFAULTS.limit);
   const chars = num(flags.chars, DEFAULTS.chars);
-  const found = search(run, dbPath, resolved.transcriptId, query, limit, 60);
+  const found = searchEntries(run, dbPath, match, {
+    limit: num(flags.limit, DEFAULTS.limit),
+    days: num(flags.days, null),
+    snippetTokens: 24,
+  });
   if (!found.ok) fail(`Поиск не удался: ${found.reason}`, 4);
 
   emit({
-    alias,
-    transcript_id: resolved.transcriptId,
     query,
+    match,
     results: found.results.map((r) => ({
       id: r.id ?? null,
-      ts: toIso(r.timestamp),
+      ts: toIso(r.ts),
       role: r.kind ?? null,
-      score: r.score ?? null,
-      text: cutText(r.contentSnippet, chars).text,
+      session_id: r.session_id ?? null,
+      transcript_id: r.transcript_id ?? null,
+      project: r.project ?? null,
+      cwd: r.cwd ?? null,
+      branch: r.branch ?? null,
+      text: cutText(r.text, chars).text,
     })),
   }, pretty);
   process.exit(0);
 }
 
-const alias = command === 'digest' ? rest[0] : command;
-if (!alias) fail('Нужен алиас: claudex <alias>', 4);
+if (command === 'search') {
+  const [target, ...words] = rest;
+  const match = ftsQuery(words.join(' '), { raw });
+  if (!target || !match) fail('Нужны цель и запрос: claudex search <target> "<запрос>"', 4);
 
-const built = buildDigest(run, dbPath, alias, {
+  const live = resolveTarget(run, target);
+  if (!live.ok) fail(live.error.message, exitCodeFor(live.error));
+
+  const resolved = readDigest(run, dbPath, live.agent.session_id, { limit: 0 });
+  if (!resolved.ok) fail(`История недоступна: ${resolved.reason}`, 4);
+
+  const chars = num(flags.chars, DEFAULTS.chars);
+  const found = searchEntries(run, dbPath, match, {
+    transcriptId: resolved.transcriptId,
+    limit: num(flags.limit, DEFAULTS.limit),
+    snippetTokens: 24,
+  });
+  if (!found.ok) fail(`Поиск не удался: ${found.reason}`, 4);
+
+  emit({
+    target: live.agent.alias ?? live.agent.pane_id,
+    transcript_id: resolved.transcriptId,
+    query: words.join(' '),
+    match,
+    results: found.results.map((r) => ({
+      id: r.id ?? null,
+      ts: toIso(r.ts),
+      role: r.kind ?? null,
+      text: cutText(r.text, chars).text,
+    })),
+  }, pretty);
+  process.exit(0);
+}
+
+const target = command === 'digest' ? rest[0] : command;
+if (!target) fail('Нужна цель: claudex <target>', 4);
+
+const built = buildDigest(run, dbPath, target, {
   limit: num(flags.limit, DEFAULTS.limit),
   chars: num(flags.chars, DEFAULTS.chars),
   tailLines: num(flags['tail-lines'], DEFAULTS.tailLines),
 });
 
-if (!built.ok) {
-  const code = exitCodeFor(built.error);
-  const hint = code === 2 ? ` Известные алиасы: ${knownAliases(dbPath).join(', ') || 'нет'}` : '';
-  fail(`${built.error.message}.${hint}`, code);
-}
+if (!built.ok) fail(built.error.message, exitCodeFor(built.error));
 
 emit(built.digest, pretty);

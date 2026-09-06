@@ -59,3 +59,42 @@ test('одиночный !1 не считается номером MR', () => {
   const s = extractSignals({ entries: [{ kind: 'assistant', content: 'ура!1 и !42' }], rawTail: '' });
   assert.deepEqual(s.mr, ['!42']);
 });
+
+const SQUEEZED = [
+  '  …/GolandProjects/casino-auth-service  SNEW-4…',
+  '  ⏵⏵ auto mode on · casino-sdk-p ·SD-66 ·SD-82',
+].join('\n');
+
+test('ужатый футер узкой панели не даёт обрубков тикетов', () => {
+  const s = extractSignals({ entries: [], rawTail: SQUEEZED });
+  assert.deepEqual(s.tickets, []);
+  assert.deepEqual(s.mr, []);
+});
+
+test('обрезанное многоточием поле статус-бара не читается как тикет', () => {
+  const bar = '  …/GolandProjects/casino-auth-service  SNEW-4…  Opus 5  ░░░░8%';
+  assert.deepEqual(extractSignals({ entries: [], rawTail: bar }).tickets, []);
+});
+
+test('целый футер отдаёт и последний в строке тикет', () => {
+  const intact = '  ⏵⏵ auto mode on (shift+tab to cycle) · MR !480 · SD-7615';
+  const s = extractSignals({ entries: [], rawTail: intact });
+  assert.deepEqual(s.mr, ['!480']);
+  assert.deepEqual(s.tickets, ['SD-7615']);
+});
+
+test('строку статус-бара, упёршуюся в край, не дочитываем до обрубка', () => {
+  const bar = '  casino-auth  ветка  Opus 5  ░░░░8%  SD-82';
+  assert.deepEqual(extractSignals({ entries: [], rawTail: bar }).tickets, []);
+});
+
+test('обычный текст не режется правилами для служебных строк', () => {
+  const s = extractSignals({ entries: [], rawTail: 'Влил bonuses!874, закрыл SD-8208' });
+  assert.deepEqual(s.mr, ['bonuses!874']);
+  assert.deepEqual(s.tickets, ['SD-8208']);
+});
+
+test('история не подпадает под правила обрезки — там текст целиком', () => {
+  const s = extractSignals({ entries: [{ kind: 'assistant', content: 'закрыт SD-8208' }], rawTail: '' });
+  assert.deepEqual(s.tickets, ['SD-8208']);
+});
