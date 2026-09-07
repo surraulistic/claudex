@@ -14,6 +14,6 @@ echo "bin   → ${bin_dir}/claudex"
 ln -sfn "${root}/skills/claudex" "${skill_dir}/claudex"
 echo "skill → ${skill_dir}/claudex"
 
-for tool in herdr contextify sqlite3 node; do
+for tool in herdr cass sqlite3 node; do
   command -v "$tool" >/dev/null || echo "внимание: ${tool} не найден в PATH"
 done

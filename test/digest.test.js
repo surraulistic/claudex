@@ -8,7 +8,7 @@ const ENTRIES = [
 ];
 
 const HEALTHY = {
-  transcript_id: 'T1', file_size: 10, last_error: null,
+  transcript_id: 1, agent: 'claude_code',
   entry_count: 11900, last_ts: 1788164338, entries: ENTRIES,
 };
 
@@ -46,7 +46,7 @@ test('digest собирает live, history, tail и signals', () => {
   const d = got.digest;
   assert.equal(d.target, 'river');
   assert.equal(d.live.session_id, '846a1bcf');
-  assert.equal(d.history.transcript_id, 'T1');
+  assert.equal(d.history.transcript_id, 1);
   assert.equal(d.history.entry_count, 11900);
   assert.equal(d.history.entries.length, 2);
   assert.equal(d.history.entries[0].id, 'e1');
@@ -85,13 +85,13 @@ test('недоступный хвост не роняет дайджест', () 
   assert.equal(d.history.entry_count, 11900);
 });
 
-test('непроиндексированная сессия отдаёт причину, а не пустую историю', () => {
-  const sqlite = { transcript_id: 'T9', file_size: 7149096, last_error: 'Invalid transcript format', entry_count: 0, last_ts: null, entries: [] };
+test('разговор без записей отдаёт причину, а не пустую историю', () => {
+  const sqlite = { transcript_id: 9, entry_count: 0, last_ts: null, entries: [] };
   const { run } = fakeRun({ sqlite });
   const d = buildDigest(run, '/db', 'river').digest;
-  assert.equal(d.history.transcript_id, 'T9');
+  assert.equal(d.history.transcript_id, 9);
   assert.equal(d.history.entry_count, null, 'ноль читается как «в сессии тихо» — тут неизвестно');
-  assert.match(d.history.reason, /Invalid transcript format/);
+  assert.match(d.history.reason, /разговорных записей/);
   assert.equal('entries' in d.history, false);
 });
 

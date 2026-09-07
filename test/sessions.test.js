@@ -9,8 +9,8 @@ const AGENTS = [
 ];
 
 const ROWS = [
-  { session_id: 's-idle-fresh', transcript_id: 'T1', entry_count: 10, last_ts: 1788164338, entries: [] },
-  { session_id: 's-idle-old', transcript_id: 'T2', entry_count: 5, last_ts: 1788000000, entries: [] },
+  { session_id: 's-idle-fresh', transcript_id: 1, entry_count: 10, last_ts: 1788164338, entries: [] },
+  { session_id: 's-idle-old', transcript_id: 2, entry_count: 5, last_ts: 1788000000, entries: [] },
   { session_id: 's-working', transcript_id: null, entry_count: 0, last_ts: null, entries: [] },
 ];
 
@@ -58,7 +58,7 @@ test('панель без истории несёт причину, а не мо
   const { panes } = buildPanes(run, '/db');
   const working = panes.find((p) => p.pane_id === 'wE:pB');
   assert.equal(working.entry_count, null, 'ноль читается как «в сессии тихо» — тут неизвестно');
-  assert.match(working.history_reason, /не проиндексирован/);
+  assert.match(working.history_reason, /нет в индексе/);
 });
 
 test('служебный ключ сортировки не протекает наружу', () => {

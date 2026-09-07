@@ -6,7 +6,8 @@ import { buildDigest, DEFAULTS } from '../lib/digest.js';
 import { buildBrief, BRIEF_DEFAULTS } from '../lib/brief.js';
 import { buildPanes } from '../lib/sessions.js';
 import { resolveTarget } from '../lib/target.js';
-import { readDigest, searchEntries, readEntry, readContext } from '../lib/contextify.js';
+import { readDigest, searchEntries, readEntry, readContext, DEFAULT_INDEX } from '../lib/store.js';
+import { buildIndex } from '../lib/index-build.js';
 import { groupBySession } from '../lib/find.js';
 import { ftsQuery } from '../lib/sql.js';
 import { cutText, toIso } from '../lib/normalize.js';
@@ -20,14 +21,15 @@ const USAGE = `claudex — сводка по сессиям Claude Code (Context
   claudex find "<запрос>"                поиск по всем транскриптам, включая закрытые
   claudex entry <id>                     запись целиком, без обрезки
   claudex context <id>                   разговор вокруг записи
+  claudex index [--full]                 пересобрать индекс из базы cass
 
 Target — алиас Herdr, pane_id, session_id, transcript_id, кусок заголовка или
 cwd. Алиас не обязателен: безымянная панель адресуется своим pane_id из вывода
 sessions, а закрытая сессия — ключом target из вывода find.
 
 Флаги:
-  --db-path <path>   база Contextify (умолчание: $CLAUDEX_CONTEXTIFY_DB
-                     или ~/Documents/Contextify/contextify.db)
+  --db-path <path>   индекс claudex (умолчание: $CLAUDEX_INDEX
+                     или ~/.claudex/index.db)
   --limit N          записей истории (${DEFAULTS.limit}) / результатов поиска
   --chars N          символов на запись (${DEFAULTS.chars})
   --tail-lines N     строк живого хвоста (${DEFAULTS.tailLines}, brief ${BRIEF_DEFAULTS.tailLines})
@@ -88,13 +90,18 @@ if (flags.help || positional.length === 0) {
   process.exit(0);
 }
 
-const dbPath = flags['db-path'] ||
-  process.env.CLAUDEX_CONTEXTIFY_DB ||
-  join(homedir(), 'Documents', 'Contextify', 'contextify.db');
+const dbPath = flags['db-path'] || DEFAULT_INDEX;
 
 const pretty = flags.pretty === true;
 const raw = flags.raw === true;
 const [command, ...rest] = positional;
+
+if (command === 'index') {
+  const built = buildIndex(run, dbPath, { full: flags.full === true });
+  if (!built.ok) fail(built.reason, 4);
+  emit(built.stats, pretty);
+  process.exit(0);
+}
 
 if (command === 'sessions') {
   const built = buildPanes(run, dbPath, { cwd: flags.cwd || null });
@@ -152,6 +159,7 @@ if (command === 'entry' || command === 'context') {
       role: e.kind ?? null,
       target: e.session_id || e.transcript_id,
       transcript_id: e.transcript_id ?? null,
+      agent: e.agent ?? null,
       project: e.project ?? null,
       cwd: e.cwd ?? null,
       branch: e.branch ?? null,
@@ -189,7 +197,7 @@ if (command === 'search') {
 
   const chars = num(flags.chars, DEFAULTS.chars);
   const found = searchEntries(run, dbPath, match, {
-    transcriptId: resolved.transcriptId,
+    convId: resolved.transcriptId,
     limit: num(flags.limit, DEFAULTS.limit),
     snippetTokens: 24,
   });

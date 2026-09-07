@@ -7,19 +7,29 @@ metadata:
 
 # claudex
 
-`claudex` joins Contextify history with live Herdr state. Both halves are
-addressable by one target, and the join key it uses
-(`transcripts.provider_session_id`) is not reachable from either CLI alone.
+`claudex` joins indexed session history with live Herdr state. History comes
+from a local index that `claudex index` builds out of the `cass` archive
+(Claude Code, Codex, Cursor and Gemini sessions in one place); live state comes
+from Herdr. Neither half alone answers "what is that session doing and what did
+it already decide".
 
 Requires `claudex` in `PATH`. If it is missing, say so instead of falling back
 to hand-assembly; the fallback silently reads the wrong transcript when a pane's
 session has rotated.
 
+Search is plain SQLite FTS5 over that index, so it matches any language.
+`cass`'s own `cass search` does not index Cyrillic — do not reach for it.
+
 ## Start here
 
 ```bash
 claudex brief             # every live pane at once — status, tail, signals
+claudex index             # catch the index up; --full rebuilds from scratch
 ```
+
+The index is incremental: a catch-up costs seconds, a full rebuild about half a
+minute. If a digest reports a session missing, run `claudex index` before
+concluding the session is empty.
 
 One `brief` answers "what is everyone doing" in a single process. Reaching for
 `claudex <target>` per pane costs about five times as much for the same picture.
@@ -57,7 +67,7 @@ the fragment was ambiguous — narrow it, do not guess.
 Compact JSON (`--pretty` for humans) in four parts:
 
 - `live` — pane, session id, status, title, cwd. From Herdr.
-- `history` — transcript id plus recent `entries`, newest first. From Contextify.
+- `history` — conversation id plus recent `entries`, newest first. From the index.
 - `tail` — cleaned terminal output. Read at **any** status: `--source recent`
   returns scrollback, not the input box, so a finished pane shows its last
   answer. `null` means the read failed or the pane is blank.
@@ -80,10 +90,7 @@ claudex context <entry-id>            # the conversation around it
 claudex context <entry-id> --before 4 --after 8
 ```
 
-Use these rather than `contextify` directly. Bare `contextify entry` fails —
-it looks for the database under the XDG path, while the real one lives in
-`~/Documents/Contextify/`; and even given `--db-path` it truncates anything over
-2 KB unless `--full-content` is also passed. `claudex` supplies both.
+Both read the local index directly and never truncate.
 
 ## Finding earlier context
 
@@ -97,7 +104,8 @@ claudex search wE:p9 "MessageWhiz"       # within one session only
 ```
 
 Hits come back grouped into `sessions`, newest first, each labelled with
-`project`, `cwd`, `branch`, `hits` and the window `first_hit`/`last_hit` — so
+`agent` (claude_code, codex, cursor, gemini), `project`, `cwd`, `hits` and the
+window `first_hit`/`last_hit` — so
 one call answers "which session was this, and when". Every group carries a
 `target`; pass it straight to `claudex <target>` to read that session. Terms are
 ANDed; a trailing `*` makes a prefix. `--raw` passes FTS5 syntax through
@@ -112,18 +120,18 @@ holds tens of thousands of unrelated files.
 ## When history is missing
 
 `entry_count` is `null`, never `0`, when the history could not be read: `0`
-would read as "the session is quiet". Alongside it, `unindexed_mb` says how much
-text is sitting in the session file that the index does not cover — a pane
-showing `null` and `50.5` has a large conversation that is simply unreachable
-right now.
+would read as "the session is quiet".
 
-`history` may arrive with a `reason` and no `entries`. This is a real condition,
-not an empty session — Contextify rejects a transcript whose first 20 lines lack
-`uuid`/`timestamp`, and marks it done, so it never recovers on its own. A live
-pane whose session was started after the last index pass is simply not there
-yet. Say the history is unavailable and quote the reason. Do not report the
+`history` may arrive with a `reason` and no `entries`. Usually that means the
+pane's session started after the last index pass — run `claudex index` and look
+again. Say the history is unavailable and quote the reason; do not report the
 session as quiet, and do not substitute a different transcript. The `tail` is
 still trustworthy in that state and is often the only evidence available.
+
+`entry_count` counts conversation only. Roughly seven of every ten records in a
+session are `[Tool: …]` stubs; they are kept searchable but excluded from the
+timeline. `last_activity`, by contrast, reflects any record — a pane busy
+running tools is active, not idle.
 
 ## Driving a session
 

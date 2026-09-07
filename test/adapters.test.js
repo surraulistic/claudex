@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { listAgents, getAgent, readTail, mapAgent } from '../lib/herdr.js';
-import { readDigest, readMany, searchEntries } from '../lib/contextify.js';
+import { readDigest, readMany, searchEntries } from '../lib/store.js';
 import { ftsQuery, lit, digestSql, searchSql } from '../lib/sql.js';
 
 const okRun = (stdout) => () => ({ ok: true, code: 0, stdout, stderr: '' });
@@ -18,12 +18,11 @@ const AGENT = {
 };
 
 const HEALTHY = {
-  transcript_id: 'T2',
-  file_size: 100,
-  last_error: null,
+  transcript_id: 42,
+  agent: 'claude_code',
   entry_count: 11900,
   last_ts: 1788164338,
-  entries: [{ id: 'e1', kind: 'user', ts: 1788164338, len: 2, text: 'да' }],
+  entries: [{ id: 7, kind: 'user', ts: 1788164338, len: 2, text: 'да' }],
 };
 
 test('mapAgent вытаскивает session_id из вложенного agent_session', () => {
@@ -73,25 +72,21 @@ test('readDigest отвергает session_id с кавычкой, не дох�
     throw new Error('sqlite не должен вызываться');
   }, '/db', "x' or '1'='1");
   assert.equal(got.ok, false);
-  assert.equal(got.reason, 'некорректный session_id');
+  assert.equal(got.reason, 'некорректный идентификатор сессии');
 });
 
-test('пустой вывод sqlite означает непроиндексированную сессию', () => {
+test('пустой вывод sqlite означает, что сессии нет в индексе', () => {
   const got = readDigest(okRun(''), '/db', 'abc-123');
   assert.equal(got.ok, false);
-  assert.match(got.reason, /не проиндексирован/);
+  assert.match(got.reason, /нет в индексе/);
 });
 
-test('ноль записей с ошибкой парсера объясняется, а не выдаётся за тишину', () => {
-  const run = okRun(JSON.stringify({
-    transcript_id: 'T1', file_size: 7149096, last_error: 'Invalid transcript format',
-    entry_count: 0, last_ts: null, entries: [],
-  }));
+test('разговор без записей объясняется, а не выдаётся за тишину', () => {
+  const run = okRun(JSON.stringify({ transcript_id: 7, entry_count: 0, entries: [] }));
   const got = readDigest(run, '/db', 'abc-123');
   assert.equal(got.ok, false);
-  assert.equal(got.transcriptId, 'T1');
-  assert.match(got.reason, /Invalid transcript format/);
-  assert.match(got.reason, /6\.8 МБ/);
+  assert.equal(got.transcriptId, 7);
+  assert.match(got.reason, /разговорных записей/);
 });
 
 test('нормальный транскрипт резолвится вместе с записями за один вызов', () => {
@@ -102,14 +97,14 @@ test('нормальный транскрипт резолвится вмест�
   };
   const got = readDigest(run, '/db', 'abc-123');
   assert.deepEqual(calls, ['sqlite3']);
-  assert.equal(got.transcriptId, 'T2');
+  assert.equal(got.transcriptId, 42);
   assert.equal(got.entryCount, 11900);
   assert.equal(got.entries[0].content, 'да');
   assert.equal(got.entries[0].contentFullSize, 2);
 });
 
 test('длинная запись помечается обрезанной по реальному размеру', () => {
-  const run = okRun(JSON.stringify({ ...HEALTHY, entries: [{ id: 'e1', kind: 'user', ts: 1, len: 99999, text: 'начало' }] }));
+  const run = okRun(JSON.stringify({ ...HEALTHY, entries: [{ id: 7, kind: 'user', ts: 1, len: 99999, text: 'начало' }] }));
   assert.equal(readDigest(run, '/db', 'abc-123').entries[0].contentTruncated, true);
 });
 
@@ -117,8 +112,8 @@ test('readMany отвечает за каждую запрошенную сес�
   const run = okRun(JSON.stringify([{ ...HEALTHY, session_id: 'a-1' }]));
   const got = readMany(run, '/db', ['a-1', 'b-2', "плохой'"]);
   assert.equal(got.get('a-1').ok, true);
-  assert.match(got.get('b-2').reason, /не проиндексирован/);
-  assert.equal(got.get("плохой'").reason, 'некорректный session_id');
+  assert.match(got.get('b-2').reason, /нет в индексе/);
+  assert.equal(got.get("плохой'").reason, 'некорректный идентификатор сессии');
 });
 
 test('readMany не зовёт sqlite, когда валидных сессий нет', () => {
@@ -143,5 +138,5 @@ test('ftsQuery раскавычивает пользовательский те�
 test('одинарная кавычка удваивается, а не разрывает литерал', () => {
   assert.equal(lit("it's"), "'it''s'");
   assert.ok(digestSql("x''y", 8, 400).includes("'x''''y'"));
-  assert.ok(searchSql('"a"', { transcriptId: 'T1' }).includes("'T1'"));
+  assert.ok(searchSql('"a"', { convId: 5 }).includes("'5'"));
 });

@@ -4,165 +4,180 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../lib/exec.js';
-import { readDigest, readMany, searchEntries, readEntry, readContext } from '../lib/contextify.js';
+import { readDigest, readMany, searchEntries, readEntry, readContext } from '../lib/store.js';
 import { ftsQuery } from '../lib/sql.js';
 
-const INDEXED = '11111111-2222-3333-4444-555555555555';
-const CLI_INGESTED = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+const CC = '11111111-2222-3333-4444-555555555555';
+const CODEX = '66666666-7777-8888-9999-aaaaaaaaaaaa';
 
 let dir;
 let db;
 
-// Настоящая sqlite вместо мока: обе ветки резолва — по provider_session_id и по
-// имени файла — живут в SQL, и подделанный run их не проверяет.
+// Настоящая sqlite вместо мока: резолв, фильтр заглушек и FTS живут в SQL,
+// и подделанный run их не проверяет.
 const SCHEMA = `
-create table projects (id text primary key, name text, root_path text not null);
-create table transcripts (
-  id text primary key, project_id text not null, file_path text not null,
-  provider text not null, provider_session_id text, file_size integer,
-  last_error text, updated_at integer not null);
-create table transcript_entries (
-  id text primary key, transcript_id text not null, project_id text not null,
-  kind text not null, timestamp integer not null, content text not null,
-  cwd text, git_branch text, is_sidechain integer not null default 0,
-  display_in_timeline integer not null default 1);
-create virtual table transcript_entries_fts using fts5(content, entry_id unindexed);
+create table conv (id integer primary key, agent text, session_id text,
+  source_path text, workspace text, title text, started_at integer, ended_at integer);
+create index conv_session on conv(session_id);
+create table msg (id integer primary key, conv_id integer, idx integer,
+  role text, created_at integer, len integer, is_tool integer not null default 0);
+create index msg_conv on msg(conv_id, is_tool, created_at desc, id desc);
+create virtual table msg_fts using fts5(content, tokenize='unicode61 remove_diacritics 2');
 
-insert into projects values ('p1','GolandProjects','/g');
-insert into transcripts values
-  ('T-OK','p1','/g/${INDEXED}.jsonl','claude.code','${INDEXED}',100,null,10),
-  ('T-CLI','p1','/g/${CLI_INGESTED}.jsonl','claude.code',null,200,null,20),
-  ('T-BROKEN','p1','/g/deadbeef.jsonl','claude.code','broken-1',7149096,'Invalid transcript format',30);
-insert into transcript_entries values
-  ('e1','T-OK','p1','user',1788164300,'подними River на dev','/g/wt','main',0,1),
-  ('e2','T-OK','p1','assistant',1788164338,'влит bonuses!874','/g/wt','main',0,1),
-  ('e3','T-OK','p1','assistant',1788164400,'скрытая',null,null,0,0),
-  ('e4','T-CLI','p1','user',1788164500,'кэш config-service','/g/cfg','stage',0,1);
-insert into transcript_entries_fts (rowid, content, entry_id)
-  select rowid, content, id from transcript_entries;
+insert into conv values
+  (1,'claude_code','${CC}','/p/${CC}.jsonl','/g','Работа',1000,2000),
+  (2,'codex','${CODEX}','/c/rollout-2026-09-05T10-00-00-${CODEX}.jsonl','/g/wt','Codex',1000,2000);
+
+insert into msg (id,conv_id,idx,role,created_at,len,is_tool) values
+  (1,1,0,'user',1788164300000,20,0),
+  (2,1,1,'assistant',1788164338000,16,0),
+  (3,1,2,'assistant',1788164400000,18,1),
+  (4,2,0,'user',1788164500000,18,0);
+insert into msg_fts (rowid,content) values
+  (1,'подними River на dev'),
+  (2,'влит bonuses!874'),
+  (3,'[Tool: ToolSearch]'),
+  (4,'кэшбек config-service');
 `;
 
 before(() => {
   dir = mkdtempSync(join(tmpdir(), 'claudex-'));
-  db = join(dir, 'contextify.db');
+  db = join(dir, 'index.db');
   const r = run('sqlite3', [db, SCHEMA]);
   assert.equal(r.ok, true, r.stderr);
 });
 
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-test('сессия с provider_session_id резолвится точным ключом', () => {
-  const got = readDigest(run, db, INDEXED, { limit: 8, chars: 400 });
-  assert.equal(got.ok, true);
-  assert.equal(got.transcriptId, 'T-OK');
-  assert.equal(got.entryCount, 3);
-});
-
-test('entry_count считает всю сессию, entries — только видимое в таймлайне', () => {
-  const got = readDigest(run, db, INDEXED, { limit: 8, chars: 400 });
-  assert.equal(got.entryCount, 3);
-  assert.equal(got.entries.length, 2);
-});
-
-test('сессия после contextify ingest резолвится по имени файла', () => {
-  const got = readDigest(run, db, CLI_INGESTED, { limit: 8, chars: 400 });
+test('сессия Claude Code резолвится по session_id из herdr', () => {
+  const got = readDigest(run, db, CC, { limit: 8, chars: 400 });
   assert.equal(got.ok, true, got.reason);
-  assert.equal(got.transcriptId, 'T-CLI');
-  assert.equal(got.entries[0].content, 'кэш config-service');
+  assert.equal(got.transcriptId, 1);
+  assert.equal(got.agent, 'claude_code');
 });
 
-test('записи приходят свежими вперёд, скрытые из таймлайна не попадают', () => {
-  const got = readDigest(run, db, INDEXED, { limit: 8, chars: 400 });
-  assert.deepEqual(got.entries.map((e) => e.id), ['e2', 'e1']);
+test('сессия Codex резолвится по хвосту имени rollout-файла', () => {
+  const got = readDigest(run, db, CODEX, { limit: 8, chars: 400 });
+  assert.equal(got.ok, true, got.reason);
+  assert.equal(got.agent, 'codex');
 });
 
-test('limit режет историю', () => {
-  assert.equal(readDigest(run, db, INDEXED, { limit: 1, chars: 400 }).entries.length, 1);
+test('цель принимается и как id разговора', () => {
+  assert.equal(readDigest(run, db, '2', {}).transcriptId, 2);
+});
+
+test('заглушки инструментов не попадают ни в ленту, ни в счётчик', () => {
+  const got = readDigest(run, db, CC, { limit: 8, chars: 400 });
+  assert.equal(got.entryCount, 2, 'третья запись — [Tool: …], в разговоре её нет');
+  assert.deepEqual(got.entries.map((e) => e.id), [2, 1]);
+});
+
+test('записи приходят свежими вперёд, время в секундах', () => {
+  const got = readDigest(run, db, CC, { limit: 8, chars: 400 });
+  assert.equal(got.entries[0].timestamp, 1788164338, 'миллисекунды cass переводятся в секунды');
+});
+
+// Намеренное расхождение: лента и счётчик считают разговор, а «последняя
+// активность» — любую запись. Панель, которая последний час гоняла инструменты,
+//не должна выглядеть простаивающей.
+test('последняя активность учитывает и вызовы инструментов', () => {
+  const got = readDigest(run, db, CC, { limit: 8, chars: 400 });
+  assert.equal(got.lastTs, 1788164400);
+  assert.equal(got.entryCount, 2);
+});
+
+test('роль agent приводится к assistant', () => {
+  assert.equal(readDigest(run, db, CC, {}).entries[0].kind, 'assistant');
+});
+
+test('limit режет ленту', () => {
+  assert.equal(readDigest(run, db, CC, { limit: 1, chars: 400 }).entries.length, 1);
 });
 
 test('несуществующая сессия не выдаётся за пустую', () => {
   const got = readDigest(run, db, '00000000-0000-0000-0000-000000000000', {});
   assert.equal(got.ok, false);
-  assert.match(got.reason, /не проиндексирован/);
+  assert.match(got.reason, /нет в индексе/);
 });
 
-test('сломанный транскрипт объясняет причину и отдаёт свой id', () => {
-  const got = readDigest(run, db, 'broken-1', {});
-  assert.equal(got.ok, false);
-  assert.equal(got.transcriptId, 'T-BROKEN');
-  assert.match(got.reason, /Invalid transcript format/);
-});
-
-test('readMany резолвит оба ключа за один вызов', () => {
-  const got = readMany(run, db, [INDEXED, CLI_INGESTED, 'нет-такой'], { limit: 2, chars: 400 });
-  assert.equal(got.get(INDEXED).transcriptId, 'T-OK');
-  assert.equal(got.get(CLI_INGESTED).transcriptId, 'T-CLI');
+test('readMany отвечает за каждую запрошенную сессию', () => {
+  const got = readMany(run, db, [CC, CODEX, 'нет-такой'], { limit: 2, chars: 400 });
+  assert.equal(got.get(CC).transcriptId, 1);
+  assert.equal(got.get(CODEX).transcriptId, 2);
   assert.equal(got.get('нет-такой').ok, false);
 });
 
-test('find находит по всем транскриптам и приносит ветку с cwd', () => {
-  const got = searchEntries(run, db, ftsQuery('config-service'), { limit: 5 });
-  assert.equal(got.ok, true);
-  assert.equal(got.results.length, 1);
-  assert.equal(got.results[0].branch, 'stage');
-  assert.equal(got.results[0].transcript_id, 'T-CLI');
+test('readMany не зовёт sqlite, когда валидных целей нет', () => {
+  const got = readMany(() => {
+    throw new Error('sqlite не должен вызываться');
+  }, db, ["плохой'"]);
+  assert.equal(got.get("плохой'").ok, false);
 });
 
-test('search внутри одной сессии не выходит за её пределы', () => {
-  const got = searchEntries(run, db, ftsQuery('config-service'), { transcriptId: 'T-OK', limit: 5 });
+test('поиск находит кириллицу — то, чего не умеет лексический индекс cass', () => {
+  const got = searchEntries(run, db, ftsQuery('кэшбек'), { limit: 5 });
+  assert.equal(got.ok, true);
+  assert.equal(got.results.length, 1);
+  assert.equal(got.results[0].agent, 'codex');
+  assert.equal(got.results[0].session_id, CODEX);
+});
+
+test('поиск с префиксом и объединением слов', () => {
+  assert.equal(searchEntries(run, db, ftsQuery('River dev'), { limit: 5 }).results.length, 1);
+  assert.equal(searchEntries(run, db, ftsQuery('кэшб*'), { limit: 5 }).results.length, 1);
+});
+
+test('поиск по одной сессии не выходит за её пределы', () => {
+  const got = searchEntries(run, db, ftsQuery('кэшбек'), { convId: 1, limit: 5 });
   assert.deepEqual(got.results, []);
 });
 
-test('запрос с кавычкой не ломает SQL и ничего не находит', () => {
+test('limit в поиске соблюдается', () => {
+  const match = ftsQuery('River OR кэшбек', { raw: true });
+  assert.equal(searchEntries(run, db, match, { limit: 5 }).results.length, 2);
+  assert.equal(searchEntries(run, db, match, { limit: 1 }).results.length, 1);
+});
+
+test('запрос с кавычкой не ломает SQL', () => {
   const got = searchEntries(run, db, ftsQuery("x' or '1'='1"), { limit: 5 });
   assert.equal(got.ok, true);
   assert.deepEqual(got.results, []);
 });
 
-test('entry отдаёт запись целиком, без обрезки на 2 КБ', () => {
-  const got = readEntry(run, db, 'e2');
+test('entry отдаёт запись целиком', () => {
+  const got = readEntry(run, db, '2');
   assert.equal(got.ok, true, got.reason);
   assert.equal(got.entry.text, 'влит bonuses!874');
-  assert.equal(got.entry.len, got.entry.text.length);
-  assert.equal(got.entry.session_id, INDEXED);
-  assert.equal(got.entry.project, 'GolandProjects');
+  assert.equal(got.entry.agent, 'claude_code');
 });
 
-test('entry по несуществующему id объясняет, а не отдаёт пустоту', () => {
-  const got = readEntry(run, db, 'e404');
+test('entry по несуществующему id объясняет, а не молчит', () => {
+  const got = readEntry(run, db, '9999');
   assert.equal(got.ok, false);
-  assert.match(got.reason, /нет в базе/);
+  assert.match(got.reason, /нет в индексе/);
 });
 
 test('entry с кавычкой в id отсекается до обращения к базе', () => {
   const got = readEntry(() => {
     throw new Error('sqlite не должен вызываться');
-  }, db, "e1' or '1'='1");
+  }, db, "1' or '1'='1");
   assert.equal(got.reason, 'некорректный entry_id');
 });
 
-test('context отдаёт окно вокруг записи и помечает якорь', () => {
-  const got = readContext(run, db, 'e1', { before: 5, after: 5 });
+test('context отдаёт окно и помечает якорь', () => {
+  const got = readContext(run, db, '1', { before: 5, after: 5 });
   assert.equal(got.ok, true, got.reason);
-  const ids = got.context.entries.map((e) => e.id);
-  assert.deepEqual(ids, ['e1', 'e2'], 'скрытая из таймлайна e3 в окно не входит');
-  assert.equal(got.context.entries.find((e) => e.id === 'e1').anchor, 1);
+  assert.deepEqual(got.context.entries.map((e) => e.id), [1, 2, 3]);
+  assert.equal(got.context.entries.find((e) => e.id === 1).anchor, 1);
 });
 
 test('context держит границы окна', () => {
-  const got = readContext(run, db, 'e2', { before: 0, after: 0 });
-  assert.deepEqual(got.context.entries.map((e) => e.id), ['e2']);
+  const got = readContext(run, db, '2', { before: 0, after: 0 });
+  assert.deepEqual(got.context.entries.map((e) => e.id), [2]);
 });
 
-test('запись адресуется по transcript_id, когда provider_session_id пуст', () => {
-  const got = readDigest(run, db, 'T-CLI', { limit: 8, chars: 400 });
-  assert.equal(got.ok, true, got.reason);
-  assert.equal(got.transcriptId, 'T-CLI');
-});
-
-test('нечитаемый файл на диске не мешает объяснить причину', () => {
-  const got = readDigest(run, db, 'broken-1', {});
+test('без собранного индекса объясняется, что делать', () => {
+  const got = readDigest(run, join(dir, 'нет.db'), CC, {});
   assert.equal(got.ok, false);
-  assert.equal(typeof got.unindexedMb, 'number');
-  assert.match(got.reason, /МБ на диске/);
+  assert.match(got.reason, /claudex index/);
 });
