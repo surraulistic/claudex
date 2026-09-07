@@ -28,13 +28,23 @@ const HEALTHY = {
 test('mapAgent вытаскивает session_id из вложенного agent_session', () => {
   assert.deepEqual(mapAgent(AGENT), {
     alias: 'river',
+    label: null,
+    kind: null,
     pane_id: 'wE:pB',
+    tab_id: null,
     session_id: '846a1bcf-bad5-4ffa-8366-9c5e31205ac7',
     status: 'working',
     title: 'Centrifugo vs riverqueue',
     cwd: '/Users/surraulistic/GolandProjects',
     focused: false,
   });
+});
+
+test('метка вкладки подставляется как имя панели', () => {
+  const labels = new Map([['wE:t11', 'river-impl']]);
+  const got = mapAgent({ ...AGENT, tab_id: 'wE:t11', agent: 'claude' }, labels);
+  assert.equal(got.label, 'river-impl');
+  assert.equal(got.kind, 'claude');
 });
 
 test('агент без имени даёт alias null', () => {

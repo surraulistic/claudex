@@ -41,14 +41,15 @@ claudex <target>          # full digest of one pane, with history entries
 
 ## Targets
 
-A target is a Herdr alias, a `pane_id`, a `session_id`, a `transcript_id`, a
-fragment of the pane title, or a cwd. **An alias is not required** — every pane
+A target is the **tab label** (the name shown in Herdr — `install`, `slog`), a
+Herdr alias, a `pane_id`, a `session_id`, a `transcript_id`, a fragment of the
+title, or a cwd. Prefer the label: it is what the pane is called out loud. **An alias is not required** — every pane
 in `sessions` and every group in `find` carries a `target` field that is
 guaranteed to work:
 
 ```bash
+claudex install           # by tab label — the usual way
 claudex wE:p13            # by pane
-claudex "кеш инвалидация" # by title fragment
 claudex 10ad0062-f332-…   # by session id, straight from find
 ```
 
@@ -66,11 +67,18 @@ the fragment was ambiguous — narrow it, do not guess.
 
 Compact JSON (`--pretty` for humans) in four parts:
 
-- `live` — pane, session id, status, title, cwd. From Herdr.
+- `live` — label, agent kind (`claude`, `codex`, …), pane, session id, status,
+  context fill, usage limits, title, cwd. From Herdr.
 - `history` — conversation id plus recent `entries`, newest first. From the index.
-- `tail` — cleaned terminal output. Read at **any** status: `--source recent`
-  returns scrollback, not the input box, so a finished pane shows its last
-  answer. `null` means the read failed or the pane is blank.
+- `tail` — cleaned terminal output, read at **any** status. Which source it
+  comes from depends on the pane: a `working` pane returns nothing from
+  `--source recent`, so the screen is read instead; an idle one returns several
+  times more scrollback from `recent`. `claudex` picks per pane — do not call
+  `herdr agent read` yourself with a fixed source.
+- `live.context_pct` and `live.limits` — how full the pane's context is and how
+  close its usage windows are. A pane near 100% context is about to compact:
+  let it finish, do not hand it a new task. A `5h` or `7d` limit near 100% means
+  it is about to stop entirely.
 - `signals` — extractions, not conclusions: `mr`, `tickets`, `repo`,
   `last_user_prompt`, `current_tool_call`.
 
@@ -136,7 +144,22 @@ running tools is active, not idle.
 ## Driving a session
 
 `claudex` is read-only by design. Live control is Herdr, addressed by the same
-target:
+target.
+
+**Never prompt a pane whose status is not `idle`.** Herdr refuses a submission
+only when the pane is `blocked`; a `working` pane silently queues the prompt and
+the two tasks interleave. Check `status` first, every time.
+
+For work that is independent of what a pane is already doing, start a **fresh
+agent** instead of loading it onto a busy one:
+
+```bash
+herdr tab create --cwd <path> --label <имя>
+herdr agent start <имя> --kind claude --pane <pane-id>
+```
+
+`agent start` takes the name, so the new pane is addressable immediately.
+
 
 ```bash
 herdr agent prompt river "продолжай Payment, Prometheus не трогай" --wait --until idle
