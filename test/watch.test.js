@@ -86,3 +86,9 @@ test('несуществующая цель — ошибка, а не пусто
   assert.equal(got.ok, false);
   assert.equal(got.error.code, 'agent_not_found');
 });
+
+test('имя панели не теряется после ожидания', () => {
+  const { run } = harness({ status: 'working' });
+  assert.equal(buildWatch(run, '/db', 'install').watch.target, 'install',
+    'herdr agent wait не знает про вкладки, метка должна пережить ожидание');
+});
