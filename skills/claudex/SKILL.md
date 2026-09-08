@@ -76,7 +76,9 @@ Compact JSON (`--pretty` for humans) in four parts:
   times more scrollback from `recent`. `claudex` picks per pane — do not call
   `herdr agent read` yourself with a fixed source.
 - `live.context_pct` and `live.limits` — how full the pane's context is and how
-  close its usage windows are. A pane near 100% context is about to compact:
+  close its usage windows are. `null` means the figure is not on screen: a narrow
+  pane truncates its status line, and a non-Claude agent has none. Absent is not
+  zero — do not treat a `null` pane as fresh. A pane near 100% context is about to compact:
   let it finish, do not hand it a new task. A `5h` or `7d` limit near 100% means
   it is about to stop entirely.
 - `signals` — extractions, not conclusions: `mr`, `tickets`, `repo`,
