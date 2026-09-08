@@ -5,6 +5,7 @@ import { run, runAll } from '../lib/exec.js';
 import { buildDigest, DEFAULTS } from '../lib/digest.js';
 import { buildBrief, BRIEF_DEFAULTS } from '../lib/brief.js';
 import { buildWatch, WATCH_DEFAULTS } from '../lib/watch.js';
+import { buildDelegate, DELEGATE_DEFAULTS } from '../lib/delegate.js';
 import { buildPanes } from '../lib/sessions.js';
 import { resolveTarget } from '../lib/target.js';
 import { readDigest, searchEntries, readEntry, readContext, DEFAULT_INDEX } from '../lib/store.js';
@@ -24,6 +25,7 @@ const USAGE = `claudex — сводка по сессиям Claude Code (cass + 
   claudex context <id>                   разговор вокруг записи
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex watch <target>                 дождаться, пока панель освободится, и выйти
+  claudex delegate <target> "<задача>"   поручить и дождаться, одной командой
 
 Target — алиас Herdr, pane_id, session_id, transcript_id, кусок заголовка или
 cwd. Алиас не обязателен: безымянная панель адресуется своим pane_id из вывода
@@ -37,7 +39,9 @@ sessions, а закрытая сессия — ключом target из выво
   --tail-lines N     строк живого хвоста (${DEFAULTS.tailLines}, brief ${BRIEF_DEFAULTS.tailLines})
   --cwd <path>       фильтр по рабочему каталогу
   --days N           find: не старше N дней
-  --timeout N        watch: секунд ожидания (${Math.round(WATCH_DEFAULTS.timeoutMs / 1000)})
+  --timeout N        watch/delegate: секунд ожидания (${Math.round(WATCH_DEFAULTS.timeoutMs / 1000)})
+  --arm N            секунд на то, чтобы панель начала работу (${Math.round(WATCH_DEFAULTS.armMs / 1000)})
+  --no-wait          delegate: отправить и выйти, не дожидаясь
   --before N         context: записей до якоря (10)
   --after N          context: записей после якоря (20)
   --raw              запрос уходит в FTS5 как есть, без экранирования
@@ -47,7 +51,7 @@ watch блокируется, пока панель занята, и завер�
 Запускать фоном: харнесс разбудит вас на выходе процесса.
 
 Коды выхода: 0 успех · 2 цель не найдена · 3 Herdr недоступен · 4 ошибка вызова
-              5 watch не дождался за отведённое время`;
+              5 не дождался за отведённое время · 6 панель занята, промпт не отправлен`;
 
 function parseArgs(argv) {
   const flags = {};
@@ -110,12 +114,32 @@ if (command === 'index') {
   process.exit(0);
 }
 
+if (command === 'delegate') {
+  const [target, ...words] = rest;
+  const task = words.join(' ');
+  if (!target || !task) fail('Нужны цель и задача: claudex delegate <target> "<задача>"', 4);
+
+  const built = buildDelegate(run, dbPath, target, task, {
+    noWait: flags['no-wait'] === true,
+    armMs: num(flags.arm, DELEGATE_DEFAULTS.armMs / 1000) * 1000,
+    timeoutMs: num(flags.timeout, DELEGATE_DEFAULTS.timeoutMs / 1000) * 1000,
+    limit: num(flags.limit, DEFAULTS.limit),
+    chars: num(flags.chars, DEFAULTS.chars),
+    tailLines: num(flags['tail-lines'], DEFAULTS.tailLines),
+  });
+  if (!built.ok) fail(built.error.message, built.error.code === 'target_busy' ? 6 : exitCodeFor(built.error));
+
+  emit(built.delegate, pretty);
+  process.exit(built.timedOut ? 5 : 0);
+}
+
 if (command === 'watch') {
   const [target] = rest;
   if (!target) fail('Нужна цель: claudex watch <target>', 4);
 
   const built = buildWatch(run, dbPath, target, {
     timeoutMs: num(flags.timeout, WATCH_DEFAULTS.timeoutMs / 1000) * 1000,
+    armMs: flags.arm ? num(flags.arm, 0) * 1000 : 0,
     limit: num(flags.limit, DEFAULTS.limit),
     chars: num(flags.chars, DEFAULTS.chars),
     tailLines: num(flags['tail-lines'], DEFAULTS.tailLines),

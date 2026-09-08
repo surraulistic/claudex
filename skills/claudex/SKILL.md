@@ -158,11 +158,27 @@ your harness wakes you on that exit, with the result already in hand.
 Exit `5` means it gave up waiting; `final_status` is then `unknown`, not `idle`.
 Do not read that as "the pane finished".
 
-This is how to delegate without holding a turn open:
+## Delegating
 
 ```bash
-herdr agent prompt install "<task>"    # only when status is idle
-claudex watch install &                # background; you are woken when it ends
+claudex delegate install "<task>"          # send, wait, return the digest
+claudex delegate install "<task>" --no-wait
+```
+
+It refuses with exit `6` when the pane is not `idle`, before sending anything —
+Herdr would have queued the prompt and interleaved the two tasks. Take the
+refusal seriously: wait, or start a fresh agent.
+
+Before waiting for the pane to finish, it waits for the pane to **start**
+(`--arm`, 120s by default). Without that step the wait returns at once on the
+pane's *previous* turn and reports work that was never done; `armed: false` in
+the result means the pane never picked the task up.
+
+Run it in the background and your harness wakes you on exit, with the digest
+already in the output — no second call to read the result:
+
+```bash
+claudex delegate install "<task>" &
 ```
 
 ## Driving a session
