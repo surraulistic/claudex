@@ -141,6 +141,28 @@ session are `[Tool: …]` stubs; they are kept searchable but excluded from the
 timeline. `last_activity`, by contrast, reflects any record — a pane busy
 running tools is active, not idle.
 
+## Waiting for a pane without burning a turn
+
+```bash
+claudex watch install            # blocks until the pane leaves `working`, then exits
+claudex watch install --timeout 600
+```
+
+Run it **in the background**. It holds no model, spends no tokens, and does not
+poll: it blocks inside Herdr, which already tracks pane state. When the pane
+goes idle, done or blocked, the process prints the pane's digest and exits — and
+your harness wakes you on that exit, with the result already in hand.
+
+Exit `5` means it gave up waiting; `final_status` is then `unknown`, not `idle`.
+Do not read that as "the pane finished".
+
+This is how to delegate without holding a turn open:
+
+```bash
+herdr agent prompt install "<task>"    # only when status is idle
+claudex watch install &                # background; you are woken when it ends
+```
+
 ## Driving a session
 
 `claudex` is read-only by design. Live control is Herdr, addressed by the same
