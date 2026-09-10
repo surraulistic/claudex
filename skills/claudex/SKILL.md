@@ -1,6 +1,6 @@
 ---
 name: claudex
-description: Read what the other Claude Code sessions on this machine are doing and what they already decided, and hand work to one of them. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work — and whenever you are about to give a task to another session and need to know when it finished: `claudex delegate` sends the task and waits for that task, where a bare `herdr agent prompt` leaves the work untracked. Also reads a single entry or the conversation around it in full.
+description: Read what the other Claude Code sessions on this machine are doing and what they already decided, and hand work to one of them. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work — and whenever you are about to give a task to another session and need to know when it finished — `claudex delegate` sends the task and waits for that task, where a bare `herdr agent prompt` leaves the work untracked. Also reads a single entry or the conversation around it in full.
 metadata:
   short-description: State and history of the Claude Code sessions on this machine
 ---
