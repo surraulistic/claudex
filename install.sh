@@ -14,6 +14,9 @@ echo "bin   → ${bin_dir}/claudex"
 ln -sfn "${root}/skills/claudex" "${skill_dir}/claudex"
 echo "skill → ${skill_dir}/claudex"
 
+chmod +x "${root}/tools/"*.zsh 2>/dev/null || true
+echo "tools → ${root}/tools (delegate-and-monitor.zsh, herdr-guard.zsh)"
+
 for tool in herdr cass sqlite3 node; do
   command -v "$tool" >/dev/null || echo "внимание: ${tool} не найден в PATH"
 done

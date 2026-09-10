@@ -179,6 +179,24 @@ herdr agent wait river --until idle --timeout 600000
 `0` успех, в том числе с деградировавшей историей · `2` цель не найдена или
 неоднозначна · `3` Herdr недоступен · `4` ошибка вызова.
 
+## Скрипты
+
+```
+tools/delegate-and-monitor.zsh   единый путь: отправить, дождаться, разбудить Codex
+tools/herdr-guard.zsh            необязательный перехват прямых herdr agent prompt
+```
+
+`delegate-and-monitor.zsh` — обёртка над `claudex delegate` с логом и расшифровкой
+кода выхода. Постоянного процесса не заводит: наблюдатель живёт одну задачу.
+
+```bash
+CODEX_TARGET="codex install" tools/delegate-and-monitor.zsh install "<задача>"
+```
+
+`herdr-guard.zsh` по умолчанию **не установлен**. Он отклоняет прямой
+`herdr agent prompt` — тот отправляет задачу, но никто не ждёт её завершения.
+Включение и обход описаны в шапке файла.
+
 ## Тесты
 
 ```bash
