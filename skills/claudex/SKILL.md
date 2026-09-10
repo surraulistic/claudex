@@ -160,6 +160,11 @@ Do not read that as "the pane finished".
 
 ## Delegating
 
+**Never send work with `herdr agent prompt` directly.** It delivers the prompt
+and stops there: nothing waits for the pane, nothing wakes you, nothing is
+logged. Correlation cannot be added afterwards — the watch has to begin with the
+send, and a bare prompt does not do that.
+
 ```bash
 claudex delegate install "<task>"          # send, wait, return the digest
 claudex delegate install "<task>" --no-wait
@@ -189,6 +194,18 @@ already in the output — no second call to read the result:
 ```bash
 claudex delegate install "<task>" &
 ```
+
+`correlated: true` means the watcher saw the pane *enter* `working` after the
+send, so the completion is provably this task's. Attaching to a pane that was
+already busy gives `correlated: false` — the pane finished *something*, and you
+cannot tell what.
+
+`sessions` and `brief` carry `watched` per pane. A pane that is `working` with
+`watched: false` is running work nobody is waiting on — usually the trace of a
+direct `herdr agent prompt`. Treat it as a warning, not as progress.
+
+There is no long-running supervisor: a watcher lives exactly one task and exits.
+Nothing here keeps running on its own, and nothing restarts it.
 
 ## Driving a session
 

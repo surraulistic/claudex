@@ -198,3 +198,42 @@ test('итог несёт дайджест, а не только статус', 
   const d = buildDelegate(run, '/db', 'install', 'з', opts).delegate.digest;
   assert.deepEqual(d.signals.mr, ['bonuses!874']);
 });
+
+// Прямой herdr agent prompt не оставляет наблюдателя, и узнать об этом можно
+// только там, где ведущий и так смотрит.
+test('панель под наблюдением помечена в sessions', async () => {
+  const { buildPanes } = await import('../lib/sessions.js');
+  const { acquire } = await import('../lib/lock.js');
+  const dir = lockDir();
+  const agent = { name: null, tab_id: 'wE:t13', pane_id: 'wE:p13', agent: 'claude',
+    agent_session: { value: 's1' }, agent_status: 'working', terminal_title_stripped: 'c', cwd: '/g' };
+  const run = (cmd, args) => {
+    if (cmd === 'herdr' && args[0] === 'tab') {
+      return { ok: true, code: 0, stdout: JSON.stringify({ result: { tabs: [{ tab_id: 'wE:t13', label: 'install' }] } }), stderr: '' };
+    }
+    if (cmd === 'herdr' && args[1] === 'read') return { ok: true, code: 0, stdout: '', stderr: '' };
+    if (cmd === 'herdr') return { ok: true, code: 0, stdout: JSON.stringify({ result: { agents: [agent] } }), stderr: '' };
+    return { ok: true, code: 0, stdout: '[]', stderr: '' };
+  };
+  const before = buildPanes(run, '/db', { lock: dir });
+  assert.equal(before.panes[0].watched, false, 'прямой prompt оставил бы панель без наблюдения');
+
+  const held = acquire('install', { ...dir, pid: process.pid });
+  try {
+    const after = buildPanes(run, '/db', { lock: dir });
+    assert.equal(after.panes[0].watched, true);
+  } finally {
+    held.release();
+  }
+});
+
+test('delegate доказывает привязку к задаче, потому что видел старт панели', () => {
+  const { run, opts } = harness();
+  assert.equal(buildDelegate(run, '/db', 'install', 'з', opts).delegate.correlated, true);
+});
+
+test('присоединение к уже идущей работе привязку не доказывает', () => {
+  const { run, opts } = harness({ status: 'idle', waits: ['idle'] });
+  const got = buildWatch(run, '/db', 'wE:p13', { ...opts, armMs: 0, timeoutMs: 500 });
+  assert.equal(got.watch.correlated, false, 'какая именно задача идёт — неизвестно, и врать нельзя');
+});
