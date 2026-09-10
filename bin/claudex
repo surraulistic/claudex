@@ -6,6 +6,7 @@ import { buildDigest, DEFAULTS } from '../lib/digest.js';
 import { buildBrief, BRIEF_DEFAULTS } from '../lib/brief.js';
 import { buildWatch, WATCH_DEFAULTS } from '../lib/watch.js';
 import { buildDelegate, DELEGATE_DEFAULTS } from '../lib/delegate.js';
+import { detachDelegate } from '../lib/detach.js';
 import { buildPanes } from '../lib/sessions.js';
 import { resolveTarget } from '../lib/target.js';
 import { readDigest, searchEntries, readEntry, readContext, DEFAULT_INDEX } from '../lib/store.js';
@@ -42,6 +43,8 @@ sessions, а закрытая сессия — ключом target из выво
   --timeout N        watch/delegate: секунд ожидания (${Math.round(WATCH_DEFAULTS.timeoutMs / 1000)})
   --arm N            секунд на то, чтобы панель начала работу (${Math.round(WATCH_DEFAULTS.armMs / 1000)})
   --no-wait          delegate: отправить и выйти, не дожидаясь
+  --detach           delegate: отдать наблюдение отдельному процессу и вернуть
+                     управление сразу; ход вызывающего не занят
   --notify <target>  delegate: разбудить эту панель по завершении (с ретраями)
   --before N         context: записей до якоря (10)
   --after N          context: записей после якоря (20)
@@ -130,6 +133,19 @@ if (command === 'delegate') {
   const [target, ...words] = rest;
   const task = words.join(' ');
   if (!target || !task) fail('Нужны цель и задача: claudex delegate <target> "<задача>"', 4);
+
+  // Отрыв делается один раз: дочерний процесс запускается с тем же argv, но
+  // уже без --detach, иначе он породил бы следующего.
+  if (flags.detach === true && !process.env.CLAUDEX_DETACHED) {
+    if (!flags.notify) {
+      fail('--detach без --notify оставит результат некому прочитать: ' +
+        'добавьте --notify <панель Codex>', 4);
+    }
+    const child = detachDelegate(process.argv.slice(2).filter((a) => a !== '--detach'));
+    emit({ target, detached: true, pid: child.pid, log: child.log,
+      note: 'наблюдение идёт отдельным процессом; результат придёт уведомлением' }, pretty);
+    process.exit(0);
+  }
 
   const built = buildDelegate(run, dbPath, target, task, {
     noWait: flags['no-wait'] === true,

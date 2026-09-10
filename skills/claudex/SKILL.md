@@ -188,11 +188,25 @@ Before waiting for the pane to finish, it waits for the pane to **start**
 pane's *previous* turn and reports work that was never done; `armed: false` in
 the result means the pane never picked the task up.
 
-Run it in the background and your harness wakes you on exit, with the digest
-already in the output — no second call to read the result:
+**Use `--detach` unless you deliberately want to block.** Without it the call
+holds your turn for as long as the pane works, and nobody can talk to you
+meanwhile. A trailing `&` does **not** help: the child inherits stdout, the pipe
+stays open, and the shell waits for EOF anyway — measured, a 2-second background
+sleep still delayed the caller by 2021 ms.
 
 ```bash
-claudex delegate install "<task>" &
+claudex delegate install "<task>" --detach --notify "<your own pane>"
+```
+
+It returns in about a quarter of a second with the watcher's `pid` and a `log`
+path. The watcher runs in its own process group, outlives your turn, and sends
+you the result when the pane settles. `--detach` requires `--notify`: a detached
+watcher writes to its log, and without a notification nobody would ever read it.
+
+Blocking form, when you truly want to wait and nothing else is going on:
+
+```bash
+claudex delegate install "<task>"
 ```
 
 `correlated: true` means the watcher saw the pane *enter* `working` after the
