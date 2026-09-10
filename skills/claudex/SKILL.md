@@ -165,6 +165,15 @@ claudex delegate install "<task>"          # send, wait, return the digest
 claudex delegate install "<task>" --no-wait
 ```
 
+Outcomes are distinct on purpose, and the exit code carries them: `0` the pane
+finished, `5` it did not finish in time, `7` Herdr failed while waiting so the
+outcome is **unknown**, `8` the pane never picked the task up. Never read `7` as
+`5`: "we could not tell" is not "it did not finish".
+
+Add `--notify <target>` to wake another pane when the task ends; the result of
+that notification (attempts and failures) comes back in `notified` and is never
+silenced.
+
 It refuses with exit `6` when the pane is not `idle`, before sending anything —
 Herdr would have queued the prompt and interleaved the two tasks. Take the
 refusal seriously: wait, or start a fresh agent.

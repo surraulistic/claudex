@@ -42,6 +42,7 @@ sessions, а закрытая сессия — ключом target из выво
   --timeout N        watch/delegate: секунд ожидания (${Math.round(WATCH_DEFAULTS.timeoutMs / 1000)})
   --arm N            секунд на то, чтобы панель начала работу (${Math.round(WATCH_DEFAULTS.armMs / 1000)})
   --no-wait          delegate: отправить и выйти, не дожидаясь
+  --notify <target>  delegate: разбудить эту панель по завершении (с ретраями)
   --before N         context: записей до якоря (10)
   --after N          context: записей после якоря (20)
   --raw              запрос уходит в FTS5 как есть, без экранирования
@@ -51,7 +52,9 @@ watch блокируется, пока панель занята, и завер�
 Запускать фоном: харнесс разбудит вас на выходе процесса.
 
 Коды выхода: 0 успех · 2 цель не найдена · 3 Herdr недоступен · 4 ошибка вызова
-              5 не дождался за отведённое время · 6 панель занята, промпт не отправлен`;
+              5 не дождался (timeout) · 6 панель занята, промпт не отправлен
+              7 сбой herdr при ожидании — исход неизвестен
+              8 панель не начала работу за отведённое время`;
 
 function parseArgs(argv) {
   const flags = {};
@@ -90,6 +93,15 @@ function fail(message, code) {
   process.exit(code);
 }
 
+// Исход должен читаться из кода выхода без разбора JSON: фоновый запуск часто
+// смотрят именно так.
+function outcomeCode(outcome) {
+  if (outcome === 'timeout') return 5;
+  if (outcome === 'herdr_error' || outcome === 'gone') return 7;
+  if (outcome === 'never_started') return 8;
+  return 0;
+}
+
 function exitCodeFor(error) {
   return error?.code === 'agent_not_found' || error?.code === 'ambiguous_target' ? 2 : 3;
 }
@@ -126,11 +138,17 @@ if (command === 'delegate') {
     limit: num(flags.limit, DEFAULTS.limit),
     chars: num(flags.chars, DEFAULTS.chars),
     tailLines: num(flags['tail-lines'], DEFAULTS.tailLines),
+    notifyTarget: typeof flags.notify === 'string' ? flags.notify : null,
   });
-  if (!built.ok) fail(built.error.message, built.error.code === 'target_busy' ? 6 : exitCodeFor(built.error));
+  if (!built.ok) {
+    const code = built.error.code === 'target_busy' ? 6
+      : built.error.code === 'already_watched' ? 6
+        : exitCodeFor(built.error);
+    fail(built.error.message, code);
+  }
 
   emit(built.delegate, pretty);
-  process.exit(built.timedOut ? 5 : 0);
+  process.exit(outcomeCode(built.outcome));
 }
 
 if (command === 'watch') {
@@ -147,7 +165,7 @@ if (command === 'watch') {
   if (!built.ok) fail(built.error.message, exitCodeFor(built.error));
 
   emit(built.watch, pretty);
-  process.exit(built.timedOut ? 5 : 0);
+  process.exit(outcomeCode(built.outcome));
 }
 
 if (command === 'sessions') {

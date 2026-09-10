@@ -59,8 +59,8 @@ test('итог включает дайджест панели, а не толь�
 
 test('не дождался — это отдельный исход, а не успех', () => {
   const { run } = harness({ waitFails: true });
-  const got = buildWatch(run, '/db', 'install');
-  assert.equal(got.timedOut, true);
+  const got = buildWatch(run, '/db', 'install', { sleep: () => {} });
+  assert.notEqual(got.outcome, 'settled');
   assert.equal(got.watch.final_status, 'unknown', 'состояние неизвестно, а не idle');
 });
 
