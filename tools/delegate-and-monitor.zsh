@@ -26,7 +26,6 @@ fi
 shift 2
 
 timeout_s="${DELEGATE_TIMEOUT_S:-7200}"
-arm_s="${DELEGATE_ARM_S:-120}"
 log="${DELEGATE_LOG:-/tmp/delegate-and-monitor.log}"
 
 if ! command -v claudex >/dev/null; then
@@ -34,7 +33,9 @@ if ! command -v claudex >/dev/null; then
   exit 69
 fi
 
-args=(delegate "$target" "$task" --timeout "$timeout_s" --arm "$arm_s" --pretty)
+# Ждать, пока панель возьмётся за дело, умеет сам herdr: отправка и ожидание
+# уходят одним вызовом, промежутка между ними нет.
+args=(delegate "$target" "$task" --timeout "$timeout_s" --pretty)
 [[ -n "${CODEX_TARGET:-}" ]] && args+=(--notify "$CODEX_TARGET")
 args+=("$@")
 
@@ -52,7 +53,6 @@ case "$rc" in
   5) reason="не дождались за ${timeout_s} с; задача могла продолжаться" ;;
   6) reason="панель занята или уже под наблюдением — промпт НЕ отправлен" ;;
   7) reason="сбой herdr при ожидании — исход неизвестен, проверьте панель вручную" ;;
-  8) reason="панель не начала работу за ${arm_s} с — промпт мог не дойти" ;;
   64) reason="неверные аргументы" ;;
   69) reason="claudex недоступен" ;;
   *) reason="неожиданный код" ;;
