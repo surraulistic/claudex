@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { listAgents, getAgent, readTail, mapAgent } from '../lib/herdr.js';
+import { listAgents, getAgent, readTail, mapAgent, CHEAP_LINES } from '../lib/herdr.js';
 import { readDigest, readMany, searchEntries } from '../lib/store.js';
 import { ftsQuery, lit, digestSql, searchSql } from '../lib/sql.js';
 
@@ -69,6 +69,19 @@ test('нечитаемый ответ herdr не роняет процесс', (
   const got = getAgent(okRun('не json'), 'river');
   assert.equal(got.ok, false);
   assert.equal(got.error.code, 'bad_json');
+});
+
+test('readTail не просит больше строк, чем помещается на экране', () => {
+  // Запрос сверх высоты панели уводит herdr в восстановление прокрутки:
+  // 44 строки на десяти панелях — 3 мс, 48 строк — 1092 мс.
+  const asked = [];
+  const run = (bin, args) => {
+    asked.push(Number(args[args.indexOf('--lines') + 1]));
+    return { ok: true, stdout: 'строка', stderr: '', code: 0 };
+  };
+  readTail(run, 'river', 200);
+  assert.ok(asked.length > 0, 'чтение вообще состоялось');
+  assert.ok(asked.every((n) => n <= CHEAP_LINES), `просили ${asked}, потолок ${CHEAP_LINES}`);
 });
 
 test('readTail сообщает об ошибке чтения', () => {
