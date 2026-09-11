@@ -1,6 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildWatch } from '../lib/watch.js';
+
+// Свой каталог локов: боевой общий с работающими делегациями, и живая задача
+// роняла бы прогон тестов.
+const lockDirs = [];
+function lockDir() {
+  const d = mkdtempSync(join(tmpdir(), 'claudex-watchlock-'));
+  lockDirs.push(d);
+  return { dir: d };
+}
+process.on('exit', () => lockDirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
 
 const HEALTHY = {
   transcript_id: 1, agent: 'claude', entry_count: 12, last_ts: 1788164338,
@@ -36,7 +49,7 @@ function harness({ status = 'working', afterWait = 'idle', waitFails = false } =
 
 test('на занятой панели наблюдатель ждёт и возвращает итог', () => {
   const { run, calls } = harness({ status: 'working' });
-  const got = buildWatch(run, '/db', 'install');
+  const got = buildWatch(run, '/db', 'install', { lock: lockDir() });
   assert.equal(got.ok, true);
   assert.equal(got.watch.waited, true);
   assert.equal(got.watch.final_status, 'idle');
@@ -45,33 +58,33 @@ test('на занятой панели наблюдатель ждёт и воз
 
 test('на свободной панели не ждёт вовсе', () => {
   const { run, calls } = harness({ status: 'idle' });
-  const got = buildWatch(run, '/db', 'install');
+  const got = buildWatch(run, '/db', 'install', { lock: lockDir() });
   assert.equal(got.watch.waited, false);
   assert.equal(calls.some((c) => c.includes('agent wait')), false, 'ждать нечего — сразу итог');
 });
 
 test('итог включает дайджест панели, а не только статус', () => {
   const { run } = harness();
-  const d = buildWatch(run, '/db', 'install').watch.digest;
+  const d = buildWatch(run, '/db', 'install', { lock: lockDir() }).watch.digest;
   assert.equal(d.history.entry_count, 12);
   assert.deepEqual(d.signals.mr, ['bonuses!874']);
 });
 
 test('не дождался — это отдельный исход, а не успех', () => {
   const { run } = harness({ waitFails: true });
-  const got = buildWatch(run, '/db', 'install', { sleep: () => {} });
+  const got = buildWatch(run, '/db', 'install', { sleep: () => {}, lock: lockDir() });
   assert.notEqual(got.outcome, 'settled');
   assert.equal(got.watch.final_status, 'unknown', 'состояние неизвестно, а не idle');
 });
 
 test('заблокированная панель — тоже конец ожидания', () => {
   const { run } = harness({ afterWait: 'blocked' });
-  assert.equal(buildWatch(run, '/db', 'install').watch.final_status, 'blocked');
+  assert.equal(buildWatch(run, '/db', 'install', { lock: lockDir() }).watch.final_status, 'blocked');
 });
 
 test('панель зовётся меткой вкладки', () => {
   const { run } = harness({ status: 'idle' });
-  assert.equal(buildWatch(run, '/db', 'install').watch.target, 'install');
+  assert.equal(buildWatch(run, '/db', 'install', { lock: lockDir() }).watch.target, 'install');
 });
 
 test('несуществующая цель — ошибка, а не пустое ожидание', () => {
@@ -82,13 +95,13 @@ test('несуществующая цель — ошибка, а не пусто
     }
     return { ok: true, code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: '' };
   };
-  const got = buildWatch(run, '/db', 'нетакой');
+  const got = buildWatch(run, '/db', 'нетакой', { lock: lockDir() });
   assert.equal(got.ok, false);
   assert.equal(got.error.code, 'agent_not_found');
 });
 
 test('имя панели не теряется после ожидания', () => {
   const { run } = harness({ status: 'working' });
-  assert.equal(buildWatch(run, '/db', 'install').watch.target, 'install',
+  assert.equal(buildWatch(run, '/db', 'install', { lock: lockDir() }).watch.target, 'install',
     'herdr agent wait не знает про вкладки, метка должна пережить ожидание');
 });
