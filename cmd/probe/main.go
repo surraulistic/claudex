@@ -46,7 +46,6 @@ func main() {
 	bench("agent.get (одна панель)", 9, func() error { _, e := c.Get(target); return e })
 	bench("agent.read visible 40", 9, func() error { _, e := c.Read(target, "visible", 40); return e })
 	bench("ping", 9, func() error { return c.Call("ping", nil, &out) })
-	bench("session.info", 9, func() error { return c.Call("session.info", nil, &out) })
 	bench("pane.list", 9, func() error { return c.Call("pane.list", nil, &out) })
 	bench("events.subscribe+close", 9, func() error {
 		s, e := c.Subscribe(herdr.StatusSubs([]string{target}))

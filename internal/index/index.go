@@ -129,30 +129,27 @@ func refresh(db *sql.DB, cassPath string, watermark int64) error {
 	}
 	defer tx.Rollback()
 
-	for _, q := range []string{
-		`insert or replace into conv (id, agent, session_id, source_path, workspace, title, started_at, ended_at)
+	for _, step := range []struct {
+		q    string
+		args []any
+	}{
+		{q: `insert or replace into conv (id, agent, session_id, source_path, workspace, title, started_at, ended_at)
 		 select c.id, a.name, ` + sessionID + `, c.source_path, w.path, c.title, c.started_at, c.ended_at
 		 from cass.conversations c
 		 join cass.agents a on a.id = c.agent_id
-		 left join cass.workspaces w on w.id = c.workspace_id`,
+		 left join cass.workspaces w on w.id = c.workspace_id`},
 
-		`insert or replace into msg (id, conv_id, idx, role, created_at, len, is_tool)
+		{q: `insert or replace into msg (id, conv_id, idx, role, created_at, len, is_tool)
 		 select m.id, m.conversation_id, m.idx, ` + role + `, m.created_at, length(m.content), ` + isTool + `
-		 from cass.messages m where m.id > ?`,
+		 from cass.messages m where m.id > ?`, args: []any{watermark}},
 
-		`insert into msg_fts (rowid, content)
-		 select m.id, m.content from cass.messages m where m.id > ?`,
+		{q: `insert into msg_fts (rowid, content)
+		 select m.id, m.content from cass.messages m where m.id > ?`, args: []any{watermark}},
 
-		`insert or replace into meta (k, v)
-		 select 'watermark', coalesce(max(id), ?) from msg`,
+		{q: `insert or replace into meta (k, v)
+		 select 'watermark', coalesce(max(id), ?) from msg`, args: []any{watermark}},
 	} {
-		if strings.Contains(q, "?") {
-			if _, err := tx.Exec(q, watermark); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := tx.Exec(q); err != nil {
+		if _, err := tx.Exec(step.q, step.args...); err != nil {
 			return err
 		}
 	}

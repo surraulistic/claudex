@@ -36,7 +36,6 @@ type Entry struct {
 type Digest struct {
 	ConvID     int64
 	Agent      string
-	SourcePath string
 	EntryCount int
 	LastTS     int64
 	Entries    []Entry
@@ -75,8 +74,7 @@ func (s *Store) Digest(target string, limit, chars int) (Digest, error) {
 		return Digest{}, err
 	}
 	d := Digest{ConvID: id}
-	if err := s.db.QueryRow(`select agent, source_path from conv where id = ?`, id).
-		Scan(&d.Agent, &d.SourcePath); err != nil {
+	if err := s.db.QueryRow(`select agent from conv where id = ?`, id).Scan(&d.Agent); err != nil {
 		return d, err
 	}
 	var last sql.NullInt64

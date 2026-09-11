@@ -52,12 +52,10 @@ func (s *State) Reconcile(agents []herdr.Agent) []string {
 		seen[a.PaneID] = true
 		next := fromAgent(a)
 		prev, known := s.panes[a.PaneID]
-		if known && !next.differs(prev) {
-			s.panes[a.PaneID] = next
-			continue
-		}
 		s.panes[a.PaneID] = next
-		changed = append(changed, a.PaneID)
+		if !known || next.differs(prev) {
+			changed = append(changed, a.PaneID)
+		}
 	}
 	for id := range s.panes {
 		if !seen[id] {

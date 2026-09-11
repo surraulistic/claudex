@@ -157,15 +157,13 @@ func splitArgs(argv []string) (flags, rest []string) {
 			continue
 		}
 		name := strings.TrimLeft(a, "-")
-		if eq := strings.IndexByte(name, '='); eq >= 0 {
-			flags = append(flags, a)
+		flags = append(flags, a)
+		// «--limit=3» несёт значение в себе; «--limit 3» забирает следующий довод.
+		if strings.ContainsRune(name, '=') || boolFlags[name] || i+1 >= len(argv) {
 			continue
 		}
-		flags = append(flags, a)
-		if !boolFlags[name] && i+1 < len(argv) {
-			i++
-			flags = append(flags, argv[i])
-		}
+		i++
+		flags = append(flags, argv[i])
 	}
 	return
 }
