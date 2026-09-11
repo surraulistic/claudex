@@ -71,6 +71,27 @@ Compact JSON (`--pretty` for humans) in four parts:
 - `live` — label, agent kind (`claude`, `codex`, …), pane, session id, status,
   context fill, usage limits, title, cwd. From Herdr.
 - `history` — conversation id plus recent `entries`, newest first. From the index.
+  **Check `history.stale` before you trust it.** The index is built from `cass`,
+  which reads transcripts on its own schedule; an hour of lag has been observed
+  with its watcher running. When `stale` is present the history is provably
+  behind and must not be read as current:
+
+  ```json
+  "stale": {
+    "observed_at": "2026-09-11T18:02:10+03:00",
+    "behind_seconds": 4000,
+    "source_newest": "2026-09-11T17:59:16+03:00",
+    "cause": "source_behind_file",
+    "reason": "в транскрипте есть запись от 17:59:16, а последняя проиндексированная — 16:52:36…"
+  }
+  ```
+
+  `cause` is `source_behind_file` (the transcript itself holds records the index
+  does not) or `journal_ahead` (a delegated task finished after the newest
+  indexed record). Absent `stale` means checked and fresh, not unchecked.
+  Running `claudex index` does **not** clear it: that only copies what `cass`
+  already has. The live `tail` and `claudex tasks` are current regardless —
+  **the task journal stays the authoritative record of completion.**
 - `tail` — cleaned terminal output, read at **any** status. Which source it
   comes from depends on the pane: a `working` pane returns nothing from
   `--source recent`, so the screen is read instead; an idle one returns several
@@ -189,7 +210,9 @@ How the correlation works: the prompt carries a line telling the agent to run
 `HERDR_PANE_ID`. A screen marker would not work — the pane redraws the prompt
 itself, so any pattern placed in the task text matches immediately.
 
-`claudex tasks` prints that journal: every send, every report, every outcome.
+`claudex tasks` prints that journal: every send, every report, every outcome. It
+is the authority on whether a task finished — `history` can lag behind it, and
+says so via `history.stale`.
 
 It refuses with exit `6` when the pane is neither `idle` nor `done`, before
 sending anything. `blocked` is refused too, and that one matters: a blocked pane

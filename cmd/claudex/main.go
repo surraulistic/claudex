@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/surraulistic/claudex/internal/exitcode"
+	"github.com/surraulistic/claudex/internal/freshness"
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/index"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -333,6 +334,7 @@ type paneView struct {
 	EntryCount    *int           `json:"entry_count"`
 	LastActivity  *string        `json:"last_activity"`
 	HistoryReason string         `json:"history_reason,omitempty"`
+	Stale         *freshness.Lag `json:"history_stale,omitempty"`
 }
 
 // brief отдаёт то же самое, но историю отдельным узлом и с живым хвостом:
@@ -356,10 +358,11 @@ type briefView struct {
 }
 
 type briefHistory struct {
-	TranscriptID *int64  `json:"transcript_id"`
-	EntryCount   *int    `json:"entry_count"`
-	LastActivity *string `json:"last_activity"`
-	Reason       string  `json:"reason,omitempty"`
+	TranscriptID *int64         `json:"transcript_id"`
+	EntryCount   *int           `json:"entry_count"`
+	LastActivity *string        `json:"last_activity"`
+	Stale        *freshness.Lag `json:"stale,omitempty"`
+	Reason       string         `json:"reason,omitempty"`
 }
 
 type briefSignals struct {
@@ -387,7 +390,7 @@ func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEnt
 		Focused: v.Focused, Tail: tail,
 		History: briefHistory{
 			TranscriptID: v.TranscriptID, EntryCount: v.EntryCount,
-			LastActivity: v.LastActivity, Reason: v.HistoryReason,
+			LastActivity: v.LastActivity, Stale: v.Stale, Reason: v.HistoryReason,
 		},
 		Signals: signalsOf(raw, entries),
 	}
@@ -427,7 +430,7 @@ func cmdSessions(o opts, withTail bool) error {
 		db = s
 		defer db.Close()
 	}
-	busy := watchedPanes()
+	jf := readJournal()
 
 	lines := o.tailLines
 	if withTail {
@@ -456,7 +459,7 @@ func cmdSessions(o opts, withTail bool) error {
 		seen[i].view = paneView{
 			Target: firstNonEmpty(labels[p.TabID], p.ID), Label: labels[p.TabID],
 			Kind: p.Kind, PaneID: p.ID, ContextPct: g.ContextPct, Limits: g.Limits,
-			Watched: busy[p.ID], Status: p.Status, Title: orNull(p.Title), CWD: p.CWD,
+			Watched: jf.watched[p.ID], Status: p.Status, Title: orNull(p.Title), CWD: p.CWD,
 			Focused: p.Focused, SessionID: orNull(p.SessionID), Alias: orNull(p.Name),
 		}
 		// Дайджест каждой панели — отдельный запрос к индексу; подряд их
@@ -464,7 +467,7 @@ func cmdSessions(o opts, withTail bool) error {
 		wg.Add(1)
 		go func(i int, p state.Pane) {
 			defer wg.Done()
-			seen[i].entries = fillHistory(&seen[i].view, db, p, o.limit, o.chars)
+			seen[i].entries = fillHistory(&seen[i].view, db, p, o.limit, o.chars, jf.lastDone[p.ID])
 		}(i, p)
 	}
 	wg.Wait()
@@ -527,7 +530,7 @@ func less(a, b paneView) bool {
 // fillHistory возвращает тексты записей: по ним, а не по живому экрану,
 // собираются сигналы — в истории видно, над чем панель работает, даже когда
 // экран занят выводом команды.
-func fillHistory(v *paneView, db *store.Store, p state.Pane, limit, chars int) []textual.HistoryEntry {
+func fillHistory(v *paneView, db *store.Store, p state.Pane, limit, chars int, doneAt time.Time) []textual.HistoryEntry {
 	switch {
 	case db == nil:
 		v.HistoryReason = "индекс недоступен"
@@ -540,8 +543,11 @@ func fillHistory(v *paneView, db *store.Store, p state.Pane, limit, chars int) [
 			return nil
 		}
 		id, n := d.ConvID, d.EntryCount
-		ts := time.Unix(d.LastTS, 0).Format(time.RFC3339)
+		last := time.Unix(d.LastTS, 0)
+		ts := last.Format(time.RFC3339)
 		v.TranscriptID, v.EntryCount, v.LastActivity = &id, &n, &ts
+		v.Stale = freshness.Check(last,
+			freshness.LastRecord(d.SourcePath, last), doneAt, time.Now())
 		out := make([]textual.HistoryEntry, 0, len(d.Entries))
 		for _, e := range d.Entries {
 			out = append(out, textual.HistoryEntry{Kind: e.Kind, Text: e.Text})
@@ -551,12 +557,20 @@ func fillHistory(v *paneView, db *store.Store, p state.Pane, limit, chars int) [
 	return nil
 }
 
-// watchedPanes — панели, по которым поручение ещё не завершилось.
-func watchedPanes() map[string]bool {
-	out := map[string]bool{}
+// journalFacts — один проход по журналу даёт два ответа: какие панели сейчас
+// под наблюдением и когда на каждой последний раз завершалось поручение.
+// Второе служит свидетелем свежести истории: журнал достоверен о завершении,
+// а история может отставать.
+type journalFacts struct {
+	watched  map[string]bool
+	lastDone map[string]time.Time
+}
+
+func readJournal() journalFacts {
+	f := journalFacts{watched: map[string]bool{}, lastDone: map[string]time.Time{}}
 	recs, err := journal.Open(defaultJournal()).Read()
 	if err != nil {
-		return out
+		return f
 	}
 	open := map[string]string{}
 	for _, r := range recs {
@@ -565,12 +579,15 @@ func watchedPanes() map[string]bool {
 			open[r.Task] = r.Pane
 		case journal.Finished:
 			delete(open, r.Task)
+			if r.Pane != "" && r.Time.After(f.lastDone[r.Pane]) {
+				f.lastDone[r.Pane] = r.Time
+			}
 		}
 	}
 	for _, pane := range open {
-		out[pane] = true
+		f.watched[pane] = true
 	}
-	return out
+	return f
 }
 
 func emit(o opts, v any) error {
@@ -620,7 +637,10 @@ type historyView struct {
 	EntryCount   *int        `json:"entry_count"`
 	LastActivity *string     `json:"last_activity,omitempty"`
 	Entries      []entryLine `json:"entries,omitempty"`
-	Reason       string      `json:"reason,omitempty"`
+	// Stale появляется, только когда история доказуемо отстаёт. Её отсутствие
+	// значит «сверено и свежо», а не «не проверяли».
+	Stale  *freshness.Lag `json:"stale,omitempty"`
+	Reason string         `json:"reason,omitempty"`
 }
 
 type entryLine struct {
@@ -647,7 +667,7 @@ func cmdDigest(o opts, q string) error {
 	if err != nil {
 		// Живой панели нет, но цель могла прийти из find: там ключом служит
 		// закрытая сессия или идентификатор разговора без неё.
-		hist, entries, hErr := digestHistory(db, q, o)
+		hist, entries, hErr := digestHistory(db, q, o, time.Time{})
 		if hErr != nil {
 			return err // живой панели нет и в индексе пусто — цель не найдена
 		}
@@ -668,7 +688,9 @@ func cmdDigest(o opts, q string) error {
 	if key == "" {
 		key = q
 	}
-	hist, entries, _ := digestHistory(db, key, o)
+	// Журнал — достоверный источник завершения: если поручение на этой панели
+	// закончилось позже последней записи истории, история отстаёт.
+	hist, entries, _ := digestHistory(db, key, o, readJournal().lastDone[p.ID])
 	if p.SessionID == "" {
 		hist.Reason = "у панели нет session_id"
 	}
@@ -699,7 +721,7 @@ func cmdDigest(o opts, q string) error {
 	return emit(o, v)
 }
 
-func digestHistory(db *store.Store, key string, o opts) (historyView, []textual.HistoryEntry, error) {
+func digestHistory(db *store.Store, key string, o opts, doneAt time.Time) (historyView, []textual.HistoryEntry, error) {
 	var h historyView
 	d, err := db.Digest(key, o.limit, o.chars)
 	if err != nil {
@@ -707,9 +729,12 @@ func digestHistory(db *store.Store, key string, o opts) (historyView, []textual.
 		return h, nil, err
 	}
 	id, n := d.ConvID, d.EntryCount
-	ts := time.Unix(d.LastTS, 0).Format(time.RFC3339)
+	last := time.Unix(d.LastTS, 0)
+	ts := last.Format(time.RFC3339)
 	h.TranscriptID, h.EntryCount, h.LastActivity = &id, &n, &ts
 	h.Provider = d.Agent
+	h.Stale = freshness.Check(last,
+		freshness.LastRecord(d.SourcePath, last), doneAt, time.Now())
 
 	entries := make([]textual.HistoryEntry, 0, len(d.Entries))
 	h.Entries = make([]entryLine, 0, len(d.Entries))

@@ -342,3 +342,15 @@ func TestContextWindowAsymmetric(t *testing.T) {
 		t.Fatalf("одна запись до якоря и сам якорь, получено %+v", w.Entries)
 	}
 }
+
+func TestDigestCarriesSourcePath(t *testing.T) {
+	// По этому пути сверяют свежесть истории: он записан самим cass, а не
+	// угадан по идентификатору сессии.
+	d, err := open(t).Digest("1", 5, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.SourcePath == "" {
+		t.Fatal("путь транскрипта доезжает до вызывающего")
+	}
+}

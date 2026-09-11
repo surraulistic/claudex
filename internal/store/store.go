@@ -34,8 +34,11 @@ type Entry struct {
 }
 
 type Digest struct {
-	ConvID     int64
-	Agent      string
+	ConvID int64
+	Agent  string
+	// SourcePath — путь, который записал сам cass. По нему сверяют свежесть
+	// истории, не угадывая расположение транскрипта.
+	SourcePath string
 	EntryCount int
 	LastTS     int64
 	Entries    []Entry
@@ -80,9 +83,12 @@ func (s *Store) Digest(target string, limit, chars int) (Digest, error) {
 		return Digest{}, err
 	}
 	d := Digest{ConvID: id}
-	if err := s.db.QueryRow(`select agent from conv where id = ?`, id).Scan(&d.Agent); err != nil {
+	var path sql.NullString
+	if err := s.db.QueryRow(`select agent, source_path from conv where id = ?`, id).
+		Scan(&d.Agent, &path); err != nil {
 		return d, err
 	}
+	d.SourcePath = path.String
 	var last sql.NullInt64
 	s.db.QueryRow(`select count(*) from msg where conv_id = ? and is_tool = 0`, id).Scan(&d.EntryCount)
 	// Индекс по msg начинается с (conv_id, is_tool), поэтому шорткат sqlite для
