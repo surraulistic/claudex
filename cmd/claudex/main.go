@@ -227,21 +227,19 @@ func defaultJournal() string {
 
 func client() *herdr.Client { return herdr.New(herdr.DefaultSocket()) }
 
-// tabLabels — метки вкладок, ими панель называют люди.
-func tabLabels(c *herdr.Client) map[string]string {
-	out := map[string]string{}
+// labelsByPane раскладывает метки вкладок по панелям: меткой панель называют
+// люди, а живёт она у вкладки. Список агентов передаётся уже добытым — agent.list
+// самый дорогой вызов herdr, и повторять его ради той же карты не за что.
+func labelsByPane(c *herdr.Client, agents []herdr.Agent) map[string]string {
 	tabs, err := c.Tabs()
 	if err != nil {
-		return out
+		return nil
 	}
-	byTab := map[string]string{}
+	byTab := make(map[string]string, len(tabs))
 	for _, t := range tabs {
 		byTab[t.TabID] = t.Label
 	}
-	agents, err := c.Agents()
-	if err != nil {
-		return out
-	}
+	out := make(map[string]string, len(agents))
 	for _, a := range agents {
 		if l := byTab[a.TabID]; l != "" {
 			out[a.PaneID] = l
@@ -253,35 +251,32 @@ func tabLabels(c *herdr.Client) map[string]string {
 // resolve находит панель по чему угодно, чем её называют: идентификатору,
 // идентификатору сессии, имени агента, метке вкладки, заголовку, каталогу.
 func resolve(q string) (state.Pane, error) {
-	panes, err := livePanes(opts{})
+	c := client()
+	agents, err := c.Agents()
 	if err != nil {
-		return state.Pane{}, err
+		return state.Pane{}, exitcode.Wrap(exitcode.NoHerdr, err)
 	}
-	p, err := target.Resolve(q, panes, tabLabels(client()))
+	p, err := target.Resolve(q, panesOf(agents, ""), labelsByPane(c, agents))
 	if err != nil {
 		return state.Pane{}, exitcode.Wrap(exitcode.NotFound, err)
 	}
 	return p, nil
 }
 
-func livePanes(o opts) ([]state.Pane, error) {
-	agents, err := client().Agents()
-	if err != nil {
-		return nil, exitcode.Wrap(exitcode.NoHerdr, err)
-	}
+func panesOf(agents []herdr.Agent, cwd string) []state.Pane {
 	st := state.New()
 	st.Load(agents)
 	panes := st.Panes()
-	if o.cwd == "" {
-		return panes, nil
+	if cwd == "" {
+		return panes
 	}
 	var out []state.Pane
 	for _, p := range panes {
-		if strings.HasPrefix(p.CWD, o.cwd) {
+		if strings.HasPrefix(p.CWD, cwd) {
 			out = append(out, p)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // На работающей панели recent отдаёт пусто — измерено на всех working-панелях,
@@ -401,11 +396,12 @@ func orEmpty(in []string) []string {
 }
 
 func cmdSessions(o opts, withTail bool) error {
-	panes, err := livePanes(o)
-	if err != nil {
-		return err
-	}
 	c := client()
+	agents, err := c.Agents()
+	if err != nil {
+		return exitcode.Wrap(exitcode.NoHerdr, err)
+	}
+	panes := panesOf(agents, o.cwd)
 	labels := map[string]string{}
 	if tabs, err := c.Tabs(); err == nil {
 		for _, t := range tabs {
