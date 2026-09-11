@@ -20,6 +20,8 @@ var (
 	running  = regexp.MustCompile(`⏺\s+Running\b.*`)
 	ruleRe   = regexp.MustCompile(`^[\s─-╿]*$`)
 	promptR  = regexp.MustCompile(`^\s*❯\s*$`)
+	newlines = regexp.MustCompile(`\s*\n+\s*`)
+	gaps     = regexp.MustCompile(`[ \t]{2,}`)
 )
 
 func StripANSI(s string) string { return ansi.ReplaceAllString(s, "") }
@@ -37,8 +39,8 @@ func Clip(s string, max int) (string, bool) {
 }
 
 func Cut(s string, max int) (string, bool) {
-	flat := strings.TrimSpace(regexp.MustCompile(`[ \t]{2,}`).ReplaceAllString(
-		regexp.MustCompile(`\s*\n+\s*`).ReplaceAllString(StripANSI(s), " "), " "))
+	flat := strings.TrimSpace(gaps.ReplaceAllString(
+		newlines.ReplaceAllString(StripANSI(s), " "), " "))
 	r := []rune(flat)
 	if len(r) <= max {
 		return flat, false
