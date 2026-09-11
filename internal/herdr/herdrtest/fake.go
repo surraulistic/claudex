@@ -19,6 +19,7 @@ type Fake struct {
 	Path string
 
 	mu       sync.Mutex
+	delays   map[string]time.Duration
 	replies  map[string]string
 	requests []string
 	subs     []net.Conn
@@ -39,6 +40,7 @@ func Start(t *testing.T) *Fake {
 	f := &Fake{
 		Path:   filepath.Join(dir, "h.sock"),
 		opened: make(chan struct{}, 64),
+		delays: map[string]time.Duration{},
 		replies: map[string]string{
 			"events.subscribe": `{"id":"s","result":{"type":"subscription_started"}}`,
 			"agent.list":       `{"id":"x","result":{"type":"agent_list","agents":[]}}`,
@@ -74,6 +76,7 @@ func (f *Fake) serve(c net.Conn) {
 
 	f.mu.Lock()
 	f.requests = append(f.requests, line)
+	delay := f.delays[req.Method]
 	reply, ok := f.replies[req.Method]
 	if !ok {
 		reply = `{"id":"x","error":{"code":"invalid_request","message":"unknown variant"}}`
@@ -83,6 +86,9 @@ func (f *Fake) serve(c net.Conn) {
 	}
 	f.mu.Unlock()
 
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	c.Write([]byte(reply + "\n"))
 	if req.Method == "events.subscribe" {
 		select {
@@ -92,6 +98,14 @@ func (f *Fake) serve(c net.Conn) {
 		return // подписка держит соединение открытым
 	}
 	c.Close() // один запрос на соединение
+}
+
+// Delay задерживает ответ: так проверяется, что ожидающий не считает
+// вернувшийся вызов завершением задачи раньше отчёта.
+func (f *Fake) Delay(method string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delays[method] = d
 }
 
 func (f *Fake) Reply(method, raw string) {

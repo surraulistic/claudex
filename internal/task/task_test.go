@@ -1,0 +1,162 @@
+package task
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/surraulistic/claudex/internal/herdr"
+	"github.com/surraulistic/claudex/internal/herdr/herdrtest"
+	"github.com/surraulistic/claudex/internal/journal"
+)
+
+func agent(status string) string {
+	return `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p2","agent":"claude","agent_status":"` + status + `"}}}`
+}
+
+func setup(t *testing.T, status string) (*herdrtest.Fake, *journal.Journal, Options) {
+	t.Helper()
+	f := herdrtest.Start(t)
+	f.Reply("agent.get", agent(status))
+	f.Reply("agent.prompt", agent("idle"))
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	return f, j, Options{
+		Client: herdr.New(f.Path), Journal: j,
+		Pane: "wE:p2", Prompt: "почини сборку",
+		Timeout: 3 * time.Second, Grace: 150 * time.Millisecond,
+	}
+}
+
+func TestBusyPaneIsRefused(t *testing.T) {
+	// Занятой панели задание не шлётся: оно уедет в чужой разговор.
+	_, _, o := setup(t, "working")
+	_, err := Delegate(context.Background(), o)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("занятая панель отклоняется, получено %v", err)
+	}
+}
+
+func TestPromptCarriesReportInstructionWithTaskID(t *testing.T) {
+	f, _, o := setup(t, "idle")
+	go Delegate(context.Background(), o)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if req := f.LastRequest("agent.prompt"); req != nil {
+			text := req["params"].(map[string]any)["text"].(string)
+			if !strings.Contains(text, "почини сборку") {
+				t.Fatalf("задание сохранено целиком, получено %q", text)
+			}
+			if !strings.Contains(text, "claudex done ") {
+				t.Fatalf("в задание вписан отчёт, получено %q", text)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("задание не ушло")
+}
+
+func TestReportedOutcomeIsCorrelated(t *testing.T) {
+	// Отчёт приходит по журналу с идентификатором задачи — это и есть
+	// доказательство, что завершилась именно посланная задача.
+	f, j, o := setup(t, "idle")
+	f.Delay("agent.prompt", 2*time.Second)
+	go func() {
+		id := waitForTaskID(t, j)
+		j.Append(journal.Record{Task: id, Event: journal.Reported,
+			Pane: "wE:p2", Outcome: "готово", Reason: "сборка зелёная"})
+	}()
+	res, err := Delegate(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != Reported || res.Said != "готово" || res.Reason != "сборка зелёная" {
+		t.Fatalf("своя классификация и слово задачи врозь, получено %+v", res)
+	}
+}
+
+func TestSilentFinishIsMarkedApart(t *testing.T) {
+	// Панель освободилась, но не отчиталась: это не то же самое, что «готово»,
+	// и вести себя как «готово» не должно.
+	_, _, o := setup(t, "idle")
+	res, err := Delegate(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != Silent {
+		t.Fatalf("молчаливое завершение отличается от отчёта, получено %q", res.Outcome)
+	}
+}
+
+func TestTimeoutIsItsOwnOutcome(t *testing.T) {
+	f, _, o := setup(t, "idle")
+	f.Delay("agent.prompt", 2*time.Second)
+	o.Timeout = 120 * time.Millisecond
+	res, _ := Delegate(context.Background(), o)
+	if res.Outcome != TimedOut {
+		t.Fatalf("срок — отдельный исход, получено %q", res.Outcome)
+	}
+}
+
+func TestJournalKeepsStartAndFinish(t *testing.T) {
+	_, j, o := setup(t, "idle")
+	res, err := Delegate(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, _ := j.Read()
+	var started, finished bool
+	for _, r := range recs {
+		if r.Task != res.Task {
+			t.Fatalf("записи чужой задачи: %+v", r)
+		}
+		switch r.Event {
+		case journal.Started:
+			started = true
+			if r.Prompt == "" || r.Pane == "" {
+				t.Fatalf("начало записано с заданием и панелью, получено %+v", r)
+			}
+		case journal.Finished:
+			finished = true
+			if r.Outcome != res.Outcome {
+				t.Fatalf("исход в журнале и в ответе совпадают, получено %q и %q", r.Outcome, res.Outcome)
+			}
+		}
+	}
+	if !started || !finished {
+		t.Fatalf("начало и конец записаны, получено %+v", recs)
+	}
+}
+
+func TestReportUsesPaneFromEnvironment(t *testing.T) {
+	// Отчитывается чужой процесс внутри панели; свою панель он знает из
+	// HERDR_PANE_ID, который herdr кладёт в окружение каждой панели.
+	_, j, _ := setup(t, "idle")
+	t.Setenv("HERDR_PANE_ID", "wE:p7")
+	if err := Report(j, "т1", "готово", "всё сделано"); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ := j.Read()
+	if len(recs) != 1 || recs[0].Pane != "wE:p7" || recs[0].Event != journal.Reported {
+		t.Fatalf("отчёт с панелью из окружения, получено %+v", recs)
+	}
+}
+
+func waitForTaskID(t *testing.T, j *journal.Journal) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if recs, _ := j.Read(); len(recs) > 0 {
+			return recs[0].Task
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("задача не появилась в журнале")
+	return ""
+}
+
+var _ = json.Marshal
