@@ -36,15 +36,16 @@ type Client struct {
 func New(path string) *Client { return &Client{Path: path, Timeout: defaultTimeout} }
 
 type Agent struct {
-	PaneID  string `json:"pane_id"`
-	TabID   string `json:"tab_id"`
-	Name    string `json:"name"`
-	Kind    string `json:"agent"`
-	Status  string `json:"agent_status"`
-	Title   string `json:"terminal_title_stripped"`
-	CWD     string `json:"cwd"`
-	Focused bool   `json:"focused"`
-	Session struct {
+	PaneID   string `json:"pane_id"`
+	TabID    string `json:"tab_id"`
+	Name     string `json:"name"`
+	Kind     string `json:"agent"`
+	Status   string `json:"agent_status"`
+	Title    string `json:"terminal_title_stripped"`
+	CWD      string `json:"cwd"`
+	Revision int64  `json:"revision"`
+	Focused  bool   `json:"focused"`
+	Session  struct {
 		Value string `json:"value"`
 	} `json:"agent_session"`
 }
