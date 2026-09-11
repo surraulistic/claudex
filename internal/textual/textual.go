@@ -24,6 +24,17 @@ var (
 func StripANSI(s string) string { return ansi.ReplaceAllString(s, "") }
 
 // Cut схлопывает переносы и режет по границе, сообщая, была ли обрезка.
+// Clip обрезает по длине, но строчную разбивку оставляет: окно вокруг записи
+// читают глазами, и переводы строк там часть смысла. Cut, наоборот, сводит
+// запись к одной строке для списков.
+func Clip(s string, max int) (string, bool) {
+	r := []rune(s)
+	if len(r) <= max {
+		return s, false
+	}
+	return strings.TrimRight(string(r[:max]), " ") + "…", true
+}
+
 func Cut(s string, max int) (string, bool) {
 	flat := strings.TrimSpace(regexp.MustCompile(`[ \t]{2,}`).ReplaceAllString(
 		regexp.MustCompile(`\s*\n+\s*`).ReplaceAllString(StripANSI(s), " "), " "))

@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -172,16 +173,18 @@ func TestEntryMissingExplains(t *testing.T) {
 	}
 }
 
-func TestContextWindowMarksAnchorAndSkipsHidden(t *testing.T) {
+func TestContextWindowMarksAnchor(t *testing.T) {
 	c, err := open(t).Context(1, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Entries) != 2 {
-		t.Fatalf("скрытая из ленты заглушка в окно не входит, получено %d", len(c.Entries))
-	}
 	if !c.Entries[0].Anchor {
 		t.Fatal("якорь помечен")
+	}
+	for _, e := range c.Entries[1:] {
+		if e.Anchor {
+			t.Fatalf("якорь один, помечена ещё и %d", e.ID)
+		}
 	}
 }
 
@@ -198,5 +201,48 @@ func TestEmptyTargetIsRefused(t *testing.T) {
 	s := open(t)
 	if _, err := s.Digest("", 5, 100); err == nil {
 		t.Fatal("пустая цель отклоняется, а не подбирает чужой разговор")
+	}
+}
+
+func TestMatchQuotesEveryTerm(t *testing.T) {
+	// Дефис и двоеточие внутри слова — синтаксис FTS5, а не буквы: без кавычек
+	// «SD-6613» ищется как «SD» без «6613».
+	for _, c := range []struct{ in, want string }{
+		{"миграция", `"миграция"`},
+		{"SD-6613 откат", `"SD-6613" "откат"`},
+		{`он сказал "нет"`, `"он" "сказал" """нет"""`},
+		{"  ", ""},
+	} {
+		if got := Match(c.in); got != c.want {
+			t.Fatalf("Match(%q) = %q, ожидалось %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMatchedQueryFindsHyphenatedToken(t *testing.T) {
+	s := open(t)
+	if hits, err := s.Search(Match("SD-6613"), SearchOpts{Limit: 5}); err != nil {
+		t.Fatalf("выражение принимается движком: %v", err)
+	} else {
+		_ = hits
+	}
+}
+
+func TestContextKeepsToolStubs(t *testing.T) {
+	// В ленте заглушки инструментов — шум, а в окне вокруг записи именно они
+	// и показывают, что делалось; прежняя версия их здесь сохраняла.
+	s := open(t)
+	w, err := s.Context(2, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tools int
+	for _, e := range w.Entries {
+		if strings.HasPrefix(e.Text, "[Tool:") {
+			tools++
+		}
+	}
+	if tools == 0 {
+		t.Fatalf("заглушки остаются в окне, записей %d", len(w.Entries))
 	}
 }

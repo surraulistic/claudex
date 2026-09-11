@@ -38,6 +38,8 @@ type opts struct {
 	tailLines int
 	cwd       string
 	days      int
+	before    int
+	after     int
 	timeout   time.Duration
 	noWait    bool
 }
@@ -63,12 +65,19 @@ func run() error {
 	fs.IntVar(&o.tailLines, "tail-lines", 12, "строк живого хвоста")
 	fs.StringVar(&o.cwd, "cwd", "", "фильтр по рабочему каталогу")
 	fs.IntVar(&o.days, "days", 0, "find: не старше N дней")
+	fs.IntVar(&o.before, "before", 10, "context: записей до якоря")
+	fs.IntVar(&o.after, "after", 20, "context: записей после якоря")
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "watch/delegate: срок ожидания")
 	fs.BoolVar(&o.noWait, "no-wait", false, "delegate: отправить и выйти")
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	// Флаги принимаются где угодно, в том числе после запроса: прежняя версия
+	// так умела, и «claudex find "миграция" --limit 3» пишут именно так.
+	// Разбор из стандартной библиотеки останавливается на первом позиционном
+	// доводе, поэтому доводы разделяются заранее.
+	flags, rest := splitArgs(os.Args[1:])
+	if err := fs.Parse(flags); err != nil {
 		return err
 	}
-	args := fs.Args()
+	args := rest
 	if len(args) == 0 {
 		usage()
 		return nil
@@ -110,6 +119,35 @@ func run() error {
 	default:
 		return cmdDigest(o, args[0])
 	}
+}
+
+// boolFlags — флаги без значения; у остальных следующий довод считается их
+// значением, если не написан через «=».
+var boolFlags = map[string]bool{"no-wait": true, "help": true, "h": true}
+
+func splitArgs(argv []string) (flags, rest []string) {
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if a == "--" {
+			rest = append(rest, argv[i+1:]...)
+			return
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			rest = append(rest, a)
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			flags = append(flags, a)
+			continue
+		}
+		flags = append(flags, a)
+		if !boolFlags[name] && i+1 < len(argv) {
+			i++
+			flags = append(flags, argv[i])
+		}
+	}
+	return
 }
 
 func usage() {
@@ -350,8 +388,71 @@ func cmdDigest(o opts, q string) error {
 	return nil
 }
 
+type hitView struct {
+	ID   int64  `json:"id"`
+	TS   string `json:"ts"`
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+type sessionView struct {
+	Target       string    `json:"target"`
+	SessionID    *string   `json:"session_id"`
+	TranscriptID int64     `json:"transcript_id"`
+	Project      string    `json:"project"`
+	CWD          string    `json:"cwd"`
+	Branch       *string   `json:"branch"`
+	FirstHit     string    `json:"first_hit"`
+	LastHit      string    `json:"last_hit"`
+	Hits         int       `json:"hits"`
+	Entries      []hitView `json:"entries"`
+}
+
+// group складывает попадания по разговорам и ставит свежие первыми: при
+// поиске по всей истории полезнее недавний разговор, а не самый релевантный
+// по мнению движка.
+func group(hits []store.Hit) []sessionView {
+	order := []int64{}
+	by := map[int64]*sessionView{}
+	for _, h := range hits {
+		ts := time.Unix(h.TS, 0).Format(time.RFC3339)
+		sv, ok := by[h.ConvID]
+		if !ok {
+			target := h.SessionID
+			if target == "" {
+				target = strconv.FormatInt(h.ConvID, 10)
+			}
+			sv = &sessionView{
+				Target: target, TranscriptID: h.ConvID,
+				Project: h.Workspace, CWD: h.Workspace,
+				FirstHit: ts, LastHit: ts,
+			}
+			if h.SessionID != "" {
+				id := h.SessionID
+				sv.SessionID = &id
+			}
+			by[h.ConvID] = sv
+			order = append(order, h.ConvID)
+		}
+		if ts < sv.FirstHit {
+			sv.FirstHit = ts
+		}
+		if ts > sv.LastHit {
+			sv.LastHit = ts
+		}
+		sv.Hits++
+		sv.Entries = append(sv.Entries, hitView{ID: h.ID, TS: ts, Role: h.Kind, Text: h.Text})
+	}
+	out := make([]sessionView, 0, len(order))
+	for _, id := range order {
+		out = append(out, *by[id])
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastHit > out[j].LastHit })
+	return out
+}
+
 func cmdFind(o opts, q string) error {
-	if q == "" {
+	if strings.TrimSpace(q) == "" {
 		return fmt.Errorf("нужен запрос")
 	}
 	db, err := store.Open(o.db)
@@ -359,20 +460,14 @@ func cmdFind(o opts, q string) error {
 		return err
 	}
 	defer db.Close()
-	hits, err := db.Search(q, store.SearchOpts{Limit: o.limit, Days: o.days})
+	match := store.Match(q)
+	hits, err := db.Search(match, store.SearchOpts{Limit: o.limit, Days: o.days})
 	if err != nil {
 		return err
 	}
-	if len(hits) == 0 {
-		fmt.Println("ничего не нашлось")
-		return nil
-	}
-	for _, h := range hits {
-		fmt.Printf("[%d] %s %-9s разговор %d  цель %s\n      %s\n",
-			h.ID, time.Unix(h.TS, 0).Format("02.01 15:04"), h.Kind, h.ConvID,
-			firstNonEmpty(h.SessionID, strconv.FormatInt(h.ConvID, 10)), oneLine(h.Text))
-	}
-	return nil
+	return emit(map[string]any{
+		"query": q, "match": match, "hits": len(hits), "sessions": group(hits),
+	})
 }
 
 func cmdSearch(o opts, tgt, q string) error {
@@ -390,14 +485,15 @@ func cmdSearch(o opts, tgt, q string) error {
 	if err != nil {
 		return err
 	}
-	hits, err := db.Search(q, store.SearchOpts{Limit: o.limit, ConvID: d.ConvID})
+	match := store.Match(q)
+	hits, err := db.Search(match, store.SearchOpts{Limit: o.limit, ConvID: d.ConvID})
 	if err != nil {
 		return err
 	}
-	for _, h := range hits {
-		fmt.Printf("[%d] %s %-9s %s\n", h.ID, time.Unix(h.TS, 0).Format("02.01 15:04"), h.Kind, oneLine(h.Text))
-	}
-	return nil
+	return emit(map[string]any{
+		"query": q, "match": match, "target": tgt, "transcript_id": d.ConvID,
+		"hits": len(hits), "sessions": group(hits),
+	})
 }
 
 func cmdEntry(o opts, args []string) error {
@@ -414,9 +510,22 @@ func cmdEntry(o opts, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("запись %d · %s · %s · разговор %d\n\n%s\n",
-		e.ID, e.Kind, time.Unix(e.TS, 0).Format("02.01.2006 15:04"), e.ConvID, e.Text)
-	return nil
+	return emit(entryView(e))
+}
+
+func entryView(e store.FullEntry) map[string]any {
+	v := map[string]any{
+		"id": e.ID, "ts": time.Unix(e.TS, 0).Format(time.RFC3339), "role": e.Kind,
+		"transcript_id": e.ConvID, "agent": e.Agent,
+		"project": e.Workspace, "cwd": e.Workspace, "branch": nil,
+		"chars": len([]rune(e.Text)), "text": e.Text,
+	}
+	if e.SessionID != "" {
+		v["target"] = e.SessionID
+	} else {
+		v["target"] = strconv.FormatInt(e.ConvID, 10)
+	}
+	return v
 }
 
 func cmdContext(o opts, args []string) error {
@@ -429,18 +538,22 @@ func cmdContext(o opts, args []string) error {
 		return err
 	}
 	defer db.Close()
-	w, err := db.Context(id, o.limit, o.limit)
+	w, err := db.Context(id, o.before, o.after)
 	if err != nil {
 		return err
 	}
+	entries := make([]map[string]any, 0, len(w.Entries))
 	for _, e := range w.Entries {
-		mark := "  "
-		if e.ID == w.Anchor {
-			mark = "▸ "
-		}
-		fmt.Printf("%s[%d] %-9s %s\n", mark, e.ID, e.Kind, cut(e.Text, o.chars))
+		entries = append(entries, map[string]any{
+			"id": e.ID, "ts": time.Unix(e.TS, 0).Format(time.RFC3339), "role": e.Kind,
+			// Ни обрезки, ни схлопывания переводов строк: окно вокруг записи
+			// читают целиком и глазами, а --chars относится к спискам.
+			"chars": e.Len, "anchor": e.ID == w.Anchor, "text": e.Text,
+		})
 	}
-	return nil
+	return emit(map[string]any{
+		"anchor": w.Anchor, "transcript_id": w.ConvID, "entries": entries,
+	})
 }
 
 func cmdWatch(o opts, args []string) error {
@@ -543,6 +656,11 @@ func oneLine(s string) string { return cut(strings.Join(strings.Fields(s), " "),
 
 func cut(s string, max int) string {
 	out, _ := textual.Cut(strings.Join(strings.Fields(s), " "), max)
+	return out
+}
+
+func trimTo(s string, max int) string {
+	out, _ := textual.Clip(s, max)
 	return out
 }
 

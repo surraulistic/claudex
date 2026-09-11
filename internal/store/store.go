@@ -198,6 +198,8 @@ type Window struct {
 }
 
 // Окно вокруг записи в её же разговоре, в том же порядке, что и лента.
+// Заглушки вызовов инструментов здесь остаются: из ленты они выброшены как шум,
+// но в окне вокруг записи ровно они и объясняют, что происходило.
 func (s *Store) Context(id int64, before, after int) (Window, error) {
 	w := Window{Anchor: id}
 	var createdAt int64
@@ -212,7 +214,7 @@ func (s *Store) Context(id int64, before, after int) (Window, error) {
 		with ordered as (
 		  select m.id, m.role, m.created_at/1000 ts, m.len,
 		         row_number() over (order by m.created_at, m.id) rn
-		  from msg m where m.conv_id = ? and m.is_tool = 0),
+		  from msg m where m.conv_id = ?),
 		pos as (select rn from ordered where id = ?)
 		select o.id, o.role, o.ts, o.len,
 		       (select content from msg_fts where rowid = o.id)
@@ -232,4 +234,19 @@ func (s *Store) Context(id int64, before, after int) (Window, error) {
 		w.Entries = append(w.Entries, e)
 	}
 	return w, rows.Err()
+}
+
+// Match превращает человеческий запрос в выражение FTS5. Каждое слово берётся
+// в кавычки: иначе дефис, двоеточие или звёздочка внутри слова читаются как
+// синтаксис и запрос либо падает, либо ищет не то. Кавычка внутри слова
+// удваивается.
+func Match(q string) string {
+	var terms []string
+	for _, w := range strings.Fields(q) {
+		w = strings.ReplaceAll(w, `"`, `""`)
+		if w != "" {
+			terms = append(terms, `"`+w+`"`)
+		}
+	}
+	return strings.Join(terms, " ")
 }

@@ -1,6 +1,9 @@
 package textual
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const bar = "  ~/GolandProjects/license-platform  panel-real-data  Opus 5  ██░░░49%  5h░░░░░7% 12:00  7d███░░57% 10.09 02:00"
 
@@ -122,5 +125,18 @@ func TestStripAnsiKeepsBracketsInText(t *testing.T) {
 	}
 	if got := StripANSI("см. [0] и [12]"); got != "см. [0] и [12]" {
 		t.Fatalf("скобки в тексте не трогаются, получено %q", got)
+	}
+}
+
+func TestClipKeepsLineBreaks(t *testing.T) {
+	// Отличие от Cut: тот сводит запись к одной строке для списка, а окно
+	// вокруг записи читают глазами.
+	in := "первая\n\nвторая строка"
+	if got, cut := Clip(in, 100); got != in || cut {
+		t.Fatalf("короткое не трогается, получено %q %v", got, cut)
+	}
+	got, cut := Clip(in, 8)
+	if !cut || !strings.Contains(got, "\n") {
+		t.Fatalf("длинное обрезается, разбивка цела, получено %q", got)
 	}
 }
