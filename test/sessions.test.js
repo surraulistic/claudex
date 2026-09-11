@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPanes } from '../lib/sessions.js';
 
+// Хвосты читаются пачкой — подделываем контракт exec.runAll.
+const runAll = async (jobs) => jobs.map(() => ({ ok: true, code: 0, stdout: '', stderr: '' }));
+
 const AGENTS = [
   { name: null, pane_id: 'wE:p13', agent_session: { value: 's-idle-fresh' }, agent_status: 'idle', terminal_title_stripped: 'config', cwd: '/a' },
   { name: 'media', pane_id: 'wE:pX', agent_session: { value: 's-idle-old' }, agent_status: 'idle', terminal_title_stripped: 'media', cwd: '/a' },
@@ -24,9 +27,9 @@ function fakeRun(rows = ROWS) {
   return { run, calls };
 }
 
-test('безымянная панель попадает в список и адресуется своим pane_id', () => {
+test('безымянная панель попадает в список и адресуется своим pane_id', async () => {
   const { run } = fakeRun();
-  const { panes } = buildPanes(run, '/db');
+  const { panes } = await buildPanes(run, runAll, '/db');
   assert.equal(panes.length, 3);
   const config = panes.find((p) => p.pane_id === 'wE:p13');
   assert.equal(config.alias, null);
@@ -35,39 +38,39 @@ test('безымянная панель попадает в список и ад
   assert.equal(config.entry_count, 10);
 });
 
-test('история всех панелей стоит один вызов sqlite, а не по вызову на панель', () => {
+test('история всех панелей стоит один вызов sqlite, а не по вызову на панель', async () => {
   const { run, calls } = fakeRun();
-  buildPanes(run, '/db');
+  await buildPanes(run, runAll, '/db');
   assert.equal(calls.filter((c) => c === 'sqlite3').length, 1);
 });
 
-test('работающие панели идут первыми, дальше — по свежести', () => {
+test('работающие панели идут первыми, дальше — по свежести', async () => {
   const { run } = fakeRun();
-  const { panes } = buildPanes(run, '/db');
+  const { panes } = await buildPanes(run, runAll, '/db');
   assert.deepEqual(panes.map((p) => p.pane_id), ['wE:pB', 'wE:p13', 'wE:pX']);
 });
 
-test('cwd фильтрует список', () => {
+test('cwd фильтрует список', async () => {
   const { run } = fakeRun();
-  const { panes } = buildPanes(run, '/db', { cwd: '/b' });
+  const { panes } = await buildPanes(run, runAll, '/db', { cwd: '/b' });
   assert.deepEqual(panes.map((p) => p.pane_id), ['wE:pB']);
 });
 
-test('панель без истории несёт причину, а не молчаливый ноль', () => {
+test('панель без истории несёт причину, а не молчаливый ноль', async () => {
   const { run } = fakeRun();
-  const { panes } = buildPanes(run, '/db');
+  const { panes } = await buildPanes(run, runAll, '/db');
   const working = panes.find((p) => p.pane_id === 'wE:pB');
   assert.equal(working.entry_count, null, 'ноль читается как «в сессии тихо» — тут неизвестно');
   assert.match(working.history_reason, /нет в индексе/);
 });
 
-test('служебный ключ сортировки не протекает наружу', () => {
+test('служебный ключ сортировки не протекает наружу', async () => {
   const { run } = fakeRun();
-  const { panes } = buildPanes(run, '/db');
+  const { panes } = await buildPanes(run, runAll, '/db');
   assert.equal(panes.every((p) => !('last_ts' in p)), true);
 });
 
-test('недоступный herdr отдаёт ошибку, а не пустой список', () => {
+test('недоступный herdr отдаёт ошибку, а не пустой список', async () => {
   const run = () => ({ ok: false, code: 1, stdout: '', stderr: 'connection refused' });
-  assert.equal(buildPanes(run, '/db').ok, false);
+  assert.equal((await buildPanes(run, runAll, '/db')).ok, false);
 });

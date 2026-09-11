@@ -185,7 +185,7 @@ if (command === 'watch') {
 }
 
 if (command === 'sessions') {
-  const built = buildPanes(run, dbPath, { cwd: flags.cwd || null });
+  const built = await buildPanes(run, runAll, dbPath, { cwd: flags.cwd || null });
   if (!built.ok) fail(`Herdr недоступен: ${built.error.message}`, 3);
   emit({ panes: built.panes }, pretty);
   process.exit(0);

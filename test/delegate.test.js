@@ -215,12 +215,13 @@ test('панель под наблюдением помечена в sessions', 
     if (cmd === 'herdr') return { ok: true, code: 0, stdout: JSON.stringify({ result: { agents: [agent] } }), stderr: '' };
     return { ok: true, code: 0, stdout: '[]', stderr: '' };
   };
-  const before = buildPanes(run, '/db', { lock: dir });
+  const runAll = async (jobs) => jobs.map(() => ({ ok: true, code: 0, stdout: '', stderr: '' }));
+  const before = await buildPanes(run, runAll, '/db', { lock: dir });
   assert.equal(before.panes[0].watched, false, 'прямой prompt оставил бы панель без наблюдения');
 
   const held = acquire('install', { ...dir, pid: process.pid });
   try {
-    const after = buildPanes(run, '/db', { lock: dir });
+    const after = await buildPanes(run, runAll, '/db', { lock: dir });
     assert.equal(after.panes[0].watched, true);
   } finally {
     held.release();
