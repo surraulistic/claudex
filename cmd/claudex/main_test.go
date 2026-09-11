@@ -60,7 +60,7 @@ func TestPanesAreOrderedActiveFirstThenRecent(t *testing.T) {
 		{PaneID: "p-done-свежая", Status: "done", LastActivity: at("2026-09-05T00:00:00Z")},
 		{PaneID: "p-чужой-статус", Status: "затмение"},
 	}
-	sort.SliceStable(v, less(v))
+	sort.SliceStable(v, func(i, j int) bool { return less(v[i], v[j]) })
 	got := make([]string, len(v))
 	for i, p := range v {
 		got[i] = p.PaneID

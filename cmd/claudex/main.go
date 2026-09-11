@@ -361,7 +361,7 @@ type briefSignals struct {
 
 func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEntry) briefView {
 	sig := textual.Signals(raw, entries)
-	b := briefView{
+	return briefView{
 		Target: v.Target, Label: v.Label, Kind: v.Kind, Alias: v.Alias,
 		PaneID: v.PaneID, Status: v.Status, ContextPct: v.ContextPct,
 		Limits: v.Limits, Watched: v.Watched, Title: v.Title, CWD: v.CWD,
@@ -370,22 +370,12 @@ func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEnt
 			TranscriptID: v.TranscriptID, EntryCount: v.EntryCount,
 			LastActivity: v.LastActivity, Reason: v.HistoryReason,
 		},
-		Signals: briefSignals{MR: orEmpty(sig.MRs), Tickets: orEmpty(sig.Tickets)},
+		Signals: briefSignals{
+			MR: orEmpty(sig.MRs), Tickets: orEmpty(sig.Tickets),
+			Repo: orNull(sig.Repo), LastUserPrompt: orNull(sig.LastUserPrompt),
+			CurrentToolCall: orNull(sig.CurrentToolCall),
+		},
 	}
-	for _, pair := range []struct {
-		from string
-		into **string
-	}{
-		{sig.Repo, &b.Signals.Repo},
-		{sig.LastUserPrompt, &b.Signals.LastUserPrompt},
-		{sig.CurrentToolCall, &b.Signals.CurrentToolCall},
-	} {
-		if pair.from != "" {
-			val := pair.from
-			*pair.into = &val
-		}
-	}
-	return b
 }
 
 func orEmpty(in []string) []string {
@@ -393,6 +383,15 @@ func orEmpty(in []string) []string {
 		return []string{}
 	}
 	return in
+}
+
+// orNull: пустая строка в этих полях значит «нечего показать», и уходить в
+// JSON должна как null, а не как "".
+func orNull(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func cmdSessions(o opts, withTail bool) error {
@@ -426,61 +425,46 @@ func cmdSessions(o opts, withTail bool) error {
 		}
 	}
 	// Хвосты читаются разом: последовательно это самая долгая часть команды.
-	raws := make([]string, len(panes))
+	seen := make([]sighting, len(panes))
 	var wg sync.WaitGroup
 	for i, p := range panes {
 		wg.Add(1)
 		go func(i int, p state.Pane) {
 			defer wg.Done()
-			raws[i] = rawTail(c, p, lines)
+			seen[i].raw = rawTail(c, p, lines)
 		}(i, p)
 	}
 	wg.Wait()
 
-	views := make([]paneView, len(panes))
-	entries := make([][]textual.HistoryEntry, len(panes))
-	var hwg sync.WaitGroup
 	for i, p := range panes {
-		g := textual.Gauges(raws[i])
-		v := paneView{
+		g := textual.Gauges(seen[i].raw)
+		seen[i].view = paneView{
 			Target: firstNonEmpty(labels[p.TabID], p.ID), Label: labels[p.TabID],
 			Kind: p.Kind, PaneID: p.ID, ContextPct: g.ContextPct, Limits: g.Limits,
 			Watched: busy[p.ID], Status: p.Status, Title: p.Title, CWD: p.CWD,
-			Focused: p.Focused,
+			Focused: p.Focused, SessionID: orNull(p.SessionID), Alias: orNull(p.Name),
 		}
-		if p.SessionID != "" {
-			v.SessionID = &p.SessionID
-		}
-		if p.Name != "" {
-			name := p.Name
-			v.Alias = &name
-		}
-		views[i] = v
 		// Дайджест каждой панели — отдельный запрос к индексу; подряд их
 		// десять, и это самая долгая часть после herdr.
-		hwg.Add(1)
+		wg.Add(1)
 		go func(i int, p state.Pane) {
-			defer hwg.Done()
-			entries[i] = fillHistory(&views[i], db, p, o.limit, o.chars)
+			defer wg.Done()
+			seen[i].entries = fillHistory(&seen[i].view, db, p, o.limit, o.chars)
 		}(i, p)
 	}
-	hwg.Wait()
-	order := make([]int, len(views))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(a, b int) bool { return less(views)(order[a], order[b]) })
+	wg.Wait()
+	sort.SliceStable(seen, func(i, j int) bool { return less(seen[i].view, seen[j].view) })
 
 	if !withTail {
-		sorted := make([]paneView, len(views))
-		for k, i := range order {
-			sorted[k] = views[i]
+		views := make([]paneView, len(seen))
+		for i, s := range seen {
+			views[i] = s.view
 		}
-		return emit(o, map[string]any{"panes": sorted})
+		return emit(o, map[string]any{"panes": views})
 	}
-	briefs := make([]briefView, len(views))
-	for k, i := range order {
-		briefs[k] = toBrief(views[i], raws[i], textual.CleanTail(raws[i], lines), entries[i])
+	briefs := make([]briefView, len(seen))
+	for i, s := range seen {
+		briefs[i] = toBrief(s.view, s.raw, textual.CleanTail(s.raw, lines), s.entries)
 	}
 	return emit(o, map[string]any{
 		"generated_at": time.Now().Format(time.RFC3339),
@@ -488,36 +472,41 @@ func cmdSessions(o opts, withTail bool) error {
 	})
 }
 
+// sighting — всё, что собрано про одну панель за этот запуск. Держится вместе,
+// потому что порядок вывода задаётся видом, а печатаются и хвост, и история.
+type sighting struct {
+	view    paneView
+	raw     string
+	entries []textual.HistoryEntry
+}
+
 // Порядок вывода: сначала деятельные панели, внутри — по свежести истории,
 // панели без истории в конец своей группы. Смотрящий читает список сверху и
 // должен первым делом видеть то, что происходит сейчас.
 var activeFirst = map[string]int{"working": 0, "done": 1, "idle": 2}
 
-func less(v []paneView) func(i, j int) bool {
-	return func(i, j int) bool {
-		a, b := v[i], v[j]
-		ra, ok := activeFirst[a.Status]
-		if !ok {
-			ra = 3
-		}
-		rb, ok := activeFirst[b.Status]
-		if !ok {
-			rb = 3
-		}
-		if ra != rb {
-			return ra < rb
-		}
-		if a.LastActivity == nil || b.LastActivity == nil {
-			if (a.LastActivity == nil) != (b.LastActivity == nil) {
-				return b.LastActivity == nil
-			}
-			return a.PaneID < b.PaneID
-		}
-		if *a.LastActivity != *b.LastActivity {
-			return *a.LastActivity > *b.LastActivity
+func less(a, b paneView) bool {
+	ra, ok := activeFirst[a.Status]
+	if !ok {
+		ra = 3
+	}
+	rb, ok := activeFirst[b.Status]
+	if !ok {
+		rb = 3
+	}
+	if ra != rb {
+		return ra < rb
+	}
+	if a.LastActivity == nil || b.LastActivity == nil {
+		if (a.LastActivity == nil) != (b.LastActivity == nil) {
+			return b.LastActivity == nil
 		}
 		return a.PaneID < b.PaneID
 	}
+	if *a.LastActivity != *b.LastActivity {
+		return *a.LastActivity > *b.LastActivity
+	}
+	return a.PaneID < b.PaneID
 }
 
 // fillHistory возвращает тексты записей: по ним, а не по живому экрану,
