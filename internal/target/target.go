@@ -13,7 +13,9 @@ import (
 	"github.com/surraulistic/claudex/internal/state"
 )
 
-func Resolve(q string, panes []state.Pane) (state.Pane, error) {
+// Resolve принимает метки вкладок отдельной картой: метка — свойство вкладки,
+// а не панели, и тащить её в модель состояния незачем.
+func Resolve(q string, panes []state.Pane, labels map[string]string) (state.Pane, error) {
 	if q == "" {
 		return state.Pane{}, fmt.Errorf("цель не задана")
 	}
@@ -23,8 +25,14 @@ func Resolve(q string, panes []state.Pane) (state.Pane, error) {
 		}
 	}
 	low := strings.ToLower(q)
-	// Точное совпадение заголовка снимает двусмысленность там, где подстрока
-	// её создаёт: «license» и «license-cleanup» живут рядом.
+	// Имя агента и метка вкладки — то, чем панель называют люди и что сам
+	// инструмент печатает в поле target. Точное совпадение сильнее любой
+	// подстроки: «media» не должно цепляться за чужой заголовок.
+	for _, p := range panes {
+		if strings.ToLower(p.Name) == low || strings.ToLower(labels[p.ID]) == low {
+			return p, nil
+		}
+	}
 	for _, p := range panes {
 		if strings.ToLower(p.Title) == low {
 			return p, nil
@@ -33,6 +41,8 @@ func Resolve(q string, panes []state.Pane) (state.Pane, error) {
 	var hits []state.Pane
 	for _, p := range panes {
 		if strings.Contains(strings.ToLower(p.Title), low) ||
+			strings.Contains(strings.ToLower(p.Name), low) ||
+			strings.Contains(strings.ToLower(labels[p.ID]), low) ||
 			strings.HasSuffix(p.CWD, q) {
 			hits = append(hits, p)
 		}
@@ -45,7 +55,11 @@ func Resolve(q string, panes []state.Pane) (state.Pane, error) {
 	}
 	var names []string
 	for _, p := range hits {
-		names = append(names, fmt.Sprintf("%s (%s)", p.ID, p.Title))
+		name := p.Title
+		if labels[p.ID] != "" {
+			name = labels[p.ID]
+		}
+		names = append(names, fmt.Sprintf("%s (%s)", p.ID, name))
 	}
 	return state.Pane{}, fmt.Errorf("цель %q двусмысленна: %s", q, strings.Join(names, ", "))
 }

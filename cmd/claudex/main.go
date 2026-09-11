@@ -227,6 +227,43 @@ func defaultJournal() string {
 
 func client() *herdr.Client { return herdr.New(herdr.DefaultSocket()) }
 
+// tabLabels — метки вкладок, ими панель называют люди.
+func tabLabels(c *herdr.Client) map[string]string {
+	out := map[string]string{}
+	tabs, err := c.Tabs()
+	if err != nil {
+		return out
+	}
+	byTab := map[string]string{}
+	for _, t := range tabs {
+		byTab[t.TabID] = t.Label
+	}
+	agents, err := c.Agents()
+	if err != nil {
+		return out
+	}
+	for _, a := range agents {
+		if l := byTab[a.TabID]; l != "" {
+			out[a.PaneID] = l
+		}
+	}
+	return out
+}
+
+// resolve находит панель по чему угодно, чем её называют: идентификатору,
+// идентификатору сессии, имени агента, метке вкладки, заголовку, каталогу.
+func resolve(q string) (state.Pane, error) {
+	panes, err := livePanes(opts{})
+	if err != nil {
+		return state.Pane{}, err
+	}
+	p, err := target.Resolve(q, panes, tabLabels(client()))
+	if err != nil {
+		return state.Pane{}, exitcode.Wrap(exitcode.NotFound, err)
+	}
+	return p, nil
+}
+
 func livePanes(o opts) ([]state.Pane, error) {
 	agents, err := client().Agents()
 	if err != nil {
@@ -555,12 +592,8 @@ func (o opts) match(q string) string {
 }
 
 func cmdDigest(o opts, q string) error {
-	panes, err := livePanes(opts{})
-	if err != nil {
-		return err
-	}
 	key := q
-	if p, err := target.Resolve(q, panes); err == nil {
+	if p, err := resolve(q); err == nil {
 		key = p.SessionID
 		fmt.Printf("%s  %s  %s  %s\n\n", p.ID, p.Kind, p.Status, p.Title)
 		for _, l := range tailFor(client(), p, o.tailLines) {
@@ -667,9 +700,8 @@ func cmdFind(o opts, q string) error {
 }
 
 func cmdSearch(o opts, tgt, q string) error {
-	panes, _ := livePanes(opts{})
 	key, shown := tgt, tgt
-	if p, err := target.Resolve(tgt, panes); err == nil {
+	if p, err := resolve(tgt); err == nil {
 		if p.SessionID != "" {
 			key = p.SessionID
 		}
@@ -776,13 +808,9 @@ func cmdWatch(o opts, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("нужна цель")
 	}
-	panes, err := livePanes(opts{})
+	p, err := resolve(args[0])
 	if err != nil {
 		return err
-	}
-	p, err := target.Resolve(args[0], panes)
-	if err != nil {
-		return exitcode.Wrap(exitcode.NotFound, err)
 	}
 	a, err := client().Wait(p.ID, []string{"idle", "done", "blocked"}, o.timeout)
 	if err != nil {
@@ -797,13 +825,9 @@ func cmdWatch(o opts, args []string) error {
 }
 
 func cmdDelegate(o opts, tgt, prompt string) error {
-	panes, err := livePanes(opts{})
+	p, err := resolve(tgt)
 	if err != nil {
 		return err
-	}
-	p, err := target.Resolve(tgt, panes)
-	if err != nil {
-		return exitcode.Wrap(exitcode.NotFound, err)
 	}
 	j := journal.Open(defaultJournal())
 
