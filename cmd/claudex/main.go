@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/surraulistic/claudex/internal/herdr"
+	"github.com/surraulistic/claudex/internal/index"
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/state"
 	"github.com/surraulistic/claudex/internal/store"
@@ -42,6 +43,7 @@ type opts struct {
 	after     int
 	timeout   time.Duration
 	noWait    bool
+	full      bool
 }
 
 func main() {
@@ -69,6 +71,7 @@ func run() error {
 	fs.IntVar(&o.after, "after", 20, "context: записей после якоря")
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "watch/delegate: срок ожидания")
 	fs.BoolVar(&o.noWait, "no-wait", false, "delegate: отправить и выйти")
+	fs.BoolVar(&o.full, "full", false, "index: пересобрать с нуля")
 	// Флаги принимаются где угодно, в том числе после запроса: прежняя версия
 	// так умела, и «claudex find "миграция" --limit 3» пишут именно так.
 	// Разбор из стандартной библиотеки останавливается на первом позиционном
@@ -114,6 +117,8 @@ func run() error {
 			return fmt.Errorf("нужен идентификатор задачи")
 		}
 		return cmdDone(args[1], strings.Join(args[2:], " "))
+	case "index":
+		return cmdIndex(o)
 	case "tasks":
 		return cmdTasks()
 	default:
@@ -123,7 +128,7 @@ func run() error {
 
 // boolFlags — флаги без значения; у остальных следующий довод считается их
 // значением, если не написан через «=».
-var boolFlags = map[string]bool{"no-wait": true, "help": true, "h": true}
+var boolFlags = map[string]bool{"no-wait": true, "full": true, "help": true, "h": true}
 
 func splitArgs(argv []string) (flags, rest []string) {
 	for i := 0; i < len(argv); i++ {
@@ -163,6 +168,7 @@ func usage() {
   claudex watch <цель>                   дождаться, пока панель освободится
   claudex delegate <цель> "<задача>"     поручить и дождаться, одной командой
   claudex done <id> "<что вышло>"        отчитаться о порученной задаче
+  claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks                          журнал поручений
 
 Цель — pane_id, session_id, кусок заголовка или рабочий каталог.
@@ -630,6 +636,14 @@ func isOutcomeWord(w string) bool {
 		return true
 	}
 	return false
+}
+
+func cmdIndex(o opts) error {
+	st, err := index.Build(index.DefaultCass(), o.db, o.full)
+	if err != nil {
+		return err
+	}
+	return emit(st)
 }
 
 func cmdTasks() error {
