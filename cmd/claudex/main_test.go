@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/surraulistic/claudex/internal/journal"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,5 +120,28 @@ func TestDigestCarriesTheFourDocumentedParts(t *testing.T) {
 		if _, ok := got[k]; !ok {
 			t.Fatalf("поле %q пропало из live: %s", k, live)
 		}
+	}
+}
+
+func TestTasksNamesWhatWasNeverDelivered(t *testing.T) {
+	// Сбой 742309b7 остался незамеченным именно потому, что провал пробуждения
+	// жил только в логе отсоединённого наблюдателя.
+	recs := []journal.Record{
+		{Task: "готовая", Event: journal.Notified, Outcome: "разбужен"},
+		{Task: "провал", Event: journal.Notified, Outcome: "не разбужен, показано человеку"},
+		{Task: "провал", Event: journal.Finished},
+		{Task: "тихая", Event: journal.Notified, Outcome: "не доставлено"},
+	}
+	got := undeliveredWakes(recs)
+	if len(got) != 2 {
+		t.Fatalf("названы обе недоставленные, получено %v", got)
+	}
+	for _, want := range []string{"провал", "тихая"} {
+		if !strings.Contains(strings.Join(got, " "), want) {
+			t.Fatalf("%q не названа: %v", want, got)
+		}
+	}
+	if strings.Contains(strings.Join(got, " "), "готовая") {
+		t.Fatal("разбуженная в список не попадает")
 	}
 }

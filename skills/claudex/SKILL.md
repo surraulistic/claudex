@@ -223,8 +223,23 @@ Waiting for the pane to start is Herdr's job — the send and the wait leave in 
 single `agent.prompt` call, so there is no gap for a fast answer to fall
 through. Measured: a 25-second task took 34 seconds end to end, not 0.
 
-Add `--notify <target>` to wake another pane when the task ends. The result of
-that notification comes back in `notified` and is never silenced.
+Add `--notify <target>` to wake another pane when the task ends.
+
+Waking waits for the target to go free — writing into a busy pane would land in
+somebody else's turn. The wait lives in the watcher process and costs polling,
+not tokens, so `--notify-timeout` defaults to 1800 s rather than seconds.
+If the target is still busy when that runs out, the completion is **not**
+dropped: it goes to the human as a Herdr notification instead. Either way the
+outcome is appended to the journal as a `notified` record, and `claudex tasks`
+lists at the end anything that never reached its leader.
+
+```json
+"notified": {"target": "wE:p17", "ok": false, "waited_seconds": 1800,
+             "fallback": true, "reason": "ведущий не освободился…"}
+```
+
+`ok` means the leader was prompted. `fallback` means the human was told
+directly. Both false means nobody was reached — read the `reason`.
 
 **Use `--detach` unless you deliberately want to block.** Without it the call
 holds your turn for as long as the pane works, and nobody can talk to you

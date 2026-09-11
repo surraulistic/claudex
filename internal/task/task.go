@@ -181,39 +181,92 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// Notify будит ведущего после завершения поручения. Панель ведущего может быть
-// занята своим ходом, поэтому попытки повторяются: разбудить с третьего раза
-// лучше, чем не разбудить вовсе.
-func Notify(ctx context.Context, c *herdr.Client, target, text string, attempts int, gap time.Duration) error {
-	if attempts <= 0 {
-		attempts = 5
+// Delivery — чем кончилась доставка факта завершения.
+type Delivery struct {
+	Target   string        `json:"target"`
+	OK       bool          `json:"ok"`
+	Waited   time.Duration `json:"-"`
+	Seconds  int           `json:"waited_seconds"`
+	Fallback bool          `json:"fallback,omitempty"`
+	Reason   string        `json:"reason,omitempty"`
+}
+
+type DeliverOptions struct {
+	// Deadline — сколько ждать, пока ведущий освободится. Ожидание живёт в уже
+	// запущенном наблюдателе и стоит только опроса herdr: токенов оно не тратит,
+	// поэтому пятнадцати секунд здесь было мало на порядок.
+	Deadline time.Duration
+	Poll     time.Duration
+}
+
+// Deliver доносит до ведущего, что поручение закончилось, и не сдаётся молча.
+//
+// Сначала ждёт, пока панель ведущего освободится: писать в занятую нельзя —
+// текст уедет в чужой ход. Если за отведённое время она так и не освободилась,
+// факт уходит человеку уведомлением herdr — канал, который не зависит ни от
+// одного агента. Итог в обоих случаях попадает в журнал: недоставленное
+// пробуждение должно быть видно, а не лежать в логе, который никто не читает.
+func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
+	id, target, text string, o DeliverOptions) Delivery {
+
+	if o.Deadline <= 0 {
+		o.Deadline = 30 * time.Minute
 	}
-	if gap <= 0 {
-		gap = 3 * time.Second
+	if o.Poll <= 0 {
+		o.Poll = 5 * time.Second
 	}
+	started := time.Now()
+	d := Delivery{Target: target}
+
+	ctx, cancel := context.WithTimeout(ctx, o.Deadline)
+	defer cancel()
 	var last error
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(gap):
+	for {
+		pane, err := c.Get(target)
+		switch {
+		case err != nil:
+			last = err
+		case !freeStates[pane.Status]:
+			last = fmt.Errorf("%s в состоянии %q", target, pane.Status)
+		default:
+			if _, err := c.Prompt(target, text, nil, 0); err == nil {
+				d.OK = true
+				d.Waited = time.Since(started)
+				d.Seconds = int(d.Waited.Seconds())
+				record(j, id, target, d)
+				return d
+			} else {
+				last = err
 			}
 		}
-		pane, err := c.Get(target)
-		if err != nil {
-			last = err
-			continue
+		select {
+		case <-ctx.Done():
+			d.Waited = time.Since(started)
+			d.Seconds = int(d.Waited.Seconds())
+			d.Reason = fmt.Sprintf("ведущий не освободился за %s: %v", o.Deadline, last)
+			d.Fallback = c.Notify("claudex: поручение "+id+" завершено",
+				text+"\n\nРазбудить "+target+" не удалось: "+last.Error()) == nil
+			record(j, id, target, d)
+			return d
+		case <-time.After(o.Poll):
 		}
-		if !freeStates[pane.Status] {
-			last = fmt.Errorf("%w: %s в состоянии %q", ErrBusy, target, pane.Status)
-			continue
-		}
-		if _, err := c.Prompt(target, text, nil, 0); err != nil {
-			last = err
-			continue
-		}
-		return nil
 	}
-	return fmt.Errorf("не удалось разбудить %s за %d попыток: %w", target, attempts, last)
+}
+
+func record(j *journal.Journal, id, target string, d Delivery) {
+	if j == nil {
+		return
+	}
+	outcome := "разбужен"
+	switch {
+	case d.OK:
+	case d.Fallback:
+		outcome = "не разбужен, показано человеку"
+	default:
+		outcome = "не доставлено"
+	}
+	j.Append(journal.Record{
+		Task: id, Event: journal.Notified, Target: target,
+		Outcome: outcome, Reason: d.Reason,
+	})
 }

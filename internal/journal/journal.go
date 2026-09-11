@@ -18,6 +18,10 @@ const (
 	Started  = "started"
 	Reported = "reported"
 	Finished = "finished"
+	// Notified — чем кончилась попытка разбудить ведущего. Раньше это писалось
+	// только в лог отсоединённого наблюдателя, который никто не читает, и
+	// недоставленное пробуждение было невидимым.
+	Notified = "notified"
 )
 
 type Record struct {
@@ -28,6 +32,7 @@ type Record struct {
 	Outcome string    `json:"outcome,omitempty"`
 	Reason  string    `json:"reason,omitempty"`
 	Prompt  string    `json:"prompt,omitempty"`
+	Target  string    `json:"target,omitempty"`
 	Attempt int       `json:"attempt,omitempty"`
 }
 

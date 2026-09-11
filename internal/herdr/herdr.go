@@ -371,3 +371,11 @@ func (c *Client) Wait(target string, until []string, timeout time.Duration) (Age
 	err := c.callFor("agent.wait", params, &out, timeout)
 	return out.Agent, err
 }
+
+// Notify показывает уведомление человеку. Это канал мимо агентов: он не зависит
+// от того, свободна ли чья-то панель, и не стоит ни одного токена.
+func (c *Client) Notify(title, body string) error {
+	return c.Call("notification.show", map[string]any{
+		"title": title, "body": body, "sound": "done",
+	}, nil)
+}

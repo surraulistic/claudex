@@ -32,23 +32,25 @@ import (
 )
 
 type opts struct {
-	db         string
-	limit      int
-	chars      int
-	tailLines  int
-	cwd        string
-	days       int
-	before     int
-	after      int
-	timeoutRaw string
-	timeout    time.Duration
-	noWait     bool
-	full       bool
-	raw        bool
-	pretty     bool
-	notify     string
-	detach     bool
-	force      bool
+	db            string
+	limit         int
+	chars         int
+	tailLines     int
+	cwd           string
+	days          int
+	before        int
+	after         int
+	timeoutRaw    string
+	timeout       time.Duration
+	noWait        bool
+	full          bool
+	raw           bool
+	pretty        bool
+	notify        string
+	notifyWaitRaw string
+	notifyWait    time.Duration
+	detach        bool
+	force         bool
 }
 
 func main() {
@@ -73,6 +75,8 @@ func run() error {
 	fs.IntVar(&o.after, "after", 20, "context: записей после якоря")
 	fs.StringVar(&o.timeoutRaw, "timeout", "1800", "watch/delegate: срок ожидания, секунды или 30m")
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
+	fs.StringVar(&o.notifyWaitRaw, "notify-timeout", "1800",
+		"delegate: сколько ждать, пока ведущий освободится")
 	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
 	fs.BoolVar(&o.pretty, "pretty", false, "JSON с отступами")
 	fs.BoolVar(&o.detach, "detach", false, "delegate: отдать ожидание отдельному процессу")
@@ -92,6 +96,11 @@ func run() error {
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
 	o.timeout = d
+	nw, err := parseTimeout(o.notifyWaitRaw)
+	if err != nil {
+		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	o.notifyWait = nw
 
 	args := rest
 	if len(args) == 0 {
@@ -201,6 +210,8 @@ func usage() {
   --detach           delegate: отдать ожидание отдельному процессу
   --force            delegate: писать и в панель, ждущую решения человека
   --notify <цель>    delegate: разбудить эту панель по завершении
+  --notify-timeout N delegate: сколько ждать освобождения ведущего (1800);
+                     не дождались — факт уходит человеку уведомлением herdr
   --raw              запрос уходит в FTS5 как есть, без экранирования
   --pretty           JSON с отступами
   --full             index: пересобрать с нуля
@@ -1015,15 +1026,10 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		"seconds":    int(res.Duration.Seconds()),
 	}
 	if o.notify != "" {
-		// Итог пробуждения возвращается вызывающему, а не глохнет: иначе он
-		// будет ждать зова, которого не случилось.
 		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
 			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
-		if err := task.Notify(ctx, client(), o.notify, text, 5, 3*time.Second); err != nil {
-			out["notified"] = map[string]any{"target": o.notify, "ok": false, "reason": err.Error()}
-		} else {
-			out["notified"] = map[string]any{"target": o.notify, "ok": true}
-		}
+		out["notified"] = task.Deliver(ctx, client(), j, res.Task, o.notify, text,
+			task.DeliverOptions{Deadline: o.notifyWait})
 	}
 	if err := emit(o, out); err != nil {
 		return err
@@ -1049,7 +1055,7 @@ func detach(o opts, pane, prompt string) error {
 	// в свой лог, которого никто не читает.
 	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw, "--db-path", o.db}
 	if o.notify != "" {
-		args = append(args, "--notify", o.notify)
+		args = append(args, "--notify", o.notify, "--notify-timeout", o.notifyWaitRaw)
 	}
 	if o.force {
 		args = append(args, "--force")
@@ -1114,10 +1120,41 @@ func cmdTasks() error {
 	}
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].Time.Before(recs[j].Time) })
 	for _, r := range recs {
+		where := r.Pane
+		if r.Event == journal.Notified {
+			where = r.Target
+		}
 		fmt.Printf("%s %-8s %-9s %-8s %s %s\n",
-			r.Time.Format("02.01 15:04"), r.Task, r.Event, r.Pane, r.Outcome, oneLine(r.Reason))
+			r.Time.Format("02.01 15:04"), r.Task, r.Event, where, r.Outcome, oneLine(r.Reason))
+	}
+	if undelivered := undeliveredWakes(recs); len(undelivered) > 0 {
+		fmt.Printf("\nне доставлено ведущему: %s\n", strings.Join(undelivered, ", "))
 	}
 	return nil
+}
+
+// undeliveredWakes — поручения, которые просили разбудить ведущего, но он так
+// и не был разбужен. Без этой строки сбой виден только в логе отсоединённого
+// наблюдателя, куда никто не смотрит.
+func undeliveredWakes(recs []journal.Record) []string {
+	asked, woken := map[string]bool{}, map[string]bool{}
+	for _, r := range recs {
+		if r.Event != journal.Notified {
+			continue
+		}
+		asked[r.Task] = true
+		if r.Outcome == "разбужен" {
+			woken[r.Task] = true
+		}
+	}
+	var out []string
+	for _, r := range recs {
+		if r.Event == journal.Notified && asked[r.Task] && !woken[r.Task] {
+			out = append(out, r.Task+" ("+r.Outcome+")")
+			asked[r.Task] = false
+		}
+	}
+	return out
 }
 
 func oneID(args []string) (int64, error) {

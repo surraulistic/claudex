@@ -350,3 +350,18 @@ func TestLongWaitDoesNotDisturbConcurrentCalls(t *testing.T) {
 		t.Fatalf("срок клиента не трогается, стал %v", c.Timeout)
 	}
 }
+
+func TestNotifyShowsToUser(t *testing.T) {
+	f := newFake(t)
+	f.replies["notification.show"] = `{"id":"x","result":{"type":"notification_show","shown":true}}`
+	if err := New(f.path).Notify("готово", "задача 742309b7"); err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Params map[string]any `json:"params"`
+	}
+	json.Unmarshal([]byte(f.lastBody()), &req)
+	if req.Params["title"] != "готово" || req.Params["body"] != "задача 742309b7" {
+		t.Fatalf("заголовок и текст доезжают, получено %v", req.Params)
+	}
+}

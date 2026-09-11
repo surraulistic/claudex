@@ -196,61 +196,96 @@ func waitForTaskID(t *testing.T, j *journal.Journal) string {
 
 var _ = json.Marshal
 
-func TestNotifyRetriesWhileLeaderIsBusy(t *testing.T) {
-	// Панель ведущего занята своим ходом; разбудить со второй попытки лучше,
-	// чем не разбудить вовсе.
+func delivery(t *testing.T, status string) (*herdrtest.Fake, *journal.Journal, *herdr.Client) {
+	t.Helper()
 	f := herdrtest.Start(t)
-	f.Reply("agent.get", agent("working"))
+	f.Reply("agent.get", agent(status))
 	f.Reply("agent.prompt", agent("idle"))
+	f.Reply("notification.show", `{"id":"x","result":{"shown":true}}`)
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	return f, j, herdr.New(f.Path)
+}
+
+func TestDeliverWaitsForTheLeaderInsteadOfGivingUp(t *testing.T) {
+	// Ровно тот сбой: ведущий был занят дольше пятнадцати секунд, и
+	// пробуждение не случилось вовсе. Ожидание живёт в уже запущенном
+	// наблюдателе и стоит только опроса herdr.
+	f, j, c := delivery(t, "working")
 	go func() {
-		time.Sleep(60 * time.Millisecond)
+		time.Sleep(80 * time.Millisecond)
 		f.Reply("agent.get", agent("idle"))
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := Notify(ctx, herdr.New(f.Path), "wE:p2", "готово", 6, 25*time.Millisecond); err != nil {
-		t.Fatalf("дождались свободной панели, получено %v", err)
+	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+		DeliverOptions{Deadline: 3 * time.Second, Poll: 10 * time.Millisecond})
+	if !d.OK {
+		t.Fatalf("дождались и разбудили, получено %+v", d)
 	}
 	if f.LastRequest("agent.prompt") == nil {
-		t.Fatal("сообщение всё-таки ушло")
+		t.Fatal("сообщение ушло ведущему")
 	}
 }
 
-func TestNotifyGivesUpWithReason(t *testing.T) {
-	f := herdrtest.Start(t)
-	f.Reply("agent.get", agent("working"))
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	err := Notify(ctx, herdr.New(f.Path), "wE:p2", "готово", 3, 5*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "3 попыток") {
-		t.Fatalf("отказ называет число попыток и причину, получено %v", err)
+func TestDeliverFallsBackToTheHumanWhenLeaderStaysBusy(t *testing.T) {
+	// Ограничение вне claudex: ведущий может быть занят сколько угодно. Тогда
+	// факт уходит человеку уведомлением herdr — мимо агентов и без токенов.
+	f, j, c := delivery(t, "working")
+	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "поручение готово",
+		DeliverOptions{Deadline: 60 * time.Millisecond, Poll: 10 * time.Millisecond})
+	if d.OK {
+		t.Fatal("ведущий так и не освободился")
+	}
+	if !d.Fallback {
+		t.Fatalf("человеку показано, получено %+v", d)
 	}
 	if f.LastRequest("agent.prompt") != nil {
-		t.Fatal("занятой панели ничего не отправлено")
+		t.Fatal("в занятую панель ничего не отправлено")
+	}
+	req := f.LastRequest("notification.show")
+	if req == nil {
+		t.Fatal("уведомление человеку не ушло")
+	}
+	body, _ := req["params"].(map[string]any)["body"].(string)
+	if !strings.Contains(body, "поручение готово") {
+		t.Fatalf("в уведомлении сам результат, получено %q", body)
 	}
 }
 
-func TestBlockedPaneIsRefusedUnlessForced(t *testing.T) {
-	// Панель ждёт решения человека: произвольный текст уедет ответом на этот
-	// вопрос. Проверено на живой панели — стоило дорого.
-	for _, status := range []string{"blocked", "unknown"} {
-		_, _, o := setup(t, status)
-		if _, err := Delegate(context.Background(), o); !errors.Is(err, ErrBusy) {
-			t.Fatalf("состояние %q отклоняется, получено %v", status, err)
+func TestDeliveryOutcomeLandsInTheJournal(t *testing.T) {
+	// Прежде итог пробуждения жил только в логе отсоединённого наблюдателя,
+	// который никто не читает, — поэтому сбой и остался незамеченным.
+	for _, c := range []struct {
+		status, want string
+		deadline     time.Duration
+	}{
+		{"idle", "разбужен", time.Second},
+		{"working", "не разбужен, показано человеку", 40 * time.Millisecond},
+	} {
+		_, j, cl := delivery(t, c.status)
+		Deliver(context.Background(), cl, j, "т1", "wE:p17", "готово",
+			DeliverOptions{Deadline: c.deadline, Poll: 10 * time.Millisecond})
+		recs, _ := j.Read()
+		var got *journal.Record
+		for i := range recs {
+			if recs[i].Event == journal.Notified {
+				got = &recs[i]
+			}
 		}
-		_, _, o = setup(t, status)
-		o.Force = true
-		if _, err := Delegate(context.Background(), o); err != nil {
-			t.Fatalf("с прямой просьбой всё же отправляется, получено %v", err)
+		if got == nil {
+			t.Fatalf("%s: записи о пробуждении нет", c.status)
+		}
+		if got.Outcome != c.want || got.Target != "wE:p17" {
+			t.Fatalf("%s: получено %+v", c.status, *got)
 		}
 	}
 }
 
-func TestIdleAndDoneAreAccepted(t *testing.T) {
-	for _, status := range []string{"idle", "done"} {
-		_, _, o := setup(t, status)
-		if _, err := Delegate(context.Background(), o); err != nil {
-			t.Fatalf("состояние %q принимается, получено %v", status, err)
-		}
+func TestDeliverStopsOnContextCancel(t *testing.T) {
+	_, j, c := delivery(t, "working")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d := Deliver(ctx, c, j, "т1", "wE:p17", "готово",
+		DeliverOptions{Deadline: time.Hour, Poll: 10 * time.Millisecond})
+	if d.OK {
+		t.Fatal("отменённая доставка не считается удавшейся")
 	}
 }
