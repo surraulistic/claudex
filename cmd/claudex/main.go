@@ -975,19 +975,6 @@ func cut(s string, max int) string {
 	return out
 }
 
-func trimTo(s string, max int) string {
-	out, _ := textual.Clip(s, max)
-	return out
-}
-
-func trim(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
-}
-
 func firstNonEmpty(a, b string) string {
 	if a != "" {
 		return a
