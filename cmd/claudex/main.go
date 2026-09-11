@@ -888,6 +888,11 @@ func detach(o opts, pane, prompt string) error {
 	if o.notify != "" {
 		args = append(args, "--notify", o.notify)
 	}
+	// Каталог заводится здесь же: журнал поручений и индекс создают его сами,
+	// а до первого из них --detach падал на «no such file or directory».
+	if err := os.MkdirAll(filepath.Dir(detachLog()), 0o755); err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
 	log, err := os.OpenFile(detachLog(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return exitcode.Wrap(exitcode.Fail, err)
@@ -899,10 +904,11 @@ func detach(o opts, pane, prompt string) error {
 	if err := cmd.Start(); err != nil {
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
-	// Процесс не ждём: иначе он умрёт вместе с нами.
-	go cmd.Process.Release()
+	// Release на unix обнуляет Pid, поэтому номер снимается до него, а не после.
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
 	return emit(o, map[string]any{
-		"pane": pane, "detached": true, "pid": cmd.Process.Pid, "log": detachLog(),
+		"pane": pane, "detached": true, "pid": pid, "log": detachLog(),
 	})
 }
 

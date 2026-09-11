@@ -156,21 +156,24 @@ func (c *Client) Agents() ([]Agent, error) {
 	var out struct {
 		Agents []Agent `json:"agents"`
 	}
-	return out.Agents, c.Call("agent.list", nil, &out)
+	err := c.Call("agent.list", nil, &out)
+	return out.Agents, err
 }
 
 func (c *Client) Tabs() ([]Tab, error) {
 	var out struct {
 		Tabs []Tab `json:"tabs"`
 	}
-	return out.Tabs, c.Call("tab.list", nil, &out)
+	err := c.Call("tab.list", nil, &out)
+	return out.Tabs, err
 }
 
 func (c *Client) Get(target string) (Agent, error) {
 	var out struct {
 		Agent Agent `json:"agent"`
 	}
-	return out.Agent, c.Call("agent.get", map[string]any{"target": target}, &out)
+	err := c.Call("agent.get", map[string]any{"target": target}, &out)
+	return out.Agent, err
 }
 
 // Read отдаёт текст экрана. Источник выбирает вызывающий: на работающей панели
@@ -353,7 +356,8 @@ func (c *Client) Prompt(target, text string, until []string, timeout time.Durati
 	var out struct {
 		Agent Agent `json:"agent"`
 	}
-	return out.Agent, c.callFor("agent.prompt", params, &out, timeout)
+	err := c.callFor("agent.prompt", params, &out, timeout)
+	return out.Agent, err
 }
 
 func (c *Client) Wait(target string, until []string, timeout time.Duration) (Agent, error) {
@@ -364,5 +368,6 @@ func (c *Client) Wait(target string, until []string, timeout time.Duration) (Age
 	var out struct {
 		Agent Agent `json:"agent"`
 	}
-	return out.Agent, c.callFor("agent.wait", params, &out, timeout)
+	err := c.callFor("agent.wait", params, &out, timeout)
+	return out.Agent, err
 }
