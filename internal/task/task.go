@@ -29,8 +29,12 @@ const (
 
 var ErrBusy = errors.New("панель занята")
 
-// Состояния, в которых панель считается свободной для нового задания.
-var freeStates = map[string]bool{"idle": true, "done": true, "blocked": true, "unknown": true}
+// Состояния, в которых панель принимает новое задание.
+//
+// blocked сюда не входит: панель ждёт решения человека, и произвольный текст
+// уедет ответом на этот вопрос — вплоть до подтверждения того, чего никто не
+// подтверждал. unknown тоже: мы попросту не знаем, что там.
+var freeStates = map[string]bool{"idle": true, "done": true}
 
 type Options struct {
 	Client  *herdr.Client
@@ -42,7 +46,10 @@ type Options struct {
 	Grace time.Duration
 	// Self — чем отчитываться. По умолчанию — тот же бинарь, что делегирует:
 	// на PATH может лежать другая сборка, которая про `done` не знает.
-	Self    string
+	Self string
+	// Force отправляет задание панели, которая ждёт решения человека. Осознанно
+	// и только по прямой просьбе.
+	Force   bool
 	Attempt int
 }
 
@@ -67,7 +74,7 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if !freeStates[pane.Status] {
+	if !freeStates[pane.Status] && !o.Force {
 		return Result{}, fmt.Errorf("%w: %s в состоянии %q", ErrBusy, o.Pane, pane.Status)
 	}
 
@@ -155,4 +162,41 @@ func newID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// Notify будит ведущего после завершения поручения. Панель ведущего может быть
+// занята своим ходом, поэтому попытки повторяются: разбудить с третьего раза
+// лучше, чем не разбудить вовсе.
+func Notify(ctx context.Context, c *herdr.Client, target, text string, attempts int, gap time.Duration) error {
+	if attempts <= 0 {
+		attempts = 5
+	}
+	if gap <= 0 {
+		gap = 3 * time.Second
+	}
+	var last error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(gap):
+			}
+		}
+		pane, err := c.Get(target)
+		if err != nil {
+			last = err
+			continue
+		}
+		if !freeStates[pane.Status] {
+			last = fmt.Errorf("%w: %s в состоянии %q", ErrBusy, target, pane.Status)
+			continue
+		}
+		if _, err := c.Prompt(target, text, nil, 0); err != nil {
+			last = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("не удалось разбудить %s за %d попыток: %w", target, attempts, last)
 }

@@ -163,3 +163,62 @@ func waitForTaskID(t *testing.T, j *journal.Journal) string {
 }
 
 var _ = json.Marshal
+
+func TestNotifyRetriesWhileLeaderIsBusy(t *testing.T) {
+	// Панель ведущего занята своим ходом; разбудить со второй попытки лучше,
+	// чем не разбудить вовсе.
+	f := herdrtest.Start(t)
+	f.Reply("agent.get", agent("working"))
+	f.Reply("agent.prompt", agent("idle"))
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		f.Reply("agent.get", agent("idle"))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := Notify(ctx, herdr.New(f.Path), "wE:p2", "готово", 6, 25*time.Millisecond); err != nil {
+		t.Fatalf("дождались свободной панели, получено %v", err)
+	}
+	if f.LastRequest("agent.prompt") == nil {
+		t.Fatal("сообщение всё-таки ушло")
+	}
+}
+
+func TestNotifyGivesUpWithReason(t *testing.T) {
+	f := herdrtest.Start(t)
+	f.Reply("agent.get", agent("working"))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := Notify(ctx, herdr.New(f.Path), "wE:p2", "готово", 3, 5*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "3 попыток") {
+		t.Fatalf("отказ называет число попыток и причину, получено %v", err)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("занятой панели ничего не отправлено")
+	}
+}
+
+func TestBlockedPaneIsRefusedUnlessForced(t *testing.T) {
+	// Панель ждёт решения человека: произвольный текст уедет ответом на этот
+	// вопрос. Проверено на живой панели — стоило дорого.
+	for _, status := range []string{"blocked", "unknown"} {
+		_, _, o := setup(t, status)
+		if _, err := Delegate(context.Background(), o); !errors.Is(err, ErrBusy) {
+			t.Fatalf("состояние %q отклоняется, получено %v", status, err)
+		}
+		_, _, o = setup(t, status)
+		o.Force = true
+		if _, err := Delegate(context.Background(), o); err != nil {
+			t.Fatalf("с прямой просьбой всё же отправляется, получено %v", err)
+		}
+	}
+}
+
+func TestIdleAndDoneAreAccepted(t *testing.T) {
+	for _, status := range []string{"idle", "done"} {
+		_, _, o := setup(t, status)
+		if _, err := Delegate(context.Background(), o); err != nil {
+			t.Fatalf("состояние %q принимается, получено %v", status, err)
+		}
+	}
+}

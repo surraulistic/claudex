@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/exitcode"
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/index"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -28,31 +30,30 @@ import (
 	"github.com/surraulistic/claudex/internal/textual"
 )
 
-// Код 6 отличает «панель занята» от настоящего сбоя: вызывающий может
-// подождать и повторить, а не считать поручение проваленным.
-const exitBusy = 6
-
 type opts struct {
-	db        string
-	limit     int
-	chars     int
-	tailLines int
-	cwd       string
-	days      int
-	before    int
-	after     int
-	timeout   time.Duration
-	noWait    bool
-	full      bool
+	db         string
+	limit      int
+	chars      int
+	tailLines  int
+	cwd        string
+	days       int
+	before     int
+	after      int
+	timeoutRaw string
+	timeout    time.Duration
+	noWait     bool
+	full       bool
+	raw        bool
+	pretty     bool
+	notify     string
+	detach     bool
+	force      bool
 }
 
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "claudex:", err)
-		if errors.Is(err, task.ErrBusy) {
-			os.Exit(exitBusy)
-		}
-		os.Exit(1)
+		os.Exit(exitcode.Of(err))
 	}
 }
 
@@ -69,7 +70,12 @@ func run() error {
 	fs.IntVar(&o.days, "days", 0, "find: не старше N дней")
 	fs.IntVar(&o.before, "before", 10, "context: записей до якоря")
 	fs.IntVar(&o.after, "after", 20, "context: записей после якоря")
-	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "watch/delegate: срок ожидания")
+	fs.StringVar(&o.timeoutRaw, "timeout", "1800", "watch/delegate: срок ожидания, секунды или 30m")
+	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
+	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
+	fs.BoolVar(&o.pretty, "pretty", false, "JSON с отступами")
+	fs.BoolVar(&o.detach, "detach", false, "delegate: отдать ожидание отдельному процессу")
+	fs.BoolVar(&o.force, "force", false, "delegate: писать и в панель, ждущую решения человека")
 	fs.BoolVar(&o.noWait, "no-wait", false, "delegate: отправить и выйти")
 	fs.BoolVar(&o.full, "full", false, "index: пересобрать с нуля")
 	// Флаги принимаются где угодно, в том числе после запроса: прежняя версия
@@ -80,6 +86,12 @@ func run() error {
 	if err := fs.Parse(flags); err != nil {
 		return err
 	}
+	d, err := exitcode.Duration(o.timeoutRaw)
+	if err != nil {
+		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	o.timeout = d
+
 	args := rest
 	if len(args) == 0 {
 		usage()
@@ -128,7 +140,10 @@ func run() error {
 
 // boolFlags — флаги без значения; у остальных следующий довод считается их
 // значением, если не написан через «=».
-var boolFlags = map[string]bool{"no-wait": true, "full": true, "help": true, "h": true}
+var boolFlags = map[string]bool{
+	"no-wait": true, "full": true, "raw": true, "pretty": true,
+	"detach": true, "force": true, "help": true, "h": true,
+}
 
 func splitArgs(argv []string) (flags, rest []string) {
 	for i := 0; i < len(argv); i++ {
@@ -172,7 +187,28 @@ func usage() {
   claudex tasks                          журнал поручений
 
 Цель — pane_id, session_id, кусок заголовка или рабочий каталог.
-Выход 6 означает «панель занята», а не сбой.
+
+Флаги:
+  --db-path <путь>   индекс (умолчание: $CLAUDEX_INDEX или ~/.claudex/index.db)
+  --limit N          записей истории (8) или результатов поиска
+  --chars N          символов на запись (400)
+  --tail-lines N     строк живого хвоста (12, brief 8)
+  --cwd <путь>       фильтр по рабочему каталогу
+  --days N           find: не старше N дней
+  --before N         context: записей до якоря (10)
+  --after N          context: записей после якоря (20)
+  --timeout N        watch/delegate: секунды числом либо вид 30m (1800)
+  --no-wait          delegate: отправить и выйти
+  --detach           delegate: отдать ожидание отдельному процессу
+  --force            delegate: писать и в панель, ждущую решения человека
+  --notify <цель>    delegate: разбудить эту панель по завершении
+  --raw              запрос уходит в FTS5 как есть, без экранирования
+  --pretty           JSON с отступами
+  --full             index: пересобрать с нуля
+
+Коды выхода: 0 успех · 2 цель не найдена · 3 herdr недоступен · 4 ошибка вызова
+             5 не дождался · 6 панель занята, задание не отправлено
+             7 сбой herdr при ожидании — исход неизвестен
 `)
 }
 
@@ -194,7 +230,7 @@ func client() *herdr.Client { return herdr.New(herdr.DefaultSocket()) }
 func livePanes(o opts) ([]state.Pane, error) {
 	agents, err := client().Agents()
 	if err != nil {
-		return nil, err
+		return nil, exitcode.Wrap(exitcode.NoHerdr, err)
 	}
 	st := state.New()
 	st.Load(agents)
@@ -315,7 +351,7 @@ func cmdSessions(o opts, withTail bool) error {
 		go func(i int, p state.Pane) { defer hwg.Done(); fillHistory(&views[i], db, p) }(i, p)
 	}
 	hwg.Wait()
-	return emit(map[string]any{"panes": views})
+	return emit(o, map[string]any{"panes": views})
 }
 
 func fillHistory(v *paneView, db *store.Store, p state.Pane) {
@@ -358,10 +394,22 @@ func watchedPanes() map[string]bool {
 	return out
 }
 
-func emit(v any) error {
+func emit(o opts, v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
+	if o.pretty {
+		enc.SetIndent("", "  ")
+	}
 	return enc.Encode(v)
+}
+
+// match готовит запрос для FTS5. --raw отдаёт его движку как есть: изредка
+// нужен его собственный синтаксис, NEAR или префиксная звёздочка.
+func (o opts) match(q string) string {
+	if o.raw {
+		return q
+	}
+	return store.Match(q)
 }
 
 func cmdDigest(o opts, q string) error {
@@ -385,7 +433,7 @@ func cmdDigest(o opts, q string) error {
 	defer db.Close()
 	d, err := db.Digest(key, o.limit, o.chars)
 	if err != nil {
-		return err
+		return exitcode.Wrap(exitcode.NotFound, err)
 	}
 	fmt.Printf("разговор %d · %s · записей %d\n", d.ConvID, d.Agent, d.EntryCount)
 	for _, e := range d.Entries {
@@ -466,12 +514,12 @@ func cmdFind(o opts, q string) error {
 		return err
 	}
 	defer db.Close()
-	match := store.Match(q)
+	match := o.match(q)
 	hits, err := db.Search(match, store.SearchOpts{Limit: o.limit, Days: o.days})
 	if err != nil {
 		return err
 	}
-	return emit(map[string]any{
+	return emit(o, map[string]any{
 		"query": q, "match": match, "hits": len(hits), "sessions": group(hits),
 	})
 }
@@ -489,14 +537,14 @@ func cmdSearch(o opts, tgt, q string) error {
 	defer db.Close()
 	d, err := db.Digest(key, 1, 1)
 	if err != nil {
-		return err
+		return exitcode.Wrap(exitcode.NotFound, err)
 	}
-	match := store.Match(q)
+	match := o.match(q)
 	hits, err := db.Search(match, store.SearchOpts{Limit: o.limit, ConvID: d.ConvID})
 	if err != nil {
 		return err
 	}
-	return emit(map[string]any{
+	return emit(o, map[string]any{
 		"query": q, "match": match, "target": tgt, "transcript_id": d.ConvID,
 		"hits": len(hits), "sessions": group(hits),
 	})
@@ -514,9 +562,9 @@ func cmdEntry(o opts, args []string) error {
 	defer db.Close()
 	e, err := db.Entry(id)
 	if err != nil {
-		return err
+		return exitcode.Wrap(exitcode.NotFound, err)
 	}
-	return emit(entryView(e))
+	return emit(o, entryView(e))
 }
 
 func entryView(e store.FullEntry) map[string]any {
@@ -546,7 +594,7 @@ func cmdContext(o opts, args []string) error {
 	defer db.Close()
 	w, err := db.Context(id, o.before, o.after)
 	if err != nil {
-		return err
+		return exitcode.Wrap(exitcode.NotFound, err)
 	}
 	entries := make([]map[string]any, 0, len(w.Entries))
 	for _, e := range w.Entries {
@@ -557,7 +605,7 @@ func cmdContext(o opts, args []string) error {
 			"chars": e.Len, "anchor": e.ID == w.Anchor, "text": e.Text,
 		})
 	}
-	return emit(map[string]any{
+	return emit(o, map[string]any{
 		"anchor": w.Anchor, "transcript_id": w.ConvID, "entries": entries,
 	})
 }
@@ -572,14 +620,15 @@ func cmdWatch(o opts, args []string) error {
 	}
 	p, err := target.Resolve(args[0], panes)
 	if err != nil {
-		return err
+		return exitcode.Wrap(exitcode.NotFound, err)
 	}
 	a, err := client().Wait(p.ID, []string{"idle", "done", "blocked"}, o.timeout)
 	if err != nil {
-		return err
+		// herdr не ответил во время ожидания: исход неизвестен, и выдавать
+		// это за «дождались» нельзя.
+		return exitcode.Wrap(exitcode.Unknown, err)
 	}
-	fmt.Printf("%s освободилась: %s\n", p.ID, a.Status)
-	return nil
+	return emit(o, map[string]any{"pane": p.ID, "status": a.Status})
 }
 
 func cmdDelegate(o opts, tgt, prompt string) error {
@@ -589,37 +638,96 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	}
 	p, err := target.Resolve(tgt, panes)
 	if err != nil {
-		return err
+		return exitcode.Wrap(exitcode.NotFound, err)
 	}
 	j := journal.Open(defaultJournal())
+
 	if o.noWait {
 		a, err := client().Get(p.ID)
 		if err != nil {
-			return err
+			return exitcode.Wrap(exitcode.NoHerdr, err)
 		}
 		if a.Status == "working" {
-			return fmt.Errorf("%w: %s", task.ErrBusy, p.ID)
+			return exitcode.Errorf(exitcode.Busy, "панель занята: %s", p.ID)
 		}
-		_, err = client().Prompt(p.ID, prompt, nil, 0)
-		return err
+		if _, err := client().Prompt(p.ID, prompt, nil, 0); err != nil {
+			return exitcode.Wrap(exitcode.BadCall, err)
+		}
+		return emit(o, map[string]any{"pane": p.ID, "sent": true, "waited": false})
+	}
+
+	if o.detach {
+		return detach(o, p.ID, prompt)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	res, err := task.Delegate(ctx, task.Options{
-		Client: client(), Journal: j, Pane: p.ID, Prompt: prompt, Timeout: o.timeout,
+		Client: client(), Journal: j, Pane: p.ID, Prompt: prompt,
+		Timeout: o.timeout, Force: o.force,
 	})
 	if err != nil {
+		if errors.Is(err, task.ErrBusy) {
+			return exitcode.Wrap(exitcode.Busy, err)
+		}
+		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+
+	if o.notify != "" {
+		// Ведущего будим до возврата: если пробуждение не удалось, вызывающий
+		// должен об этом узнать, а не считать, что его позовут.
+		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
+			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
+		if err := task.Notify(ctx, client(), o.notify, text, 5, 3*time.Second); err != nil {
+			fmt.Fprintln(os.Stderr, "claudex: разбудить не вышло:", err)
+		}
+	}
+
+	if err := emit(o, map[string]any{
+		"task": res.Task, "pane": p.ID, "outcome": res.Outcome,
+		"said": res.Said, "reason": res.Reason,
+		"seconds": int(res.Duration.Seconds()),
+	}); err != nil {
 		return err
 	}
-	fmt.Printf("задача %s · %s · %s · %s\n", res.Task, p.ID, res.Outcome, res.Duration.Round(time.Second))
-	if res.Said != "" || res.Reason != "" {
-		fmt.Printf("  %s %s\n", res.Said, res.Reason)
-	}
 	if res.Outcome == task.TimedOut {
-		os.Exit(1)
+		return exitcode.Errorf(exitcode.Timeout, "задача %s не уложилась в срок", res.Task)
 	}
 	return nil
+}
+
+// detach отдаёт ожидание отдельному процессу и возвращает управление сразу:
+// ход вызывающего не занят, а разбудит его --notify.
+func detach(o opts, pane, prompt string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw}
+	if o.notify != "" {
+		args = append(args, "--notify", o.notify)
+	}
+	log, err := os.OpenFile(detachLog(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+	defer log.Close()
+	cmd := exec.Command(self, args...)
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+	// Процесс не ждём: иначе он умрёт вместе с нами.
+	go cmd.Process.Release()
+	return emit(o, map[string]any{
+		"pane": pane, "detached": true, "pid": cmd.Process.Pid, "log": detachLog(),
+	})
+}
+
+func detachLog() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claudex", "detached.log")
 }
 
 func cmdDone(id, reason string) error {
@@ -643,7 +751,7 @@ func cmdIndex(o opts) error {
 	if err != nil {
 		return err
 	}
-	return emit(st)
+	return emit(o, st)
 }
 
 func cmdTasks() error {
