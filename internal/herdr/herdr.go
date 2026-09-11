@@ -8,6 +8,7 @@ package herdr
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -59,6 +60,29 @@ type Agent struct {
 type Tab struct {
 	TabID string `json:"tab_id"`
 	Label string `json:"label"`
+}
+
+// Error — отказ самого herdr. Код нужен отдельно от текста: «не дождались» и
+// «сломалось во время ожидания» — разные исходы для вызывающего, и различить
+// их по подстроке в сообщении нельзя.
+type Error struct {
+	Method  string
+	Code    string
+	Message string
+}
+
+func (e *Error) Error() string {
+	return fmt.Sprintf("herdr %s: %s (%s)", e.Method, e.Message, e.Code)
+}
+
+// CodeOf достаёт код отказа сквозь обёртки; пустая строка значит, что отказал
+// не herdr.
+func CodeOf(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	return ""
 }
 
 type envelope struct {
@@ -120,7 +144,7 @@ func (c *Client) call(method string, params any, out any, timeout time.Duration)
 		return fmt.Errorf("нечитаемый ответ herdr на %s: %w", method, err)
 	}
 	if env.Error != nil {
-		return fmt.Errorf("herdr %s: %s (%s)", method, env.Error.Message, env.Error.Code)
+		return &Error{Method: method, Code: env.Error.Code, Message: env.Error.Message}
 	}
 	if out == nil {
 		return nil

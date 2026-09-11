@@ -25,6 +25,7 @@ Search is plain SQLite FTS5 over that index, so it matches any language.
 ```bash
 claudex brief             # every live pane at once — status, tail, signals
 claudex index             # catch the index up; --full rebuilds from scratch
+claudex tasks             # journal of everything delegated
 ```
 
 The index is incremental: a catch-up costs seconds, a full rebuild about half a
@@ -152,11 +153,13 @@ claudex watch install --timeout 600
 
 Run it **in the background**. It holds no model, spends no tokens, and does not
 poll: it blocks inside Herdr, which already tracks pane state. When the pane
-goes idle, done or blocked, the process prints the pane's digest and exits — and
-your harness wakes you on that exit, with the result already in hand.
+goes idle, done or blocked, the process prints `{"pane", "status",
+"final_status"}` and exits — and your harness wakes you on that exit, with the
+result already in hand.
 
-Exit `5` means it gave up waiting; `final_status` is then `unknown`, not `idle`.
-Do not read that as "the pane finished".
+Exit `5` means it gave up waiting and nothing is printed; the pane's state is
+then unknown, not `idle`. Do not read that as "the pane finished". Exit `7` is
+different again: Herdr itself failed mid-wait.
 
 ## Delegating
 
@@ -166,60 +169,59 @@ logged. Correlation cannot be added afterwards — the watch has to begin with t
 send, and a bare prompt does not do that.
 
 ```bash
-claudex delegate install "<task>"          # send, wait, return the digest
+claudex delegate install "<task>"          # send, wait, return the result
 claudex delegate install "<task>" --no-wait
 ```
 
-Outcomes are distinct on purpose, and the exit code carries them: `0` the pane
-finished, `5` it did not finish in time, `7` Herdr failed while waiting so the
-outcome is **unknown**, `8` the pane never picked the task up. Never read `7` as
-`5`: "we could not tell" is not "it did not finish".
+Outcomes are distinct on purpose, and both the JSON and the exit code carry
+them. `outcome` is one of:
 
-Add `--notify <target>` to wake another pane when the task ends; the result of
-that notification (attempts and failures) comes back in `notified` and is never
-silenced.
+- `отчиталась` — the task reported back under its own id. This is the strong
+  case: the completion is provably *this* task's, not whatever the pane happened
+  to finish. `correlated: true`.
+- `освободилась без отчёта` — the pane went idle but never reported. Something
+  finished; you cannot tell that it was your task. `correlated: false`.
+- `не уложилась в срок` — exit `5`.
 
-It refuses with exit `6` when the pane is not `idle`, before sending anything —
-Herdr would have queued the prompt and interleaved the two tasks. Take the
-refusal seriously: wait, or start a fresh agent.
+How the correlation works: the prompt carries a line telling the agent to run
+`claudex done <task-id> "<one line>"` as its last action. That appends to
+`~/.claudex/tasks.jsonl` along with the reporting pane, taken from
+`HERDR_PANE_ID`. A screen marker would not work — the pane redraws the prompt
+itself, so any pattern placed in the task text matches immediately.
 
-Before waiting for the pane to finish, it waits for the pane to **start**
-(`--arm`, 120s by default). Without that step the wait returns at once on the
-pane's *previous* turn and reports work that was never done; `armed: false` in
-the result means the pane never picked the task up.
+`claudex tasks` prints that journal: every send, every report, every outcome.
+
+It refuses with exit `6` when the pane is neither `idle` nor `done`, before
+sending anything. `blocked` is refused too, and that one matters: a blocked pane
+is waiting on a human decision, and arbitrary text would arrive as the **answer
+to that question**. `--force` overrides, and is only for when you were asked to.
+
+Waiting for the pane to start is Herdr's job — the send and the wait leave in a
+single `agent.prompt` call, so there is no gap for a fast answer to fall
+through. Measured: a 25-second task took 34 seconds end to end, not 0.
+
+Add `--notify <target>` to wake another pane when the task ends. The result of
+that notification comes back in `notified` and is never silenced.
 
 **Use `--detach` unless you deliberately want to block.** Without it the call
 holds your turn for as long as the pane works, and nobody can talk to you
 meanwhile. A trailing `&` does **not** help: the child inherits stdout, the pipe
-stays open, and the shell waits for EOF anyway — measured, a 2-second background
-sleep still delayed the caller by 2021 ms.
+stays open, and the shell waits for EOF anyway.
 
 ```bash
 claudex delegate install "<task>" --detach --notify "<your own pane>"
 ```
 
-It returns in about a quarter of a second with the watcher's `pid` and a `log`
-path. The watcher runs in its own process group, outlives your turn, and sends
-you the result when the pane settles. `--detach` requires `--notify`: a detached
-watcher writes to its log, and without a notification nobody would ever read it.
+It returns in about 0.15 s with the watcher's `pid` and a `log` path. The
+watcher runs in its own session, outlives your turn, and wakes you when the pane
+settles. `--detach` requires `--notify` — a detached watcher writes to its log,
+and without a notification nobody would ever read it (exit `4`).
 
 Blocking form, when you truly want to wait and nothing else is going on:
 
 ```bash
 claudex delegate install "<task>"
 ```
-
-`correlated: true` means the watcher saw the pane *enter* `working` after the
-send, so the completion is provably this task's. Attaching to a pane that was
-already busy gives `correlated: false` — the pane finished *something*, and you
-cannot tell what.
-
-`sessions` and `brief` carry `watched` per pane. A pane that is `working` with
-`watched: false` is running work nobody is waiting on — usually the trace of a
-direct `herdr agent prompt`. Treat it as a warning, not as progress.
-
-There is no long-running supervisor: a watcher lives exactly one task and exits.
-Nothing here keeps running on its own, and nothing restarts it.
 
 ## Driving a session
 
@@ -253,4 +255,6 @@ asked for it, and quote back what was sent.
 ## Exit codes
 
 `0` success, including a degraded `history` · `2` target not found or ambiguous
-— re-run `claudex sessions` · `3` Herdr unreachable · `4` bad invocation.
+— re-run `claudex sessions` · `3` Herdr unreachable · `4` bad invocation ·
+`5` not finished in time · `6` pane busy, nothing sent · `7` Herdr failed while
+waiting, so the outcome is unknown. Never read `7` as `5`.

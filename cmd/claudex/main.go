@@ -624,11 +624,14 @@ func cmdWatch(o opts, args []string) error {
 	}
 	a, err := client().Wait(p.ID, []string{"idle", "done", "blocked"}, o.timeout)
 	if err != nil {
-		// herdr не ответил во время ожидания: исход неизвестен, и выдавать
-		// это за «дождались» нельзя.
+		// «Не дождались» и «сломалось во время ожидания» — разные исходы:
+		// во втором случае мы попросту не знаем, чем дело кончилось.
+		if herdr.CodeOf(err) == "timeout" {
+			return exitcode.Wrap(exitcode.Timeout, err)
+		}
 		return exitcode.Wrap(exitcode.Unknown, err)
 	}
-	return emit(o, map[string]any{"pane": p.ID, "status": a.Status})
+	return emit(o, map[string]any{"pane": p.ID, "status": a.Status, "final_status": a.Status})
 }
 
 func cmdDelegate(o opts, tgt, prompt string) error {
@@ -657,6 +660,12 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	}
 
 	if o.detach {
+		// Отсоединённый наблюдатель пишет в свой журнал; без пробуждения его
+		// результат не прочтёт никто.
+		if o.notify == "" {
+			return exitcode.Errorf(exitcode.BadCall,
+				"--detach без --notify: результат наблюдателя некому прочитать")
+		}
 		return detach(o, p.ID, prompt)
 	}
 
@@ -673,21 +682,24 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
 
+	out := map[string]any{
+		"task": res.Task, "pane": p.ID, "outcome": res.Outcome,
+		"said": res.Said, "reason": res.Reason,
+		"correlated": res.Outcome == task.Reported,
+		"seconds":    int(res.Duration.Seconds()),
+	}
 	if o.notify != "" {
-		// Ведущего будим до возврата: если пробуждение не удалось, вызывающий
-		// должен об этом узнать, а не считать, что его позовут.
+		// Итог пробуждения возвращается вызывающему, а не глохнет: иначе он
+		// будет ждать зова, которого не случилось.
 		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
 			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
 		if err := task.Notify(ctx, client(), o.notify, text, 5, 3*time.Second); err != nil {
-			fmt.Fprintln(os.Stderr, "claudex: разбудить не вышло:", err)
+			out["notified"] = map[string]any{"target": o.notify, "ok": false, "reason": err.Error()}
+		} else {
+			out["notified"] = map[string]any{"target": o.notify, "ok": true}
 		}
 	}
-
-	if err := emit(o, map[string]any{
-		"task": res.Task, "pane": p.ID, "outcome": res.Outcome,
-		"said": res.Said, "reason": res.Reason,
-		"seconds": int(res.Duration.Seconds()),
-	}); err != nil {
+	if err := emit(o, out); err != nil {
 		return err
 	}
 	if res.Outcome == task.TimedOut {

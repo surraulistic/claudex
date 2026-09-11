@@ -3,6 +3,8 @@ package herdr
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -132,6 +134,14 @@ func TestErrorEnvelopeBecomesError(t *testing.T) {
 	err := New(f.path).Call("agent.get", map[string]any{"target": "нет"}, &out)
 	if err == nil || !strings.Contains(err.Error(), "agent_not_found") {
 		t.Fatalf("конверт ошибки становится ошибкой, получено %v", err)
+	}
+	// Код доступен отдельно от текста: «не дождались» и «сломалось во время
+	// ожидания» — разные исходы, и различать их по подстроке нельзя.
+	if got := CodeOf(fmt.Errorf("обёртка: %w", err)); got != "agent_not_found" {
+		t.Fatalf("код сквозь обёртку, получено %q", got)
+	}
+	if CodeOf(errors.New("не от herdr")) != "" {
+		t.Fatal("чужая ошибка кода не даёт")
 	}
 }
 
