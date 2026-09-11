@@ -86,12 +86,22 @@ func request(conn net.Conn, method string, params any) error {
 // Call — один запрос на своём соединении. Переиспользовать соединение нельзя:
 // сервер закрывает его после ответа.
 func (c *Client) Call(method string, params any, out any) error {
+	return c.call(method, params, out, c.Timeout)
+}
+
+// callFor — вызов с собственным сроком. Срок передаётся отдельно, а не правкой
+// поля клиента: клиент общий, им одновременно пользуется наблюдатель.
+func (c *Client) callFor(method string, params any, out any, extra time.Duration) error {
+	return c.call(method, params, out, c.Timeout+extra)
+}
+
+func (c *Client) call(method string, params any, out any, timeout time.Duration) error {
 	conn, err := c.dial()
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(c.Timeout))
+	conn.SetDeadline(time.Now().Add(timeout))
 	if err := request(conn, method, params); err != nil {
 		return err
 	}
@@ -156,7 +166,8 @@ func (c *Client) Read(target, source string, lines int) (string, error) {
 type Sub struct {
 	Kind   string
 	PaneID string
-	Match  string
+	Match  string // подстрока; herdr ждёт её в конверте {type,value}
+	Regex  bool
 	Source string
 	Lines  int
 }
@@ -167,7 +178,11 @@ func (s Sub) params() map[string]any {
 		p["pane_id"] = s.PaneID
 	}
 	if s.Match != "" {
-		p["match"] = s.Match
+		kind := "substring"
+		if s.Regex {
+			kind = "regex"
+		}
+		p["match"] = map[string]any{"type": kind, "value": s.Match}
 		p["source"] = orElse(s.Source, "visible")
 		p["strip_ansi"] = true
 		if s.Lines > 0 {
@@ -290,4 +305,34 @@ func (e Event) Text() string {
 		return ""
 	}
 	return e.Read.Text
+}
+
+// Prompt отправляет задание и, если until не пуст, тем же вызовом ждёт, пока
+// панель не придёт в одно из перечисленных состояний. Одним вызовом — чтобы
+// между отправкой и началом ожидания не было щели, в которую проваливается
+// быстрый ответ.
+func (c *Client) Prompt(target, text string, until []string, timeout time.Duration) (Agent, error) {
+	params := map[string]any{"target": target, "text": text}
+	if len(until) > 0 {
+		wait := map[string]any{"until": until}
+		if timeout > 0 {
+			wait["timeout_ms"] = timeout.Milliseconds()
+		}
+		params["wait"] = wait
+	}
+	var out struct {
+		Agent Agent `json:"agent"`
+	}
+	return out.Agent, c.callFor("agent.prompt", params, &out, timeout)
+}
+
+func (c *Client) Wait(target string, until []string, timeout time.Duration) (Agent, error) {
+	params := map[string]any{"target": target, "until": until}
+	if timeout > 0 {
+		params["timeout_ms"] = timeout.Milliseconds()
+	}
+	var out struct {
+		Agent Agent `json:"agent"`
+	}
+	return out.Agent, c.callFor("agent.wait", params, &out, timeout)
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,7 +20,14 @@ type fake struct {
 	replies map[string]string // метод → сырой ответ
 	events  chan string       // строки, которые сервер шлёт в открытую подписку
 	seen    chan string       // методы, которые сервер получил
-	body    string            // последний запрос целиком
+	mu      sync.Mutex
+	body    string // последний запрос целиком
+}
+
+func (f *fake) lastBody() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.body
 }
 
 func newFake(t *testing.T) *fake {
@@ -64,7 +72,9 @@ func (f *fake) serve(c net.Conn) {
 		Method string `json:"method"`
 	}
 	json.Unmarshal([]byte(line), &req)
+	f.mu.Lock()
 	f.body = line
+	f.mu.Unlock()
 	select {
 	case f.seen <- req.Method:
 	default:
@@ -188,7 +198,7 @@ func TestSubscribeSendsOneRequestForEveryPane(t *testing.T) {
 			Subscriptions []map[string]any `json:"subscriptions"`
 		} `json:"params"`
 	}
-	json.Unmarshal([]byte(f.body), &req)
+	json.Unmarshal([]byte(f.lastBody()), &req)
 	if n := len(req.Params.Subscriptions); n != 3 {
 		t.Fatalf("три панели одним запросом, подписок в запросе: %d", n)
 	}
@@ -235,9 +245,12 @@ func TestOutputMatchSubscriptionCarriesPattern(t *testing.T) {
 			Subscriptions []map[string]any `json:"subscriptions"`
 		} `json:"params"`
 	}
-	json.Unmarshal([]byte(f.body), &req)
-	if got := req.Params.Subscriptions[0]["match"]; got != "ГОТОВО-7" {
-		t.Fatalf("образец уходит на сервер, получено %v", got)
+	json.Unmarshal([]byte(f.lastBody()), &req)
+	// herdr ждёт образец конвертом {type,value}, а не голой строкой: голую он
+	// отвергает как invalid_request.
+	m, ok := req.Params.Subscriptions[0]["match"].(map[string]any)
+	if !ok || m["type"] != "substring" || m["value"] != "ГОТОВО-7" {
+		t.Fatalf("образец конвертом, получено %#v", req.Params.Subscriptions[0]["match"])
 	}
 	f.events <- evMatched
 	ev := next(t, sub)
@@ -257,5 +270,73 @@ func TestSubscriptionDropIsReported(t *testing.T) {
 	}
 	if sub.Err() == nil {
 		t.Fatal("причина обрыва сохраняется")
+	}
+}
+
+func TestPromptCarriesAtomicWait(t *testing.T) {
+	// Отправка и ожидание одним вызовом: между ними не должно быть щели, в
+	// которую проваливается быстрый ответ.
+	f := newFake(t)
+	f.replies["agent.prompt"] = `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p2","agent_status":"idle"}}}`
+	a, err := New(f.path).Prompt("wE:p2", "сделай", []string{"idle", "done"}, 90*time.Second)
+	if err != nil || a.Status != "idle" {
+		t.Fatalf("ответ разобран, получено %+v %v", a, err)
+	}
+	var req struct {
+		Params struct {
+			Target string `json:"target"`
+			Text   string `json:"text"`
+			Wait   struct {
+				Until     []string `json:"until"`
+				TimeoutMS int64    `json:"timeout_ms"`
+			} `json:"wait"`
+		} `json:"params"`
+	}
+	json.Unmarshal([]byte(f.lastBody()), &req)
+	if req.Params.Target != "wE:p2" || req.Params.Text != "сделай" {
+		t.Fatalf("цель и текст, получено %+v", req.Params)
+	}
+	if len(req.Params.Wait.Until) != 2 || req.Params.Wait.TimeoutMS != 90000 {
+		t.Fatalf("ожидание уехало вместе с заданием, получено %+v", req.Params.Wait)
+	}
+}
+
+func TestPromptWithoutUntilDoesNotWait(t *testing.T) {
+	f := newFake(t)
+	f.replies["agent.prompt"] = `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p2"}}}`
+	if _, err := New(f.path).Prompt("wE:p2", "сделай", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	var req map[string]any
+	json.Unmarshal([]byte(f.lastBody()), &req)
+	if _, has := req["params"].(map[string]any)["wait"]; has {
+		t.Fatal("без until ожидание не выписывается")
+	}
+}
+
+func TestLongWaitDoesNotDisturbConcurrentCalls(t *testing.T) {
+	// Клиент общий: пока одна горутина ждёт задание минутами, другая обязана
+	// ходить со своим обычным сроком. Правка поля клиента дала бы гонку.
+	f := newFake(t)
+	f.replies["agent.prompt"] = `{"id":"x","result":{"agent":{"pane_id":"wE:p2"}}}`
+	f.replies["agent.list"] = `{"id":"x","result":{"agents":[]}}`
+	c := New(f.path)
+	c.Timeout = 2 * time.Second
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				c.Prompt("wE:p2", "сделай", []string{"idle"}, time.Hour)
+			} else {
+				c.Agents()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if c.Timeout != 2*time.Second {
+		t.Fatalf("срок клиента не трогается, стал %v", c.Timeout)
 	}
 }
