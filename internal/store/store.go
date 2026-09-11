@@ -51,13 +51,19 @@ func (s *Store) convID(target string) (int64, error) {
 	if target == "" {
 		return 0, fmt.Errorf("цель не задана")
 	}
+	// Точный session_id спрашивается отдельно и попадает в индекс. В одном
+	// запросе со вторым ключом он в индекс не попадал: like '%…' и cast(id as
+	// text) заставляют sqlite прочесть таблицу разговоров целиком — измерено
+	// 1.5–2.1 мс против 0.01, на каждую панель в sessions.
 	var id int64
-	err := s.db.QueryRow(`
+	err := s.db.QueryRow(`select id from conv where session_id = ?`, target).Scan(&id)
+	if err != sql.ErrNoRows {
+		return id, err
+	}
+	err = s.db.QueryRow(`
 		select id from conv
-		where session_id = ?1
-		   or cast(id as text) = ?1
+		where cast(id as text) = ?1
 		   or source_path like '%' || ?1 || '.jsonl'
-		order by case when session_id = ?1 then 0 else 1 end
 		limit 1`, target).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, fmt.Errorf("сессии %q нет в индексе — возможно, он не пересобирался", target)
@@ -79,7 +85,14 @@ func (s *Store) Digest(target string, limit, chars int) (Digest, error) {
 	}
 	var last sql.NullInt64
 	s.db.QueryRow(`select count(*) from msg where conv_id = ? and is_tool = 0`, id).Scan(&d.EntryCount)
-	s.db.QueryRow(`select max(created_at)/1000 from msg where conv_id = ?`, id).Scan(&last)
+	// Индекс по msg начинается с (conv_id, is_tool), поэтому шорткат sqlite для
+	// max() работает, только если is_tool закреплён; значений у него два.
+	// Без этого на беседе в 11 700 записей max стоил 1.45 мс вместо 0.02.
+	s.db.QueryRow(`
+		select max(t)/1000 from (
+		  select max(created_at) t from msg where conv_id = ?1 and is_tool = 0
+		  union all
+		  select max(created_at) from msg where conv_id = ?1 and is_tool = 1)`, id).Scan(&last)
 	d.LastTS = last.Int64
 
 	rows, err := s.db.Query(`
