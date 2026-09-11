@@ -314,3 +314,31 @@ func TestSearchByDaysLooksPastHigherRankedOlderHits(t *testing.T) {
 		t.Fatalf("свежее попадание не должно вытесняться старыми, получено %+v", hits)
 	}
 }
+
+func TestContextWindowClipsAtConversationEdges(t *testing.T) {
+	// Окно шире разговора не должно ни падать, ни втягивать чужие записи.
+	s := open(t)
+	w, err := s.Context(1, 500, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Entries) != 3 {
+		t.Fatalf("в разговоре 1 три записи, получено %d", len(w.Entries))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if w.Entries[i].ID != want {
+			t.Fatalf("порядок по времени: на месте %d запись %d, ожидалась %d", i, w.Entries[i].ID, want)
+		}
+	}
+}
+
+func TestContextWindowAsymmetric(t *testing.T) {
+	// before и after считаются от якоря каждый по своей стороне.
+	w, err := open(t).Context(2, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Entries) != 2 || w.Entries[0].ID != 1 || w.Entries[1].ID != 2 {
+		t.Fatalf("одна запись до якоря и сам якорь, получено %+v", w.Entries)
+	}
+}

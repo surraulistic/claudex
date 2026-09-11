@@ -212,16 +212,23 @@ func (s *Store) Context(id int64, before, after int) (Window, error) {
 		}
 		return w, err
 	}
+	// Две ограниченные выборки от якоря, а не нумерация всего разговора:
+	// ради тридцати строк прежний row_number() пересчитывал все записи беседы
+	// и на сессии в 11 700 записей стоил 30 мс против 7.5.
 	rows, err := s.db.Query(`
-		with ordered as (
-		  select m.id, m.role, m.created_at/1000 ts, m.len,
-		         row_number() over (order by m.created_at, m.id) rn
-		  from msg m where m.conv_id = ?),
-		pos as (select rn from ordered where id = ?)
-		select o.id, o.role, o.ts, o.len,
-		       (select content from msg_fts where rowid = o.id)
-		from ordered o, pos
-		where o.rn between pos.rn - ? and pos.rn + ? order by o.rn`,
+		select id, role, ts, len, (select content from msg_fts where rowid = id) from (
+		  select * from (
+		    select m.id id, m.role role, m.created_at/1000 ts, m.len len, m.created_at ca
+		    from msg m where m.conv_id = ?1
+		      and (m.created_at, m.id) <= (select created_at, id from msg where id = ?2)
+		    order by m.created_at desc, m.id desc limit ?3 + 1)
+		  union all
+		  select * from (
+		    select m.id, m.role, m.created_at/1000, m.len, m.created_at
+		    from msg m where m.conv_id = ?1
+		      and (m.created_at, m.id) > (select created_at, id from msg where id = ?2)
+		    order by m.created_at, m.id limit ?4)
+		) order by ca, id`,
 		w.ConvID, id, before, after)
 	if err != nil {
 		return w, err
