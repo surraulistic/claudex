@@ -1,8 +1,0 @@
-{
-  "name": "claudex",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "bin": { "claudex": "./bin/claudex" },
-  "scripts": { "test": "node --test test/*.test.js" }
-}
