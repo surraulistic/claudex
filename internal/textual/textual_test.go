@@ -72,14 +72,14 @@ func TestSignalsPlainTextUntouched(t *testing.T) {
 }
 
 func TestSignalsHistoryIsNotSubjectToScreenRules(t *testing.T) {
-	s := Signals("", []string{"закрыт SD-8208 и влит bonuses!874"})
+	s := Signals("", entriesOf("закрыт SD-8208 и влит bonuses!874"))
 	if len(s.Tickets) != 1 || len(s.MRs) != 1 {
 		t.Fatalf("в истории текст целиком, правила экрана не применяются: %v %v", s.Tickets, s.MRs)
 	}
 }
 
 func TestSignalsSingleBangIsNotMR(t *testing.T) {
-	if s := Signals("", []string{"ура!1 и !42"}); len(s.MRs) != 1 || s.MRs[0] != "!42" {
+	if s := Signals("", entriesOf("ура!1 и !42")); len(s.MRs) != 1 || s.MRs[0] != "!42" {
 		t.Fatalf("!1 не номер MR, получено %v", s.MRs)
 	}
 }
@@ -138,5 +138,41 @@ func TestClipKeepsLineBreaks(t *testing.T) {
 	got, cut := Clip(in, 8)
 	if !cut || !strings.Contains(got, "\n") {
 		t.Fatalf("длинное обрезается, разбивка цела, получено %q", got)
+	}
+}
+
+func entriesOf(texts ...string) []HistoryEntry {
+	out := make([]HistoryEntry, 0, len(texts))
+	for _, t := range texts {
+		out = append(out, HistoryEntry{Kind: "assistant", Text: t})
+	}
+	return out
+}
+
+func TestRepoKeepsLeadingSlash(t *testing.T) {
+	// «…» срезается вместе со своей косой; у абсолютного пути корень остаётся.
+	for _, c := range []struct{ bar, want string }{
+		{"  /private/tmp/проба  панель  Opus 5  ██░░░49%", "/private/tmp/проба"},
+		{"  …/GolandProjects/casino-bonuses  панель  Opus 5  ██░░░49%", "GolandProjects/casino-bonuses"},
+		{"  ~/projects/site  панель  Opus 5  ██░░░49%", "~/projects/site"},
+	} {
+		if got := Signals(c.bar, nil).Repo; got != c.want {
+			t.Fatalf("из %q получено %q, ожидалось %q", c.bar, got, c.want)
+		}
+	}
+}
+
+func TestLastUserPromptComesFromHistoryByRole(t *testing.T) {
+	// По одному тексту реплику пользователя от ответа не отличить — нужна роль.
+	s := Signals("", []HistoryEntry{
+		{Kind: "assistant", Text: "сделал"},
+		{Kind: "user", Text: "почини сборку"},
+		{Kind: "user", Text: "а это уже не последняя"},
+	})
+	if s.LastUserPrompt != "почини сборку" {
+		t.Fatalf("получено %q", s.LastUserPrompt)
+	}
+	if Signals("", []HistoryEntry{{Kind: "assistant", Text: "сделал"}}).LastUserPrompt != "" {
+		t.Fatal("без реплики пользователя поле пустое")
 	}
 }

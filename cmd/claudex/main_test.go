@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -44,5 +45,29 @@ func TestNegativeLookingQueryIsNotEatenAsFlagValue(t *testing.T) {
 	if !reflect.DeepEqual(flags, []string{"--no-wait"}) ||
 		!reflect.DeepEqual(rest, []string{"delegate", "river", "задача"}) {
 		t.Fatalf("получено флаги %v, остальное %v", flags, rest)
+	}
+}
+
+func TestPanesAreOrderedActiveFirstThenRecent(t *testing.T) {
+	// Смотрящий читает список сверху и первым делом должен видеть то, что
+	// происходит сейчас; панели без истории уходят в конец своей группы.
+	at := func(s string) *string { return &s }
+	v := []paneView{
+		{PaneID: "p-idle-старая", Status: "idle", LastActivity: at("2026-09-01T00:00:00Z")},
+		{PaneID: "p-done-без", Status: "done"},
+		{PaneID: "p-idle-свежая", Status: "idle", LastActivity: at("2026-09-10T00:00:00Z")},
+		{PaneID: "p-работает", Status: "working", LastActivity: at("2026-01-01T00:00:00Z")},
+		{PaneID: "p-done-свежая", Status: "done", LastActivity: at("2026-09-05T00:00:00Z")},
+		{PaneID: "p-чужой-статус", Status: "затмение"},
+	}
+	sort.SliceStable(v, less(v))
+	got := make([]string, len(v))
+	for i, p := range v {
+		got[i] = p.PaneID
+	}
+	want := []string{"p-работает", "p-done-свежая", "p-done-без",
+		"p-idle-свежая", "p-idle-старая", "p-чужой-статус"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("порядок %v, ожидался %v", got, want)
 	}
 }

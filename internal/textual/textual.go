@@ -10,15 +10,16 @@ import (
 )
 
 var (
-	ansi    = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
-	barRe   = regexp.MustCompile(`(5h|7d)?\s*[█░]{2,}\s*(\d+)%`)
-	spelled = regexp.MustCompile(`(\d+)%\s*context used`)
-	mrRe    = regexp.MustCompile(`(?:[A-Za-z0-9._-][A-Za-z0-9._/-]*)?![0-9]{2,}`)
-	ticket  = regexp.MustCompile(`\b(?:SNEW|SD|BF)-\d+\b`)
-	repoRe  = regexp.MustCompile(`^\s*(\S+)\s{2,}`)
-	running = regexp.MustCompile(`⏺\s+Running\b.*`)
-	ruleRe  = regexp.MustCompile(`^[\s─-╿]*$`)
-	promptR = regexp.MustCompile(`^\s*❯\s*$`)
+	ansi     = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	barRe    = regexp.MustCompile(`(5h|7d)?\s*[█░]{2,}\s*(\d+)%`)
+	spelled  = regexp.MustCompile(`(\d+)%\s*context used`)
+	mrRe     = regexp.MustCompile(`(?:[A-Za-z0-9._-][A-Za-z0-9._/-]*)?![0-9]{2,}`)
+	ticket   = regexp.MustCompile(`\b(?:SNEW|SD|BF)-\d+\b`)
+	repoRe   = regexp.MustCompile(`^\s*(\S+)\s{2,}`)
+	ellipsis = regexp.MustCompile(`^…/?`)
+	running  = regexp.MustCompile(`⏺\s+Running\b.*`)
+	ruleRe   = regexp.MustCompile(`^[\s─-╿]*$`)
+	promptR  = regexp.MustCompile(`^\s*❯\s*$`)
 )
 
 func StripANSI(s string) string { return ansi.ReplaceAllString(s, "") }
@@ -174,7 +175,14 @@ func dedupe(in []string, cap int) []string {
 
 // Signals извлекает проверяемое, не делая выводов. entries — тексты записей
 // истории: там правила экрана не действуют, потому что текст целый.
-func Signals(rawTail string, entries []string) Signal {
+// HistoryEntry — запись истории с ролью. Роль нужна: последняя реплика
+// пользователя ищется именно по ней, а по одному тексту её не отличить.
+type HistoryEntry struct {
+	Kind string
+	Text string
+}
+
+func Signals(rawTail string, entries []HistoryEntry) Signal {
 	mrs, tickets := []string{}, []string{}
 	var bar, run string
 	for _, l := range lines(rawTail) {
@@ -189,12 +197,30 @@ func Signals(rawTail string, entries []string) Signal {
 		}
 	}
 	for _, e := range entries {
-		collect(mrRe, e, kindHistory, &mrs)
-		collect(ticket, e, kindHistory, &tickets)
+		collect(mrRe, e.Text, kindHistory, &mrs)
+		collect(ticket, e.Text, kindHistory, &tickets)
 	}
 	s := Signal{MRs: dedupe(mrs, 10), Tickets: dedupe(tickets, 10), CurrentToolCall: run}
 	if m := repoRe.FindStringSubmatch(bar); m != nil {
-		s.Repo = strings.TrimPrefix(strings.TrimPrefix(m[1], "…"), "/")
+		// Срезается «…» вместе со своей косой, а не многоточие и косая по
+		// отдельности: иначе у абсолютного пути пропадает корень и
+		// /private/tmp превращается в private/tmp.
+		s.Repo = ellipsis.ReplaceAllString(m[1], "")
+	}
+	if e, ok := firstOfKind(entries, "user"); ok {
+		s.LastUserPrompt, _ = Cut(e.Text, 200)
+	}
+	if s.CurrentToolCall != "" {
+		s.CurrentToolCall, _ = Cut(s.CurrentToolCall, 200)
 	}
 	return s
+}
+
+func firstOfKind(entries []HistoryEntry, kind string) (HistoryEntry, bool) {
+	for _, e := range entries {
+		if e.Kind == kind {
+			return e, true
+		}
+	}
+	return HistoryEntry{}, false
 }

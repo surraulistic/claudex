@@ -16,6 +16,7 @@ import (
 
 type Pane struct {
 	ID        string
+	Name      string
 	TabID     string
 	Kind      string
 	Status    string
@@ -28,7 +29,7 @@ type Pane struct {
 
 func fromAgent(a herdr.Agent) Pane {
 	return Pane{
-		ID: a.PaneID, TabID: a.TabID, Kind: a.Kind, Status: a.Status,
+		ID: a.PaneID, Name: a.Name, TabID: a.TabID, Kind: a.Kind, Status: a.Status,
 		Title: a.Title, CWD: a.CWD, SessionID: a.Session.Value,
 		Revision: a.Revision, Focused: a.Focused,
 	}
@@ -102,6 +103,7 @@ func (s *State) Apply(ev herdr.Event) bool {
 		if known {
 			// В событии не всякое поле заполнено; пустое не затирает известное.
 			next.Kind = orKeep(next.Kind, prev.Kind)
+			next.Name = orKeep(next.Name, prev.Name)
 			next.SessionID = orKeep(next.SessionID, prev.SessionID)
 			next.TabID = orKeep(next.TabID, prev.TabID)
 			// В pane_updated можно верить только структурным полям. Поля,

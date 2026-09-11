@@ -290,7 +290,77 @@ type paneView struct {
 	EntryCount    *int           `json:"entry_count"`
 	LastActivity  *string        `json:"last_activity"`
 	HistoryReason string         `json:"history_reason,omitempty"`
-	Tail          []string       `json:"tail,omitempty"`
+}
+
+// brief отдаёт то же самое, но историю отдельным узлом и с живым хвостом:
+// у него другой читатель — тот, кто смотрит на все панели разом.
+type briefView struct {
+	Target     string         `json:"target"`
+	Label      string         `json:"label"`
+	Kind       string         `json:"kind"`
+	Alias      *string        `json:"alias"`
+	PaneID     string         `json:"pane_id"`
+	Status     string         `json:"status"`
+	ContextPct *int           `json:"context_pct"`
+	Limits     map[string]int `json:"limits"`
+	Watched    bool           `json:"watched"`
+	Title      string         `json:"title"`
+	CWD        string         `json:"cwd"`
+	Focused    bool           `json:"focused"`
+	History    briefHistory   `json:"history"`
+	Signals    briefSignals   `json:"signals"`
+	Tail       []string       `json:"tail"` // null, когда экран пуст
+}
+
+type briefHistory struct {
+	TranscriptID *int64  `json:"transcript_id"`
+	EntryCount   *int    `json:"entry_count"`
+	LastActivity *string `json:"last_activity"`
+	Reason       string  `json:"reason,omitempty"`
+}
+
+type briefSignals struct {
+	MR              []string `json:"mr"`
+	Tickets         []string `json:"tickets"`
+	Repo            *string  `json:"repo"`
+	LastUserPrompt  *string  `json:"last_user_prompt"`
+	CurrentToolCall *string  `json:"current_tool_call"`
+}
+
+func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEntry) briefView {
+	sig := textual.Signals(raw, entries)
+	b := briefView{
+		Target: v.Target, Label: v.Label, Kind: v.Kind, Alias: v.Alias,
+		PaneID: v.PaneID, Status: v.Status, ContextPct: v.ContextPct,
+		Limits: v.Limits, Watched: v.Watched, Title: v.Title, CWD: v.CWD,
+		Focused: v.Focused, Tail: tail,
+		History: briefHistory{
+			TranscriptID: v.TranscriptID, EntryCount: v.EntryCount,
+			LastActivity: v.LastActivity, Reason: v.HistoryReason,
+		},
+		Signals: briefSignals{MR: orEmpty(sig.MRs), Tickets: orEmpty(sig.Tickets)},
+	}
+	for _, pair := range []struct {
+		from string
+		into **string
+	}{
+		{sig.Repo, &b.Signals.Repo},
+		{sig.LastUserPrompt, &b.Signals.LastUserPrompt},
+		{sig.CurrentToolCall, &b.Signals.CurrentToolCall},
+	} {
+		if pair.from != "" {
+			val := pair.from
+			*pair.into = &val
+		}
+	}
+	return b
+}
+
+func orEmpty(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
 }
 
 func cmdSessions(o opts, withTail bool) error {
@@ -313,8 +383,14 @@ func cmdSessions(o opts, withTail bool) error {
 	busy := watchedPanes()
 
 	lines := o.tailLines
-	if withTail && lines == 12 {
-		lines = 8
+	if withTail {
+		// У brief свой читатель и свои умолчания: короче хвост, меньше записей.
+		if lines == 12 {
+			lines = 8
+		}
+		if o.limit == 8 {
+			o.limit = 4
+		}
 	}
 	// Хвосты читаются разом: последовательно это самая долгая часть команды.
 	raws := make([]string, len(panes))
@@ -329,6 +405,7 @@ func cmdSessions(o opts, withTail bool) error {
 	wg.Wait()
 
 	views := make([]paneView, len(panes))
+	entries := make([][]textual.HistoryEntry, len(panes))
 	var hwg sync.WaitGroup
 	for i, p := range panes {
 		g := textual.Gauges(raws[i])
@@ -341,35 +418,100 @@ func cmdSessions(o opts, withTail bool) error {
 		if p.SessionID != "" {
 			v.SessionID = &p.SessionID
 		}
-		if withTail {
-			v.Tail = textual.CleanTail(raws[i], lines)
+		if p.Name != "" {
+			name := p.Name
+			v.Alias = &name
 		}
 		views[i] = v
 		// Дайджест каждой панели — отдельный запрос к индексу; подряд их
 		// десять, и это самая долгая часть после herdr.
 		hwg.Add(1)
-		go func(i int, p state.Pane) { defer hwg.Done(); fillHistory(&views[i], db, p) }(i, p)
+		go func(i int, p state.Pane) {
+			defer hwg.Done()
+			entries[i] = fillHistory(&views[i], db, p, o.limit, o.chars)
+		}(i, p)
 	}
 	hwg.Wait()
-	return emit(o, map[string]any{"panes": views})
+	order := make([]int, len(views))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return less(views)(order[a], order[b]) })
+
+	if !withTail {
+		sorted := make([]paneView, len(views))
+		for k, i := range order {
+			sorted[k] = views[i]
+		}
+		return emit(o, map[string]any{"panes": sorted})
+	}
+	briefs := make([]briefView, len(views))
+	for k, i := range order {
+		briefs[k] = toBrief(views[i], raws[i], textual.CleanTail(raws[i], lines), entries[i])
+	}
+	return emit(o, map[string]any{
+		"generated_at": time.Now().Format(time.RFC3339),
+		"panes":        briefs,
+	})
 }
 
-func fillHistory(v *paneView, db *store.Store, p state.Pane) {
+// Порядок вывода: сначала деятельные панели, внутри — по свежести истории,
+// панели без истории в конец своей группы. Смотрящий читает список сверху и
+// должен первым делом видеть то, что происходит сейчас.
+var activeFirst = map[string]int{"working": 0, "done": 1, "idle": 2}
+
+func less(v []paneView) func(i, j int) bool {
+	return func(i, j int) bool {
+		a, b := v[i], v[j]
+		ra, ok := activeFirst[a.Status]
+		if !ok {
+			ra = 3
+		}
+		rb, ok := activeFirst[b.Status]
+		if !ok {
+			rb = 3
+		}
+		if ra != rb {
+			return ra < rb
+		}
+		if a.LastActivity == nil || b.LastActivity == nil {
+			if (a.LastActivity == nil) != (b.LastActivity == nil) {
+				return b.LastActivity == nil
+			}
+			return a.PaneID < b.PaneID
+		}
+		if *a.LastActivity != *b.LastActivity {
+			return *a.LastActivity > *b.LastActivity
+		}
+		return a.PaneID < b.PaneID
+	}
+}
+
+// fillHistory возвращает тексты записей: по ним, а не по живому экрану,
+// собираются сигналы — в истории видно, над чем панель работает, даже когда
+// экран занят выводом команды.
+func fillHistory(v *paneView, db *store.Store, p state.Pane, limit, chars int) []textual.HistoryEntry {
 	switch {
 	case db == nil:
 		v.HistoryReason = "индекс недоступен"
 	case p.SessionID == "":
 		v.HistoryReason = "у панели нет session_id"
 	default:
-		d, err := db.Digest(p.SessionID, 1, 60)
+		d, err := db.Digest(p.SessionID, limit, chars)
 		if err != nil {
 			v.HistoryReason = "сессии нет в индексе — возможно, он не пересобирался"
-			return
+			return nil
 		}
 		id, n := d.ConvID, d.EntryCount
 		ts := time.Unix(d.LastTS, 0).Format(time.RFC3339)
 		v.TranscriptID, v.EntryCount, v.LastActivity = &id, &n, &ts
+		out := make([]textual.HistoryEntry, 0, len(d.Entries))
+		for _, e := range d.Entries {
+			out = append(out, textual.HistoryEntry{Kind: e.Kind, Text: e.Text})
+		}
+		return out
 	}
+	return nil
 }
 
 // watchedPanes — панели, по которым поручение ещё не завершилось.
@@ -465,7 +607,7 @@ type sessionView struct {
 // group складывает попадания по разговорам и ставит свежие первыми: при
 // поиске по всей истории полезнее недавний разговор, а не самый релевантный
 // по мнению движка.
-func group(hits []store.Hit) []sessionView {
+func group(hits []store.Hit, chars int) []sessionView {
 	order := []int64{}
 	by := map[int64]*sessionView{}
 	for _, h := range hits {
@@ -495,7 +637,7 @@ func group(hits []store.Hit) []sessionView {
 			sv.LastHit = ts
 		}
 		sv.Hits++
-		sv.Entries = append(sv.Entries, hitView{ID: h.ID, TS: ts, Role: h.Kind, Text: h.Text})
+		sv.Entries = append(sv.Entries, hitView{ID: h.ID, TS: ts, Role: h.Kind, Text: cutTo(h.Text, chars)})
 	}
 	out := make([]sessionView, 0, len(order))
 	for _, id := range order {
@@ -520,15 +662,21 @@ func cmdFind(o opts, q string) error {
 		return err
 	}
 	return emit(o, map[string]any{
-		"query": q, "match": match, "hits": len(hits), "sessions": group(hits),
+		"query": q, "match": match, "hits": len(hits), "sessions": group(hits, o.chars),
 	})
 }
 
 func cmdSearch(o opts, tgt, q string) error {
 	panes, _ := livePanes(opts{})
-	key := tgt
-	if p, err := target.Resolve(tgt, panes); err == nil && p.SessionID != "" {
-		key = p.SessionID
+	key, shown := tgt, tgt
+	if p, err := target.Resolve(tgt, panes); err == nil {
+		if p.SessionID != "" {
+			key = p.SessionID
+		}
+		shown = p.ID
+		if p.Name != "" {
+			shown = p.Name
+		}
 	}
 	db, err := store.Open(o.db)
 	if err != nil {
@@ -544,10 +692,23 @@ func cmdSearch(o opts, tgt, q string) error {
 	if err != nil {
 		return err
 	}
+	// Плоский список: сессия здесь одна и названа выше, группировать не по чему.
+	results := make([]hitView, 0, len(hits))
+	for _, h := range hits {
+		results = append(results, hitView{
+			ID: h.ID, TS: time.Unix(h.TS, 0).Format(time.RFC3339),
+			Role: h.Kind, Text: cutTo(h.Text, o.chars),
+		})
+	}
 	return emit(o, map[string]any{
-		"query": q, "match": match, "target": tgt, "transcript_id": d.ConvID,
-		"hits": len(hits), "sessions": group(hits),
+		"target": shown, "transcript_id": d.ConvID,
+		"query": q, "match": match, "results": results,
 	})
+}
+
+func cutTo(s string, max int) string {
+	out, _ := textual.Cut(s, max)
+	return out
 }
 
 func cmdEntry(o opts, args []string) error {
@@ -606,7 +767,8 @@ func cmdContext(o opts, args []string) error {
 		})
 	}
 	return emit(o, map[string]any{
-		"anchor": w.Anchor, "transcript_id": w.ConvID, "entries": entries,
+		// Якорь строкой: им же его и передают обратно в команду.
+		"anchor": strconv.FormatInt(w.Anchor, 10), "transcript_id": w.ConvID, "entries": entries,
 	})
 }
 
