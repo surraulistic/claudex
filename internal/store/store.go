@@ -6,6 +6,10 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	// Драйвер подключается самим пакетом: раньше он был только в тестовом
+	// файле, и собранная команда падала на «unknown driver».
+	_ "modernc.org/sqlite"
 )
 
 type Store struct{ db *sql.DB }
@@ -43,6 +47,11 @@ type Digest struct {
 // provider_session_id пуст; имя файла сессии — <session-id>.jsonl, а у Codex
 // хвост rollout-<метка>-<uuid>.jsonl, поэтому сверяем по окончанию.
 func (s *Store) convID(target string) (int64, error) {
+	// Пустая цель совпала бы с пустым session_id и вернула чужой разговор:
+	// у панелей Codex его нет вовсе.
+	if target == "" {
+		return 0, fmt.Errorf("цель не задана")
+	}
 	var id int64
 	err := s.db.QueryRow(`
 		select id from conv

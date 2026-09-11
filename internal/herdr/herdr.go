@@ -17,6 +17,12 @@ import (
 
 const defaultTimeout = 15 * time.Second
 
+// CheapLines — сколько строк можно попросить у панели даром. Запрос сверх
+// видимой части экрана заставляет herdr восстанавливать прокрутку: измерено,
+// 44 строки на десять панелей стоят 3 мс, 48 строк — 1092 мс. Высота панели в
+// этой установке 44, потолок взят с запасом.
+const CheapLines = 40
+
 func DefaultSocket() string {
 	if p := os.Getenv("HERDR_SOCKET_PATH"); p != "" {
 		return p

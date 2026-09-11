@@ -191,3 +191,12 @@ func TestContextRespectsWindowBounds(t *testing.T) {
 		t.Fatalf("границы окна, получено %+v", c.Entries)
 	}
 }
+
+func TestEmptyTargetIsRefused(t *testing.T) {
+	// У панели Codex нет session_id; пустая цель не должна подобрать разговор
+	// с пустым полем и выдать его за историю этой панели.
+	s := open(t)
+	if _, err := s.Digest("", 5, 100); err == nil {
+		t.Fatal("пустая цель отклоняется, а не подбирает чужой разговор")
+	}
+}
