@@ -28,6 +28,7 @@ func setup(t *testing.T, status string) (*herdrtest.Fake, *journal.Journal, Opti
 		Client: herdr.New(f.Path), Journal: j,
 		Pane: "wE:p2", Prompt: "почини сборку",
 		Timeout: 3 * time.Second, Grace: 150 * time.Millisecond,
+		Self: "/путь/к/claudex",
 	}
 }
 
@@ -50,8 +51,10 @@ func TestPromptCarriesReportInstructionWithTaskID(t *testing.T) {
 			if !strings.Contains(text, "почини сборку") {
 				t.Fatalf("задание сохранено целиком, получено %q", text)
 			}
-			if !strings.Contains(text, "claudex done ") {
-				t.Fatalf("в задание вписан отчёт, получено %q", text)
+			// Отчитываться нужно тем же бинарём, что делегирует: на PATH
+			// может лежать другая сборка, которая про `done` не знает.
+			if !strings.Contains(text, "/путь/к/claudex done ") {
+				t.Fatalf("в задание вписан отчёт своим бинарём, получено %q", text)
 			}
 			return
 		}

@@ -39,7 +39,10 @@ type Options struct {
 	Prompt  string
 	Timeout time.Duration
 	// Grace — сколько ждать отчёт после того, как панель уже освободилась.
-	Grace   time.Duration
+	Grace time.Duration
+	// Self — чем отчитываться. По умолчанию — тот же бинарь, что делегирует:
+	// на PATH может лежать другая сборка, которая про `done` не знает.
+	Self    string
 	Attempt int
 }
 
@@ -68,6 +71,9 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %s в состоянии %q", ErrBusy, o.Pane, pane.Status)
 	}
 
+	if o.Self == "" {
+		o.Self = selfPath()
+	}
 	id := newID()
 	started := time.Now()
 	res := Result{Task: id, Pane: o.Pane}
@@ -83,7 +89,7 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	// ними не было щели, в которую проваливается быстрый ответ.
 	freed := make(chan error, 1)
 	go func() {
-		_, err := o.Client.Prompt(o.Pane, withReportInstruction(o.Prompt, id),
+		_, err := o.Client.Prompt(o.Pane, withReportInstruction(o.Prompt, o.Self, id),
 			[]string{"idle", "done", "blocked"}, o.Timeout)
 		freed <- err
 	}()
@@ -133,9 +139,16 @@ func Report(j *journal.Journal, id, outcome, reason string) error {
 	})
 }
 
-func withReportInstruction(prompt, id string) string {
+func withReportInstruction(prompt, self, id string) string {
 	return prompt + fmt.Sprintf(
-		"\n\nКогда закончишь, последним действием выполни:\n  claudex done %s «одной строкой, что вышло»", id)
+		"\n\nКогда закончишь, последним действием выполни ровно это:\n  %s done %s «одной строкой, что вышло»", self, id)
+}
+
+func selfPath() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "claudex"
 }
 
 func newID() string {
