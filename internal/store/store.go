@@ -129,12 +129,15 @@ type SearchOpts struct {
 	Days   int
 }
 
+// Отбор по разговору и по сроку идёт в том же запросе, что и match: взятое
+// движком окно лучших по рангу — не выборка, из которой можно потом отфильтровать.
+// «wallet» внутри сессии с 421 попаданием так давал ноль результатов.
 func (s *Store) Search(match string, o SearchOpts) ([]Hit, error) {
 	if o.Limit <= 0 {
 		o.Limit = 8
 	}
-	where := []string{"1=1"}
-	args := []any{match, o.Limit * 4}
+	where := []string{"msg_fts match ?"}
+	args := []any{match}
 	if o.ConvID != 0 {
 		where = append(where, "m.conv_id = ?")
 		args = append(args, o.ConvID)
@@ -147,13 +150,12 @@ func (s *Store) Search(match string, o SearchOpts) ([]Hit, error) {
 
 	rows, err := s.db.Query(`
 		select m.id, m.role, m.created_at/1000, c.id, coalesce(c.session_id,''),
-		       c.agent, coalesce(c.workspace,''), f.snip
-		from (select rowid rid, rank, snippet(msg_fts,0,'','','…',24) snip
-		      from msg_fts where msg_fts match ? order by rank limit ?) f
-		join msg m on m.id = f.rid
+		       c.agent, coalesce(c.workspace,''), snippet(msg_fts,0,'','','…',24)
+		from msg_fts
+		join msg m on m.id = msg_fts.rowid
 		join conv c on c.id = m.conv_id
 		where `+strings.Join(where, " and ")+`
-		order by f.rank limit ?`, args...)
+		order by rank limit ?`, args...)
 	if err != nil {
 		return nil, err
 	}

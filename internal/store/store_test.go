@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -244,5 +245,72 @@ func TestContextKeepsToolStubs(t *testing.T) {
 	}
 	if tools == 0 {
 		t.Fatalf("заглушки остаются в окне, записей %d", len(w.Entries))
+	}
+}
+
+// Отдельная фикстура: нужно, чтобы попадания вне разговора и вне срока стояли
+// в ранжировании выше нужного, иначе прежнюю ошибку не воспроизвести.
+const crowded = `
+create table conv (id integer primary key, agent text, session_id text,
+  source_path text, workspace text, title text, started_at integer, ended_at integer);
+create table msg (id integer primary key, conv_id integer, idx integer,
+  role text, created_at integer, len integer, is_tool integer not null default 0);
+create virtual table msg_fts using fts5(content, tokenize='unicode61 remove_diacritics 2');
+
+insert into conv values (1,'claude_code','шумная','/p/шумная.jsonl','/g','Шум',0,0),
+                        (2,'claude_code','нужная','/p/нужная.jsonl','/g','Нужная',0,0);
+`
+
+func crowdedStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("открытие: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if _, err := s.db.Exec(crowded); err != nil {
+		t.Fatalf("фикстура: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	old := now - 400*24*3600*1000
+	// Двадцать коротких попаданий в чужом разговоре и давно: bm25 ставит их выше.
+	for i := 1; i <= 20; i++ {
+		if _, err := s.db.Exec(`insert into msg values (?,1,?,'user',?,6,0)`, i, i, old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`insert into msg_fts (rowid,content) values (?,'wallet')`, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Одно длинное попадание в нужном разговоре и сегодня.
+	long := "wallet " + strings.Repeat("прочий текст ", 40)
+	if _, err := s.db.Exec(`insert into msg values (99,2,0,'user',?,?,0)`, now, len(long)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`insert into msg_fts (rowid,content) values (99,?)`, long); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestSearchInConversationLooksPastHigherRankedOutsiders(t *testing.T) {
+	// Прежде отбор по разговору применялся к уже взятому окну лучших по рангу,
+	// и запрос «wallet» внутри сессии с сотнями попаданий отдавал пусто.
+	hits, err := crowdedStore(t).Search(`"wallet"`, SearchOpts{Limit: 1, ConvID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != 99 {
+		t.Fatalf("попадание в своём разговоре, получено %+v", hits)
+	}
+}
+
+func TestSearchByDaysLooksPastHigherRankedOlderHits(t *testing.T) {
+	hits, err := crowdedStore(t).Search(`"wallet"`, SearchOpts{Limit: 1, Days: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != 99 {
+		t.Fatalf("свежее попадание не должно вытесняться старыми, получено %+v", hits)
 	}
 }
