@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestSplitArgsTakesFlagsAfterPositional(t *testing.T) {
@@ -69,5 +70,27 @@ func TestPanesAreOrderedActiveFirstThenRecent(t *testing.T) {
 		"p-idle-свежая", "p-idle-старая", "p-чужой-статус"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("порядок %v, ожидался %v", got, want)
+	}
+}
+
+func TestSecondsAndDurationsBothParse(t *testing.T) {
+	// Прежняя версия принимала секунды числом; ломать это нельзя, но и
+	// «30m» читать удобно.
+	for _, c := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"1800", 30 * time.Minute},
+		{"30m", 30 * time.Minute},
+		{"90s", 90 * time.Second},
+		{"0", 0},
+	} {
+		got, err := parseTimeout(c.in)
+		if err != nil || got != c.want {
+			t.Fatalf("parseTimeout(%q) = %v, %v; ожидалось %v", c.in, got, err, c.want)
+		}
+	}
+	if _, err := parseTimeout("скоро"); err == nil {
+		t.Fatal("невнятный срок — ошибка")
 	}
 }

@@ -6,8 +6,6 @@ package exitcode
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"time"
 )
 
 const (
@@ -18,7 +16,6 @@ const (
 	Timeout  = 5 // не дождался
 	Busy     = 6 // панель занята, задание не отправлено
 	Unknown  = 7 // сбой herdr во время ожидания — исход неизвестен
-	NotArmed = 8 // панель не начала работу за отведённое время
 )
 
 type coded struct {
@@ -50,17 +47,4 @@ func Of(err error) int {
 		return c.code
 	}
 	return Fail
-}
-
-// Duration читает и голые секунды, и человеческий срок: прежняя версия
-// принимала «1800», ломать это нельзя.
-func Duration(s string) (time.Duration, error) {
-	if n, err := strconv.Atoi(s); err == nil {
-		return time.Duration(n) * time.Second, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, fmt.Errorf("непонятный срок %q: нужны секунды числом или вид 30m", s)
-	}
-	return d, nil
 }

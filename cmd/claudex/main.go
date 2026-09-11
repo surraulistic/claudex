@@ -86,7 +86,7 @@ func run() error {
 	if err := fs.Parse(flags); err != nil {
 		return err
 	}
-	d, err := exitcode.Duration(o.timeoutRaw)
+	d, err := parseTimeout(o.timeoutRaw)
 	if err != nil {
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
@@ -208,6 +208,19 @@ func usage() {
              5 не дождался · 6 панель занята, задание не отправлено
              7 сбой herdr при ожидании — исход неизвестен
 `)
+}
+
+// parseTimeout читает и голые секунды, и человеческий срок: прежняя версия
+// принимала «1800», ломать это нельзя.
+func parseTimeout(s string) (time.Duration, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("непонятный срок %q: нужны секунды числом или вид 30m", s)
+	}
+	return d, nil
 }
 
 func defaultIndex() string {
