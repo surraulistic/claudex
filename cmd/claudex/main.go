@@ -84,7 +84,7 @@ func run() error {
 	// доводе, поэтому доводы разделяются заранее.
 	flags, rest := splitArgs(os.Args[1:])
 	if err := fs.Parse(flags); err != nil {
-		return err
+		return exitcode.Wrap(exitcode.BadCall, err)
 	}
 	d, err := parseTimeout(o.timeoutRaw)
 	if err != nil {
@@ -110,7 +110,7 @@ func run() error {
 		return cmdFind(o, strings.Join(args[1:], " "))
 	case "search":
 		if len(args) < 3 {
-			return fmt.Errorf("нужны цель и запрос")
+			return exitcode.Errorf(exitcode.BadCall, "нужны цель и запрос")
 		}
 		return cmdSearch(o, args[1], strings.Join(args[2:], " "))
 	case "entry":
@@ -121,12 +121,12 @@ func run() error {
 		return cmdWatch(o, args[1:])
 	case "delegate":
 		if len(args) < 3 {
-			return fmt.Errorf("нужны цель и задача")
+			return exitcode.Errorf(exitcode.BadCall, "нужны цель и задача")
 		}
 		return cmdDelegate(o, args[1], strings.Join(args[2:], " "))
 	case "done":
 		if len(args) < 2 {
-			return fmt.Errorf("нужен идентификатор задачи")
+			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
 		}
 		return cmdDone(args[1], strings.Join(args[2:], " "))
 	case "index":
@@ -326,7 +326,7 @@ type paneView struct {
 	Watched       bool           `json:"watched"`
 	SessionID     *string        `json:"session_id"`
 	Status        string         `json:"status"`
-	Title         string         `json:"title"`
+	Title         *string        `json:"title"`
 	CWD           string         `json:"cwd"`
 	Focused       bool           `json:"focused"`
 	TranscriptID  *int64         `json:"transcript_id"`
@@ -347,7 +347,7 @@ type briefView struct {
 	ContextPct *int           `json:"context_pct"`
 	Limits     map[string]int `json:"limits"`
 	Watched    bool           `json:"watched"`
-	Title      string         `json:"title"`
+	Title      *string        `json:"title"`
 	CWD        string         `json:"cwd"`
 	Focused    bool           `json:"focused"`
 	History    briefHistory   `json:"history"`
@@ -370,8 +370,16 @@ type briefSignals struct {
 	CurrentToolCall *string  `json:"current_tool_call"`
 }
 
-func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEntry) briefView {
+func signalsOf(raw string, entries []textual.HistoryEntry) briefSignals {
 	sig := textual.Signals(raw, entries)
+	return briefSignals{
+		MR: orEmpty(sig.MRs), Tickets: orEmpty(sig.Tickets),
+		Repo: orNull(sig.Repo), LastUserPrompt: orNull(sig.LastUserPrompt),
+		CurrentToolCall: orNull(sig.CurrentToolCall),
+	}
+}
+
+func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEntry) briefView {
 	return briefView{
 		Target: v.Target, Label: v.Label, Kind: v.Kind, Alias: v.Alias,
 		PaneID: v.PaneID, Status: v.Status, ContextPct: v.ContextPct,
@@ -381,11 +389,7 @@ func toBrief(v paneView, raw string, tail []string, entries []textual.HistoryEnt
 			TranscriptID: v.TranscriptID, EntryCount: v.EntryCount,
 			LastActivity: v.LastActivity, Reason: v.HistoryReason,
 		},
-		Signals: briefSignals{
-			MR: orEmpty(sig.MRs), Tickets: orEmpty(sig.Tickets),
-			Repo: orNull(sig.Repo), LastUserPrompt: orNull(sig.LastUserPrompt),
-			CurrentToolCall: orNull(sig.CurrentToolCall),
-		},
+		Signals: signalsOf(raw, entries),
 	}
 }
 
@@ -452,7 +456,7 @@ func cmdSessions(o opts, withTail bool) error {
 		seen[i].view = paneView{
 			Target: firstNonEmpty(labels[p.TabID], p.ID), Label: labels[p.TabID],
 			Kind: p.Kind, PaneID: p.ID, ContextPct: g.ContextPct, Limits: g.Limits,
-			Watched: busy[p.ID], Status: p.Status, Title: p.Title, CWD: p.CWD,
+			Watched: busy[p.ID], Status: p.Status, Title: orNull(p.Title), CWD: p.CWD,
 			Focused: p.Focused, SessionID: orNull(p.SessionID), Alias: orNull(p.Name),
 		}
 		// Дайджест каждой панели — отдельный запрос к индексу; подряд их
@@ -587,30 +591,137 @@ func (o opts) match(q string) string {
 	return store.Match(q)
 }
 
+type digestView struct {
+	Target  string       `json:"target"`
+	Alias   *string      `json:"alias"`
+	Live    *liveView    `json:"live"`
+	History historyView  `json:"history"`
+	Tail    []string     `json:"tail"`
+	Signals briefSignals `json:"signals"`
+}
+
+type liveView struct {
+	Label      string         `json:"label"`
+	Kind       string         `json:"kind"`
+	PaneID     string         `json:"pane_id"`
+	SessionID  *string        `json:"session_id"`
+	Status     string         `json:"status"`
+	ContextPct *int           `json:"context_pct"`
+	Limits     map[string]int `json:"limits"`
+	Title      *string        `json:"title"`
+	CWD        string         `json:"cwd"`
+	Focused    bool           `json:"focused"`
+}
+
+type historyView struct {
+	TranscriptID *int64 `json:"transcript_id"`
+	// provider берётся из индекса, а не зашит: у панели Codex он не claude.
+	Provider     string      `json:"provider,omitempty"`
+	EntryCount   *int        `json:"entry_count"`
+	LastActivity *string     `json:"last_activity,omitempty"`
+	Entries      []entryLine `json:"entries,omitempty"`
+	Reason       string      `json:"reason,omitempty"`
+}
+
+type entryLine struct {
+	ID        int64  `json:"id"`
+	TS        string `json:"ts"`
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Chars     int    `json:"chars"`
+	Truncated bool   `json:"truncated"`
+}
+
+// cmdDigest — единственная команда, не попавшая в первую сверку, и она
+// единственная разошлась с договором: печатала текст, тогда как README и
+// SKILL.md описывают JSON из четырёх частей. По этим полям чужой агент решает,
+// можно ли давать панели новую задачу.
 func cmdDigest(o opts, q string) error {
-	key := q
-	if p, err := resolve(q); err == nil {
-		key = p.SessionID
-		fmt.Printf("%s  %s  %s  %s\n\n", p.ID, p.Kind, p.Status, p.Title)
-		for _, l := range tailFor(client(), p, o.tailLines) {
-			fmt.Printf("  %s\n", l)
-		}
-		fmt.Println()
-	}
 	db, err := store.Open(o.db)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+
+	p, err := resolve(q)
+	if err != nil {
+		// Живой панели нет, но цель могла прийти из find: там ключом служит
+		// закрытая сессия или идентификатор разговора без неё.
+		hist, entries, hErr := digestHistory(db, q, o)
+		if hErr != nil {
+			return err // живой панели нет и в индексе пусто — цель не найдена
+		}
+		return emit(o, digestView{
+			Target: q, History: hist, Signals: signalsOf("", entries),
+		})
+	}
+
+	c := client()
+	agents, err := c.Agents()
+	if err != nil {
+		return exitcode.Wrap(exitcode.NoHerdr, err)
+	}
+	labels := labelsByPane(c, agents)
+	raw := rawTail(c, p, o.tailLines)
+	target := firstNonEmpty(labels[p.ID], firstNonEmpty(p.Name, p.ID))
+	key := p.SessionID
+	if key == "" {
+		key = q
+	}
+	hist, entries, _ := digestHistory(db, key, o)
+	if p.SessionID == "" {
+		hist.Reason = "у панели нет session_id"
+	}
+
+	g := textual.Gauges(raw)
+	v := digestView{
+		Target: target,
+		Live: &liveView{
+			Label: labels[p.ID], Kind: p.Kind, PaneID: p.ID, Status: p.Status,
+			ContextPct: g.ContextPct, Limits: g.Limits,
+			Title: orNull(p.Title), CWD: p.CWD, Focused: p.Focused,
+		},
+		History: hist,
+		Tail:    textual.CleanTail(raw, o.tailLines),
+		Signals: signalsOf(raw, entries),
+	}
+	if p.Name != "" {
+		name := p.Name
+		v.Alias = &name
+	}
+	if p.SessionID != "" {
+		sid := p.SessionID
+		v.Live.SessionID = &sid
+	}
+	if len(v.Tail) == 0 {
+		v.Tail = nil
+	}
+	return emit(o, v)
+}
+
+func digestHistory(db *store.Store, key string, o opts) (historyView, []textual.HistoryEntry, error) {
+	var h historyView
 	d, err := db.Digest(key, o.limit, o.chars)
 	if err != nil {
-		return exitcode.Wrap(exitcode.NotFound, err)
+		h.Reason = "сессии нет в индексе — возможно, он не пересобирался"
+		return h, nil, err
 	}
-	fmt.Printf("разговор %d · %s · записей %d\n", d.ConvID, d.Agent, d.EntryCount)
+	id, n := d.ConvID, d.EntryCount
+	ts := time.Unix(d.LastTS, 0).Format(time.RFC3339)
+	h.TranscriptID, h.EntryCount, h.LastActivity = &id, &n, &ts
+	h.Provider = d.Agent
+
+	entries := make([]textual.HistoryEntry, 0, len(d.Entries))
+	h.Entries = make([]entryLine, 0, len(d.Entries))
 	for _, e := range d.Entries {
-		fmt.Printf("  [%d] %-9s %s\n", e.ID, e.Kind, oneLine(e.Text))
+		text, cut := textual.Cut(e.Text, o.chars)
+		h.Entries = append(h.Entries, entryLine{
+			ID: e.ID, TS: time.Unix(e.TS, 0).Format(time.RFC3339),
+			Role: e.Kind, Text: text, Chars: e.Len, Truncated: cut,
+		})
+		entries = append(entries, textual.HistoryEntry{Kind: e.Kind, Text: e.Text})
 	}
-	return nil
+	return h, entries, nil
 }
 
 type hitView struct {
@@ -678,7 +789,7 @@ func group(hits []store.Hit, chars int) []sessionView {
 
 func cmdFind(o opts, q string) error {
 	if strings.TrimSpace(q) == "" {
-		return fmt.Errorf("нужен запрос")
+		return exitcode.Errorf(exitcode.BadCall, "нужен запрос")
 	}
 	db, err := store.Open(o.db)
 	if err != nil {
@@ -802,7 +913,7 @@ func cmdContext(o opts, args []string) error {
 
 func cmdWatch(o opts, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("нужна цель")
+		return exitcode.Errorf(exitcode.BadCall, "нужна цель")
 	}
 	p, err := resolve(args[0])
 	if err != nil {
@@ -832,13 +943,21 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		if err != nil {
 			return exitcode.Wrap(exitcode.NoHerdr, err)
 		}
-		if a.Status == "working" {
-			return exitcode.Errorf(exitcode.Busy, "панель занята: %s", p.ID)
+		// Та же проверка, что и у ожидающей ветки: blocked значит, что панель
+		// ждёт решения человека, и текст уедет ответом на этот вопрос.
+		if !task.Free(a.Status) && !o.force {
+			return exitcode.Errorf(exitcode.Busy, "панель занята: %s в состоянии %q", p.ID, a.Status)
 		}
+		id := task.NewID()
+		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID, Prompt: prompt})
 		if _, err := client().Prompt(p.ID, prompt, nil, 0); err != nil {
 			return exitcode.Wrap(exitcode.BadCall, err)
 		}
-		return emit(o, map[string]any{"pane": p.ID, "sent": true, "waited": false})
+		// Отправка без ожидания тоже попадает в журнал: иначе `tasks` о ней
+		// умолчит, а панель не получит watched в sessions.
+		j.Append(journal.Record{Task: id, Event: journal.Finished, Pane: p.ID,
+			Outcome: "отправлено без ожидания"})
+		return emit(o, map[string]any{"task": id, "pane": p.ID, "sent": true, "waited": false})
 	}
 
 	if o.detach {
@@ -884,8 +1003,12 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	if err := emit(o, out); err != nil {
 		return err
 	}
-	if res.Outcome == task.TimedOut {
+	switch res.Outcome {
+	case task.TimedOut:
 		return exitcode.Errorf(exitcode.Timeout, "задача %s не уложилась в срок", res.Task)
+	case task.Unknown:
+		return exitcode.Errorf(exitcode.Unknown,
+			"задача %s: herdr отказал во время ожидания, исход неизвестен", res.Task)
 	}
 	return nil
 }
@@ -897,9 +1020,14 @@ func detach(o opts, pane, prompt string) error {
 	if err != nil {
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
-	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw}
+	// Потомок должен получить всё, что меняет его поведение: иначе он откажет
+	// в свой лог, которого никто не читает.
+	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw, "--db-path", o.db}
 	if o.notify != "" {
 		args = append(args, "--notify", o.notify)
+	}
+	if o.force {
+		args = append(args, "--force")
 	}
 	// Каталог заводится здесь же: журнал поручений и индекс создают его сами,
 	// а до первого из них --detach падал на «no such file or directory».
@@ -969,9 +1097,13 @@ func cmdTasks() error {
 
 func oneID(args []string) (int64, error) {
 	if len(args) == 0 {
-		return 0, fmt.Errorf("нужен номер записи")
+		return 0, exitcode.Errorf(exitcode.BadCall, "нужен номер записи")
 	}
-	return strconv.ParseInt(args[0], 10, 64)
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return 0, exitcode.Errorf(exitcode.BadCall, "номер записи — число, получено %q", args[0])
+	}
+	return id, nil
 }
 
 func oneLine(s string) string { return cut(strings.Join(strings.Fields(s), " "), 160) }

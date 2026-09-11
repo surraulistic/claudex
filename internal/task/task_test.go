@@ -105,6 +105,38 @@ func TestTimeoutIsItsOwnOutcome(t *testing.T) {
 	}
 }
 
+func TestHerdrFailureDuringWaitIsNotATimeout(t *testing.T) {
+	// «Не смогли узнать» — не «не завершилось». Договор требует различать их
+	// кодами 7 и 5, и раньше любой отказ herdr становился сроком.
+	f, _, o := setup(t, "idle")
+	f.Reply("agent.prompt", `{"id":"x","error":{"code":"internal_error","message":"herdr прилёг"}}`)
+	res, err := Delegate(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != Unknown {
+		t.Fatalf("отказ herdr — отдельный исход, получено %q", res.Outcome)
+	}
+
+	f2, _, o2 := setup(t, "idle")
+	f2.Reply("agent.prompt", `{"id":"x","error":{"code":"timeout","message":"не дождались"}}`)
+	res2, _ := Delegate(context.Background(), o2)
+	if res2.Outcome != TimedOut {
+		t.Fatalf("срок остаётся сроком, получено %q", res2.Outcome)
+	}
+}
+
+func TestFreeMatchesDelegateRefusal(t *testing.T) {
+	// Проверку состояния зовут из двух мест; расходиться им нельзя.
+	for status, want := range map[string]bool{
+		"idle": true, "done": true, "blocked": false, "unknown": false, "working": false,
+	} {
+		if Free(status) != want {
+			t.Fatalf("Free(%q) = %v", status, Free(status))
+		}
+	}
+}
+
 func TestJournalKeepsStartAndFinish(t *testing.T) {
 	_, j, o := setup(t, "idle")
 	res, err := Delegate(context.Background(), o)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"testing"
@@ -92,5 +93,30 @@ func TestSecondsAndDurationsBothParse(t *testing.T) {
 	}
 	if _, err := parseTimeout("скоро"); err == nil {
 		t.Fatal("невнятный срок — ошибка")
+	}
+}
+
+func TestDigestCarriesTheFourDocumentedParts(t *testing.T) {
+	// Дайджест одной панели — единственная команда, не попавшая в первую
+	// сверку, и единственная, которая разошлась с договором: печатала текст
+	// вместо JSON. Проверка держит форму, а не содержимое.
+	raw, err := json.Marshal(digestView{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	json.Unmarshal(raw, &got)
+	for _, k := range []string{"target", "alias", "live", "history", "tail", "signals"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("часть %q пропала из дайджеста: %s", k, raw)
+		}
+	}
+	live, _ := json.Marshal(liveView{})
+	json.Unmarshal(live, &got)
+	// По этим полям чужой агент решает, можно ли давать панели новую задачу.
+	for _, k := range []string{"pane_id", "status", "context_pct", "limits", "session_id"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("поле %q пропало из live: %s", k, live)
+		}
 	}
 }

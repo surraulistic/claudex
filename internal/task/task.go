@@ -25,9 +25,17 @@ const (
 	Reported = "отчиталась"
 	Silent   = "освободилась без отчёта"
 	TimedOut = "не уложилась в срок"
+	// Unknown — herdr отказал во время ожидания. Это не «не завершилась»:
+	// мы попросту не узнали, чем дело кончилось, и выдавать одно за другое
+	// нельзя.
+	Unknown = "исход неизвестен"
 )
 
 var ErrBusy = errors.New("панель занята")
+
+// Free — принимает ли панель в таком состоянии новое задание. Проверка нужна
+// снаружи тоже: у отправки без ожидания своя ветка, и она про это забывала.
+func Free(status string) bool { return freeStates[status] }
 
 // Состояния, в которых панель принимает новое задание.
 //
@@ -113,7 +121,12 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 		res.Outcome, res.Said, res.Reason = Reported, r.Outcome, r.Reason
 	case err := <-freed:
 		if err != nil {
-			res.Outcome, res.Reason = TimedOut, err.Error()
+			// Срок и отказ herdr — разные исходы для вызывающего.
+			res.Outcome = Unknown
+			if herdr.CodeOf(err) == "timeout" {
+				res.Outcome = TimedOut
+			}
+			res.Reason = err.Error()
 			break
 		}
 		// Панель освободилась. Отчёт мог не успеть записаться — даём ему срок,
@@ -157,6 +170,10 @@ func selfPath() string {
 	}
 	return "claudex"
 }
+
+// NewID — идентификатор поручения. Нужен и снаружи: отправка без ожидания
+// заводит запись в журнале сама.
+func NewID() string { return newID() }
 
 func newID() string {
 	b := make([]byte, 4)
