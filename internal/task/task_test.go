@@ -516,3 +516,89 @@ func TestShortCutsWholeCharacters(t *testing.T) {
 		t.Fatalf("короткое не трогается, получено %q", got)
 	}
 }
+
+func init() { humanRetryGap = time.Millisecond }
+
+func TestRefusedNotificationIsNotCalledDelivered(t *testing.T) {
+	// herdr отвечает успехом и при отказе показать. Прежде claudex писал
+	// «показано человеку», хотя человек не видел ничего.
+	f, j, c := delivery(t, "working")
+	f.Reply("notification.show",
+		`{"id":"x","result":{"type":"notification_show","shown":false,"reason":"busy"}}`)
+
+	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+		DeliverOptions{Stage: StageFinished, Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond})
+	if d.Fallback {
+		t.Fatal("отказ показать — не показ")
+	}
+	if d.Refused != "busy" {
+		t.Fatalf("причина отказа сохранена, получено %q", d.Refused)
+	}
+	recs, _ := j.Read()
+	if !strings.HasPrefix(recs[0].Outcome, NotDelivered) || !strings.Contains(recs[0].Outcome, "busy") {
+		t.Fatalf("журнал говорит правду, получено %q", recs[0].Outcome)
+	}
+}
+
+func TestTransientRefusalIsRetried(t *testing.T) {
+	// Отказ busy наблюдался преходящим: то же уведомление показывалось позже.
+	f, j, c := delivery(t, "working")
+	f.Reply("notification.show",
+		`{"id":"x","result":{"shown":false,"reason":"busy"}}`)
+	go func() {
+		time.Sleep(2 * time.Millisecond)
+		f.Reply("notification.show", `{"id":"x","result":{"shown":true,"reason":"shown"}}`)
+	}()
+	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+		DeliverOptions{Stage: StageFinished, Deadline: 20 * time.Millisecond, Poll: 5 * time.Millisecond})
+	if !d.Fallback {
+		t.Fatalf("повтор доносит, получено %+v", d)
+	}
+}
+
+func TestLostReportsNamesWhatNobodyLearned(t *testing.T) {
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "т1", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "карта флота готова"},
+		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Target: "wE:p17",
+			Outcome: NotDelivered + " (herdr: busy)", Reason: "теперь другой разговор"},
+		{Task: "т2", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: ToldHuman},
+		{Task: "т3", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
+	}
+	got := LostReports(recs)
+	if len(got) != 1 {
+		t.Fatalf("потеряна одна, получено %+v", got)
+	}
+	if got[0].Task != "т1" || got[0].Stage != StageFinished || got[0].Target != "wE:p17" {
+		t.Fatalf("получено %+v", got[0])
+	}
+	if !strings.Contains(got[0].Report, "карта флота готова") {
+		t.Fatalf("сам отчёт при потере не теряется, получено %q", got[0].Report)
+	}
+	if got[0].At == "" || !strings.Contains(got[0].Reason, "busy") {
+		t.Fatalf("когда и почему, получено %+v", got[0])
+	}
+}
+
+func TestLaterSuccessClearsTheLoss(t *testing.T) {
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: NotDelivered},
+		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
+	}
+	if got := LostReports(recs); len(got) != 0 {
+		t.Fatalf("дошедшее позже перестаёт быть потерей, получено %+v", got)
+	}
+}
+
+func TestLostReportsSeparatesStages(t *testing.T) {
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
+		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageReported, Outcome: NotDelivered},
+	}
+	got := LostReports(recs)
+	if len(got) != 1 || got[0].Stage != StageReported {
+		t.Fatalf("доставленная стадия не скрывает потерянную, получено %+v", got)
+	}
+}

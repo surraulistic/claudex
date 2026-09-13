@@ -210,6 +210,21 @@ How the correlation works: the prompt carries a line telling the agent to run
 `HERDR_PANE_ID`. A screen marker would not work — the pane redraws the prompt
 itself, so any pattern placed in the task text matches immediately.
 
+When nobody could be reached at all — the leader's pane holds a different
+conversation *and* Herdr declines to show a notification — the completion is not
+dropped. It surfaces as a top-level `undelivered` array in `claudex sessions`
+and `claudex brief`, carrying the report text itself:
+
+```json
+"undelivered": [{"task": "fd6cc93f", "stage": "reported", "target": "wE:p17",
+  "at": "…", "reason": "не доставлено (herdr: busy): … другой разговор …",
+  "report": "готово 18 из 21 сервиса с settings.yaml"}]
+```
+
+That is a pull channel: you already call `sessions` constantly, so nothing
+depends on a toast being rendered. The key is absent when there is nothing to
+say. Read it and pass the result on — that is the whole point of it being there.
+
 `claudex tasks` prints that journal: every send, every report, every outcome. It
 is the authority on whether a task finished — `history` can lag behind it, and
 says so via `history.stale`.

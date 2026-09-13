@@ -354,8 +354,12 @@ func TestLongWaitDoesNotDisturbConcurrentCalls(t *testing.T) {
 func TestNotifyShowsToUser(t *testing.T) {
 	f := newFake(t)
 	f.replies["notification.show"] = `{"id":"x","result":{"type":"notification_show","shown":true}}`
-	if err := New(f.path).Notify("готово", "задача 742309b7"); err != nil {
+	shown, reason, err := New(f.path).Notify("готово", "задача 742309b7")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !shown || reason != "" {
+		t.Fatalf("показ подтверждён ответом, получено shown=%v reason=%q", shown, reason)
 	}
 	var req struct {
 		Params map[string]any `json:"params"`
@@ -363,5 +367,22 @@ func TestNotifyShowsToUser(t *testing.T) {
 	json.Unmarshal([]byte(f.lastBody()), &req)
 	if req.Params["title"] != "готово" || req.Params["body"] != "задача 742309b7" {
 		t.Fatalf("заголовок и текст доезжают, получено %v", req.Params)
+	}
+}
+
+func TestNotifyReportsRefusal(t *testing.T) {
+	// herdr отвечает успехом и при отказе показать: без разбора ответа
+	// claudex объявлял человека предупреждённым, когда тот ничего не видел.
+	f := newFake(t)
+	f.replies["notification.show"] = `{"id":"x","result":{"type":"notification_show","shown":false,"reason":"busy"}}`
+	shown, reason, err := New(f.path).Notify("готово", "тело")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shown {
+		t.Fatal("herdr показывать отказался")
+	}
+	if reason != "busy" {
+		t.Fatalf("причина отказа доезжает, получено %q", reason)
 	}
 }

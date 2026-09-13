@@ -374,8 +374,17 @@ func (c *Client) Wait(target string, until []string, timeout time.Duration) (Age
 
 // Notify показывает уведомление человеку. Это канал мимо агентов: он не зависит
 // от того, свободна ли чья-то панель, и не стоит ни одного токена.
-func (c *Client) Notify(title, body string) error {
-	return c.Call("notification.show", map[string]any{
+//
+// Успешный ответ ещё не значит показ: herdr отвечает shown=false с причиной
+// (busy, rate_limited, no_foreground_client, disabled). Отказ busy наблюдался
+// преходящим — через десять секунд то же уведомление показывалось.
+func (c *Client) Notify(title, body string) (shown bool, reason string, err error) {
+	var out struct {
+		Shown  bool   `json:"shown"`
+		Reason string `json:"reason"`
+	}
+	err = c.Call("notification.show", map[string]any{
 		"title": title, "body": body, "sound": "done",
-	}, nil)
+	}, &out)
+	return out.Shown, out.Reason, err
 }

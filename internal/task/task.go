@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/surraulistic/claudex/internal/herdr"
@@ -231,6 +232,55 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	return res, nil
 }
 
+// Lost — завершение, о котором не узнал никто: ни ведущий, ни человек.
+// Отдаётся в выдаче sessions и brief, потому что её и без того постоянно
+// запрашивают: это канал, который не зависит от того, показал ли herdr
+// уведомление.
+type Lost struct {
+	Task   string `json:"task"`
+	Stage  string `json:"stage"`
+	Target string `json:"target"`
+	At     string `json:"at"`
+	Reason string `json:"reason"`
+	Report string `json:"report,omitempty"`
+}
+
+// LostReports собирает по журналу всё, что осталось никем не полученным.
+func LostReports(recs []journal.Record) []Lost {
+	type key struct{ task, stage string }
+	state := map[key]*Lost{}
+	var order []key
+	report := map[string]string{}
+
+	for _, r := range recs {
+		switch r.Event {
+		case journal.Reported:
+			report[r.Task] = strings.TrimSpace(r.Outcome + " " + r.Reason)
+		case journal.Notified:
+			k := key{r.Task, orElse(r.Stage, StageFinished)}
+			if _, ok := state[k]; !ok {
+				order = append(order, k)
+			}
+			if !strings.HasPrefix(r.Outcome, NotDelivered) {
+				state[k] = nil // до кого-то дошло
+				continue
+			}
+			state[k] = &Lost{
+				Task: r.Task, Stage: k.stage, Target: r.Target,
+				At: r.Time.Format(time.RFC3339), Reason: r.Outcome + ": " + r.Reason,
+			}
+		}
+	}
+	out := []Lost{}
+	for _, k := range order {
+		if l := state[k]; l != nil {
+			l.Report = report[l.Task]
+			out = append(out, *l)
+		}
+	}
+	return out
+}
+
 type taskState struct {
 	finished  bool
 	target    string
@@ -258,7 +308,7 @@ func stateOf(recs []journal.Record, id string) taskState {
 			if r.Target != "" {
 				st.target = r.Target
 			}
-			if r.Outcome != "не доставлено" {
+			if !strings.HasPrefix(r.Outcome, NotDelivered) {
 				st.delivered[orElse(r.Stage, StageFinished)] = true
 			}
 		}
@@ -302,8 +352,18 @@ type Delivery struct {
 	Waited   time.Duration `json:"-"`
 	Seconds  int           `json:"waited_seconds"`
 	Fallback bool          `json:"fallback,omitempty"`
-	Reason   string        `json:"reason,omitempty"`
+	// Refused — почему herdr отказался показывать. Пусто при удачном показе.
+	Refused string `json:"refused,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
+
+// Исходы доставки, как они пишутся в журнал. Признак «не доставлено» может
+// нести причину отказа herdr, поэтому сверяется по началу строки.
+const (
+	WokeUp       = "разбужен"
+	ToldHuman    = "не разбужен, показано человеку"
+	NotDelivered = "не доставлено"
+)
 
 const (
 	StageFinished = "finished" // исход, известный наблюдателю, в том числе по сроку
@@ -370,8 +430,8 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			d.Seconds = int(d.Waited.Seconds())
 			d.Reason = fmt.Sprintf("в %s теперь другой разговор (%s вместо %s): поручение затевал не он",
 				target, short(pane.Session.Value), short(o.WantSession))
-			d.Fallback = c.Notify("claudex: поручение "+id+" завершено",
-				text+"\n\n"+d.Reason) == nil
+			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+				text+"\n\n"+d.Reason)
 			record(j, id, target, o.Stage, d)
 			return d
 		case !freeStates[pane.Status]:
@@ -392,8 +452,8 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			d.Waited = time.Since(started)
 			d.Seconds = int(d.Waited.Seconds())
 			d.Reason = fmt.Sprintf("ведущий не освободился за %s: %v", o.Deadline, last)
-			d.Fallback = c.Notify("claudex: поручение "+id+" завершено",
-				text+"\n\nРазбудить "+target+" не удалось: "+last.Error()) == nil
+			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+				text+"\n\nРазбудить "+target+" не удалось: "+last.Error())
 			record(j, id, target, o.Stage, d)
 			return d
 		case <-time.After(o.Poll):
@@ -403,6 +463,31 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 
 // Резать по символам, а не по байтам: у кириллического имени разговора
 // байтовый срез рубит букву пополам, и диагностика становится бесполезной.
+// tellHuman показывает исход человеку и не выдаёт отказ за успех.
+//
+// Отказ herdr бывает преходящим (наблюдалось busy, через десять секунд то же
+// уведомление показывалось), поэтому несколько попыток. Долго ждать нельзя:
+// эта ветка выполняется в том числе внутри хода самой задачи.
+var humanRetryGap = 3 * time.Second
+
+func tellHuman(c *herdr.Client, title, body string) (bool, string) {
+	var reason string
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			time.Sleep(humanRetryGap)
+		}
+		shown, why, err := c.Notify(title, body)
+		if shown {
+			return true, ""
+		}
+		reason = why
+		if err != nil {
+			reason = err.Error()
+		}
+	}
+	return false, reason
+}
+
 func short(id string) string {
 	r := []rune(id)
 	if len(r) > 8 {
@@ -415,13 +500,16 @@ func record(j *journal.Journal, id, target, stage string, d Delivery) {
 	if j == nil {
 		return
 	}
-	outcome := "разбужен"
+	outcome := WokeUp
 	switch {
 	case d.OK:
 	case d.Fallback:
-		outcome = "не разбужен, показано человеку"
+		outcome = ToldHuman
 	default:
-		outcome = "не доставлено"
+		outcome = NotDelivered
+		if d.Refused != "" {
+			outcome += " (herdr: " + d.Refused + ")"
+		}
 	}
 	j.Append(journal.Record{
 		Task: id, Event: journal.Notified, Target: target, Stage: stage,

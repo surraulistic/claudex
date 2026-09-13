@@ -161,3 +161,15 @@ func TestTasksSeparatesStagesOfTheSameTask(t *testing.T) {
 		t.Fatalf("названа именно недоставленная стадия, получено %v", got)
 	}
 }
+
+func TestUndeliveredAppearsOnlyWhenThereIsSomethingToSay(t *testing.T) {
+	// Ключ должен броситься в глаза, когда он есть, и не мозолить, когда нет:
+	// sessions читают в каждом обращении к панелям.
+	if _, has := withLost(map[string]any{"panes": nil}, nil)["undelivered"]; has {
+		t.Fatal("пустой список в выдачу не кладётся")
+	}
+	out := withLost(map[string]any{"panes": nil}, []task.Lost{{Task: "т1", Stage: "reported"}})
+	if _, has := out["undelivered"]; !has {
+		t.Fatal("потерянное обязано быть в выдаче")
+	}
+}

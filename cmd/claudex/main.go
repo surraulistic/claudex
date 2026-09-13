@@ -384,6 +384,16 @@ type briefSignals struct {
 	CurrentToolCall *string  `json:"current_tool_call"`
 }
 
+// withLost кладёт в выдачу завершения, о которых не узнал никто. Ключ
+// появляется только когда есть о чём сказать: пустой список читатель
+// пролистает, а непустой обязан заметить.
+func withLost(out map[string]any, lost []task.Lost) map[string]any {
+	if len(lost) > 0 {
+		out["undelivered"] = lost
+	}
+	return out
+}
+
 func signalsOf(raw string, entries []textual.HistoryEntry) briefSignals {
 	sig := textual.Signals(raw, entries)
 	return briefSignals{
@@ -484,21 +494,22 @@ func cmdSessions(o opts, withTail bool) error {
 	wg.Wait()
 	sort.SliceStable(seen, func(i, j int) bool { return less(seen[i].view, seen[j].view) })
 
+	lost := task.LostReports(jf.records)
 	if !withTail {
 		views := make([]paneView, len(seen))
 		for i, s := range seen {
 			views[i] = s.view
 		}
-		return emit(o, map[string]any{"panes": views})
+		return emit(o, withLost(map[string]any{"panes": views}, lost))
 	}
 	briefs := make([]briefView, len(seen))
 	for i, s := range seen {
 		briefs[i] = toBrief(s.view, s.raw, textual.CleanTail(s.raw, lines), s.entries)
 	}
-	return emit(o, map[string]any{
+	return emit(o, withLost(map[string]any{
 		"generated_at": time.Now().Format(time.RFC3339),
 		"panes":        briefs,
-	})
+	}, lost))
 }
 
 // sighting — всё, что собрано про одну панель за этот запуск. Держится вместе,
@@ -575,6 +586,7 @@ func fillHistory(v *paneView, db *store.Store, p state.Pane, limit, chars int, d
 type journalFacts struct {
 	watched  map[string]bool
 	lastDone map[string]time.Time
+	records  []journal.Record
 }
 
 func readJournal() journalFacts {
@@ -583,6 +595,7 @@ func readJournal() journalFacts {
 	if err != nil {
 		return f
 	}
+	f.records = recs
 	open := map[string]string{}
 	for _, r := range recs {
 		switch r.Event {
@@ -1179,7 +1192,7 @@ func undeliveredWakes(recs []journal.Record) []string {
 			order = append(order, k)
 		}
 		seen[k] = r.Outcome
-		if r.Outcome == "разбужен" {
+		if r.Outcome == task.WokeUp {
 			woken[k] = true
 		}
 	}
