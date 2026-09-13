@@ -1040,6 +1040,10 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	}
 
 	out := map[string]any{
+		// Привязка видна сразу: без неё пробуждение не состоится, и узнать об
+		// этом лучше здесь, а не через полчаса.
+		"wake": map[string]any{"target": res.WakeTarget,
+			"session_bound": res.WakeSession != ""},
 		"task": res.Task, "pane": p.ID, "outcome": res.Outcome,
 		"said": res.Said, "reason": res.Reason,
 		"correlated": res.Outcome == task.Reported,

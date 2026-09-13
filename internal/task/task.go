@@ -384,9 +384,9 @@ func sessionOf(c *herdr.Client, pane string) string {
 }
 
 type DeliverOptions struct {
-	// WantSession — разговор, который должен быть в панели. Если там теперь
-	// другой, писать туда нельзя: сообщение о чужом поручении уедет человеку,
-	// который его не посылал.
+	// WantSession — разговор, который поручение затеял. Писать в панель можно
+	// только когда там ровно он: рядом живут другие сессии того же ведущего,
+	// и попасть в чужую нельзя ни при каких обстоятельствах.
 	WantSession string
 	// Stage — что именно доставляется. Дедупликация ведётся по паре
 	// задача+стадия: повторный done не должен будить ведущего второй раз.
@@ -425,11 +425,10 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		switch {
 		case err != nil:
 			last = err
-		case o.WantSession != "" && pane.Session.Value != "" && pane.Session.Value != o.WantSession:
+		case !sameConversation(o.WantSession, pane.Session.Value):
 			d.Waited = time.Since(started)
 			d.Seconds = int(d.Waited.Seconds())
-			d.Reason = fmt.Sprintf("в %s теперь другой разговор (%s вместо %s): поручение затевал не он",
-				target, short(pane.Session.Value), short(o.WantSession))
+			d.Reason = mismatch(target, o.WantSession, pane.Session.Value)
 			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
 				text+"\n\n"+d.Reason)
 			record(j, id, target, o.Stage, d)
@@ -486,6 +485,29 @@ func tellHuman(c *herdr.Client, title, body string) (bool, string) {
 		}
 	}
 	return false, reason
+}
+
+// sameConversation — тот ли это разговор, что затеял поручение.
+//
+// Запрещено, пока не доказано. Неизвестный с любой стороны идентификатор —
+// это не «наверное, тот же», а «подтвердить нечем»: у панели бывает пусто
+// в agent_session, и прежнее мягкое правило писало в неё что угодно.
+func sameConversation(want, have string) bool {
+	return want != "" && have != "" && want == have
+}
+
+func mismatch(target, want, have string) string {
+	switch {
+	case want == "":
+		return fmt.Sprintf("при заведении поручения разговор в %s не был записан: "+
+			"подтвердить, что это он, нечем", target)
+	case have == "":
+		return fmt.Sprintf("herdr не сообщает, какой разговор сейчас в %s: "+
+			"подтвердить, что это %s, нечем", target, short(want))
+	default:
+		return fmt.Sprintf("в %s теперь другой разговор (%s вместо %s): поручение затевал не он",
+			target, short(have), short(want))
+	}
 }
 
 func short(id string) string {

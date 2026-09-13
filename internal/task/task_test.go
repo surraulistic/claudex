@@ -198,10 +198,14 @@ func waitForTaskID(t *testing.T, j *journal.Journal) string {
 
 var _ = json.Marshal
 
+// ведущий, чей разговор известен: доставка без подтверждённой привязки
+// запрещена, поэтому у опоры тестов он есть.
+const leaderSession = "01a07921-5154-7980-abd5-945161e3ea08"
+
 func delivery(t *testing.T, status string) (*herdrtest.Fake, *journal.Journal, *herdr.Client) {
 	t.Helper()
 	f := herdrtest.Start(t)
-	f.Reply("agent.get", agent(status))
+	f.Reply("agent.get", agentWith(status, leaderSession))
 	f.Reply("agent.prompt", agent("idle"))
 	f.Reply("notification.show", `{"id":"x","result":{"shown":true}}`)
 	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
@@ -215,10 +219,10 @@ func TestDeliverWaitsForTheLeaderInsteadOfGivingUp(t *testing.T) {
 	f, j, c := delivery(t, "working")
 	go func() {
 		time.Sleep(80 * time.Millisecond)
-		f.Reply("agent.get", agent("idle"))
+		f.Reply("agent.get", agentWith("idle", leaderSession))
 	}()
 	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
-		DeliverOptions{Deadline: 3 * time.Second, Poll: 10 * time.Millisecond})
+		DeliverOptions{WantSession: leaderSession, Deadline: 3 * time.Second, Poll: 10 * time.Millisecond})
 	if !d.OK {
 		t.Fatalf("дождались и разбудили, получено %+v", d)
 	}
@@ -232,7 +236,7 @@ func TestDeliverFallsBackToTheHumanWhenLeaderStaysBusy(t *testing.T) {
 	// факт уходит человеку уведомлением herdr — мимо агентов и без токенов.
 	f, j, c := delivery(t, "working")
 	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "поручение готово",
-		DeliverOptions{Deadline: 60 * time.Millisecond, Poll: 10 * time.Millisecond})
+		DeliverOptions{WantSession: leaderSession, Deadline: 60 * time.Millisecond, Poll: 10 * time.Millisecond})
 	if d.OK {
 		t.Fatal("ведущий так и не освободился")
 	}
@@ -264,7 +268,7 @@ func TestDeliveryOutcomeLandsInTheJournal(t *testing.T) {
 	} {
 		_, j, cl := delivery(t, c.status)
 		Deliver(context.Background(), cl, j, "т1", "wE:p17", "готово",
-			DeliverOptions{Deadline: c.deadline, Poll: 10 * time.Millisecond})
+			DeliverOptions{WantSession: leaderSession, Deadline: c.deadline, Poll: 10 * time.Millisecond})
 		recs, _ := j.Read()
 		var got *journal.Record
 		for i := range recs {
@@ -286,7 +290,7 @@ func TestDeliverStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	d := Deliver(ctx, c, j, "т1", "wE:p17", "готово",
-		DeliverOptions{Deadline: time.Hour, Poll: 10 * time.Millisecond})
+		DeliverOptions{WantSession: leaderSession, Deadline: time.Hour, Poll: 10 * time.Millisecond})
 	if d.OK {
 		t.Fatal("отменённая доставка не считается удавшейся")
 	}
@@ -298,7 +302,8 @@ func TestDeliverStopsOnContextCancel(t *testing.T) {
 // уже не было.
 func timedOut(t *testing.T, j *journal.Journal, target string) {
 	t.Helper()
-	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13", Target: target})
+	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+		Target: target, TargetSession: leaderSession})
 	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Pane: "wE:p13",
 		Outcome: TimedOut, Reason: "context deadline exceeded"})
 	j.Append(journal.Record{Task: "т1", Event: journal.Notified, Target: target,
@@ -382,7 +387,7 @@ func TestFailedDeliveryIsRetriedOnTheNextDone(t *testing.T) {
 	if res, _ := Report(context.Background(), "т1", "готово", "первый", o); res.Delivered.Fallback {
 		t.Fatal("человеку показать не удалось")
 	}
-	f.Reply("agent.get", agent("idle"))
+	f.Reply("agent.get", agentWith("idle", leaderSession))
 	res, _ := Report(context.Background(), "т1", "готово", "второй", o)
 	if !res.Late || res.Delivered == nil || !res.Delivered.OK {
 		t.Fatalf("недоставленное повторяется, получено %+v", res)
@@ -392,7 +397,8 @@ func TestFailedDeliveryIsRetriedOnTheNextDone(t *testing.T) {
 func TestReportWhileWatcherAliveDoesNotDeliverItself(t *testing.T) {
 	// Наблюдатель ещё ждёт отчёт через журнал — вторая доставка была бы дублем.
 	f, j, c := delivery(t, "idle")
-	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13", Target: "wE:p17"})
+	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+		Target: "wE:p17", TargetSession: leaderSession})
 
 	res, _ := Report(context.Background(), "т1", "готово", "рано",
 		ReportOptions{Client: c, Journal: j, Deadline: time.Second})
@@ -462,20 +468,31 @@ func TestWakeRefusesAPaneWhoseConversationChanged(t *testing.T) {
 	}
 }
 
-func TestWakeProceedsWhenThereIsNothingToCompare(t *testing.T) {
-	// Привязки может не быть: герой не всегда сообщает разговор. Тогда
-	// проверять нечего, и отказывать не за что.
-	for _, c := range []struct{ want, has string }{
-		{"", "разговор-Б"}, // не записали при заведении
-		{"разговор-А", ""}, // герой не сообщает сейчас
+func TestWakeRefusesWhenTheBindingCannotBeConfirmed(t *testing.T) {
+	// Рядом живут другие сессии того же ведущего. Неизвестный идентификатор —
+	// это «подтвердить нечем», а не «наверное, тот же»: прежнее мягкое правило
+	// писало в панель что угодно, стоило герою не сообщить разговор.
+	for _, c := range []struct{ name, want, has string }{
+		{"не записали при заведении", "", leaderSession},
+		{"герой не сообщает сейчас", leaderSession, ""},
+		{"неизвестно с обеих сторон", "", ""},
 	} {
 		f, j, cl := delivery(t, "idle")
 		f.Reply("agent.get", agentWith("idle", c.has))
 		d := Deliver(context.Background(), cl, j, "т1", "wE:p17", "готово",
 			DeliverOptions{Stage: StageReported, WantSession: c.want,
 				Deadline: time.Second, Poll: 10 * time.Millisecond})
-		if !d.OK {
-			t.Fatalf("want=%q has=%q: получено %+v", c.want, c.has, d)
+		if d.OK {
+			t.Fatalf("%s: в панель писать нельзя", c.name)
+		}
+		if !d.Fallback {
+			t.Fatalf("%s: вместо этого говорим человеку, получено %+v", c.name, d)
+		}
+		if !strings.Contains(d.Reason, "нечем") {
+			t.Fatalf("%s: причина названа, получено %q", c.name, d.Reason)
+		}
+		if f.LastRequest("agent.prompt") != nil {
+			t.Fatalf("%s: в herdr не ходили с промптом", c.name)
 		}
 	}
 }
@@ -527,7 +544,8 @@ func TestRefusedNotificationIsNotCalledDelivered(t *testing.T) {
 		`{"id":"x","result":{"type":"notification_show","shown":false,"reason":"busy"}}`)
 
 	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
-		DeliverOptions{Stage: StageFinished, Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond})
+		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
+			Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond})
 	if d.Fallback {
 		t.Fatal("отказ показать — не показ")
 	}
@@ -550,7 +568,8 @@ func TestTransientRefusalIsRetried(t *testing.T) {
 		f.Reply("notification.show", `{"id":"x","result":{"shown":true,"reason":"shown"}}`)
 	}()
 	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
-		DeliverOptions{Stage: StageFinished, Deadline: 20 * time.Millisecond, Poll: 5 * time.Millisecond})
+		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
+			Deadline: 20 * time.Millisecond, Poll: 5 * time.Millisecond})
 	if !d.Fallback {
 		t.Fatalf("повтор доносит, получено %+v", d)
 	}
@@ -600,5 +619,38 @@ func TestLostReportsSeparatesStages(t *testing.T) {
 	got := LostReports(recs)
 	if len(got) != 1 || got[0].Stage != StageReported {
 		t.Fatalf("доставленная стадия не скрывает потерянную, получено %+v", got)
+	}
+}
+
+func TestDelegateRecordsWhatTheWakeIsBoundTo(t *testing.T) {
+	// Привязку снимают при заведении поручения, а не при доставке: к моменту
+	// доставки в панели может быть уже другая сессия.
+	f, j, o := setup(t, "idle")
+	f.Reply("agent.get", agentWith("idle", leaderSession))
+	o.Notify = "wE:p17"
+
+	res, err := Delegate(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.WakeTarget != "wE:p17" || res.WakeSession != leaderSession {
+		t.Fatalf("цель и разговор запомнены, получено %+v", res)
+	}
+	recs, _ := j.Read()
+	if recs[0].Event != journal.Started || recs[0].TargetSession != leaderSession {
+		t.Fatalf("привязка попала в журнал, получено %+v", recs[0])
+	}
+}
+
+func TestDelegateWithoutReachableLeaderLeavesTheBindingEmpty(t *testing.T) {
+	// Герой не сообщает разговор — привязки нет, и это видно сразу, а не
+	// через полчаса на попытке разбудить.
+	f, _, o := setup(t, "idle")
+	f.Reply("agent.get", agent("idle"))
+	o.Notify = "wE:p17"
+
+	res, _ := Delegate(context.Background(), o)
+	if res.WakeSession != "" {
+		t.Fatalf("привязки нет, получено %q", res.WakeSession)
 	}
 }

@@ -242,12 +242,23 @@ Add `--notify <target>` to wake another pane when the task ends. Without it,
 `--detach` wakes **the session that started the delegation** (`HERDR_PANE_ID`) —
 waking anyone else has to be asked for by name.
 
-The wake is bound to a conversation, not to a pane. The target's session id is
-captured when the task is created and checked again before writing: a pane
-outlives the agent in it, and an hour later it may hold somebody else's
-conversation. If it does, nothing is written there — the human is told instead,
-with `в … теперь другой разговор` as the reason. This matters most for late
-reports, which arrive long after the pane could have moved on.
+The wake is bound to a conversation, not to a pane, and the binding is **closed
+by default**. The target's session id is captured when the task is created and
+must match exactly before anything is written. A pane outlives the agent in it,
+several leader sessions run side by side, and an hour later that pane may hold
+one of the others.
+
+Nothing is written unless the binding is proven. An unknown session id on either
+side means *cannot confirm*, not *probably the same* — so a task started by one
+session can never land in another. All three refusals go to the human instead,
+each naming its reason:
+
+- `в … теперь другой разговор (… вместо …)` — the pane moved on;
+- `herdr не сообщает, какой разговор сейчас в …` — no identity to compare with;
+- `при заведении поручения разговор в … не был записан` — never bound.
+
+`delegate` reports the binding up front as `wake.session_bound`, so a task that
+can never be delivered is visible at once rather than half an hour later.
 
 Waking waits for the target to go free — writing into a busy pane would land in
 somebody else's turn. The wait lives in the watcher process and costs polling,
