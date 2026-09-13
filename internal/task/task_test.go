@@ -172,7 +172,8 @@ func TestReportUsesPaneFromEnvironment(t *testing.T) {
 	// HERDR_PANE_ID, который herdr кладёт в окружение каждой панели.
 	_, j, _ := setup(t, "idle")
 	t.Setenv("HERDR_PANE_ID", "wE:p7")
-	if err := Report(j, "т1", "готово", "всё сделано"); err != nil {
+	if _, err := Report(context.Background(), "т1", "готово", "всё сделано",
+		ReportOptions{Journal: j}); err != nil {
 		t.Fatal(err)
 	}
 	recs, _ := j.Read()
@@ -287,5 +288,130 @@ func TestDeliverStopsOnContextCancel(t *testing.T) {
 		DeliverOptions{Deadline: time.Hour, Poll: 10 * time.Millisecond})
 	if d.OK {
 		t.Fatal("отменённая доставка не считается удавшейся")
+	}
+}
+
+// Поручение 6dea9f33: наблюдатель дошёл до срока в 18:45, записал
+// «не уложилась в срок» и разбудил ведущего, задача продолжила работу и
+// отчиталась в 18:59 — этот отчёт не доходил никуда, потому что наблюдателя
+// уже не было.
+func timedOut(t *testing.T, j *journal.Journal, target string) {
+	t.Helper()
+	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13", Target: target})
+	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Pane: "wE:p13",
+		Outcome: TimedOut, Reason: "context deadline exceeded"})
+	j.Append(journal.Record{Task: "т1", Event: journal.Notified, Target: target,
+		Stage: StageFinished, Outcome: "разбужен"})
+}
+
+func TestLateReportWakesTheLeaderTheWatcherCouldNotWaitFor(t *testing.T) {
+	f, j, c := delivery(t, "idle")
+	timedOut(t, j, "wE:p17")
+
+	res, err := Report(context.Background(), "т1", "готово", "каталог опубликован",
+		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Late || res.Delivered == nil || !res.Delivered.OK {
+		t.Fatalf("поздний отчёт доставлен ведущему, получено %+v", res)
+	}
+	body, _ := f.LastRequest("agent.prompt")["params"].(map[string]any)["text"].(string)
+	if !strings.Contains(body, "каталог опубликован") {
+		t.Fatalf("ведущему уехал сам отчёт, получено %q", body)
+	}
+}
+
+func TestLateReportFallsBackToHumanWhenLeaderIsBusy(t *testing.T) {
+	// done выполняется внутри хода самой задачи, поэтому ждать долго нельзя:
+	// занят ведущий — говорим человеку сразу.
+	f, j, c := delivery(t, "working")
+	timedOut(t, j, "wE:p17")
+
+	res, _ := Report(context.Background(), "т1", "готово", "каталог опубликован",
+		ReportOptions{Client: c, Journal: j, Deadline: 40 * time.Millisecond, Poll: 10 * time.Millisecond})
+	if res.Delivered == nil || res.Delivered.OK || !res.Delivered.Fallback {
+		t.Fatalf("человеку показано, получено %+v", res.Delivered)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("в занятую панель ничего не отправлено")
+	}
+	body, _ := f.LastRequest("notification.show")["params"].(map[string]any)["body"].(string)
+	if !strings.Contains(body, "каталог опубликован") {
+		t.Fatalf("в уведомлении сам отчёт, получено %q", body)
+	}
+}
+
+func TestRepeatedDoneDoesNotWakeTheLeaderTwice(t *testing.T) {
+	f, j, c := delivery(t, "idle")
+	timedOut(t, j, "wE:p17")
+	o := ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond}
+
+	if res, _ := Report(context.Background(), "т1", "готово", "первый", o); !res.Late {
+		t.Fatal("первый поздний отчёт доставляется")
+	}
+	prompts := len(f.Requests())
+	res, _ := Report(context.Background(), "т1", "готово", "второй", o)
+	if res.Late || res.Skipped == "" {
+		t.Fatalf("повтор не будит второй раз, получено %+v", res)
+	}
+	if len(f.Requests()) != prompts {
+		t.Fatal("повтор не ходил в herdr вовсе")
+	}
+	// Сам отчёт при этом записан: журнал — история, а не состояние.
+	recs, _ := j.Read()
+	var reported int
+	for _, r := range recs {
+		if r.Event == journal.Reported {
+			reported++
+		}
+	}
+	if reported != 2 {
+		t.Fatalf("оба вызова done записаны, получено %d", reported)
+	}
+}
+
+func TestFailedDeliveryIsRetriedOnTheNextDone(t *testing.T) {
+	// Если не достучались ни до кого, повторить стоит — в отличие от удачи.
+	f, j, c := delivery(t, "working")
+	f.Reply("notification.show", `{"id":"x","error":{"code":"boom","message":"нет"}}`)
+	timedOut(t, j, "wE:p17")
+	o := ReportOptions{Client: c, Journal: j, Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond}
+
+	if res, _ := Report(context.Background(), "т1", "готово", "первый", o); res.Delivered.Fallback {
+		t.Fatal("человеку показать не удалось")
+	}
+	f.Reply("agent.get", agent("idle"))
+	res, _ := Report(context.Background(), "т1", "готово", "второй", o)
+	if !res.Late || res.Delivered == nil || !res.Delivered.OK {
+		t.Fatalf("недоставленное повторяется, получено %+v", res)
+	}
+}
+
+func TestReportWhileWatcherAliveDoesNotDeliverItself(t *testing.T) {
+	// Наблюдатель ещё ждёт отчёт через журнал — вторая доставка была бы дублем.
+	f, j, c := delivery(t, "idle")
+	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13", Target: "wE:p17"})
+
+	res, _ := Report(context.Background(), "т1", "готово", "рано",
+		ReportOptions{Client: c, Journal: j, Deadline: time.Second})
+	if res.Late || res.Delivered != nil {
+		t.Fatalf("живой наблюдатель доставляет сам, получено %+v", res)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("в herdr никто не ходил")
+	}
+}
+
+func TestLateReportWithoutLeaderIsNotSpam(t *testing.T) {
+	f, j, c := delivery(t, "idle")
+	timedOut(t, j, "")
+	res, _ := Report(context.Background(), "т1", "готово", "некому",
+		ReportOptions{Client: c, Journal: j, Deadline: time.Second})
+	if res.Late || res.Skipped == "" {
+		t.Fatalf("без ведущего доставлять некому, получено %+v", res)
+	}
+	if len(f.Requests()) != 0 {
+		t.Fatal("и в herdr не ходили")
 	}
 }

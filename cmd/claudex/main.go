@@ -985,7 +985,8 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 			return exitcode.Errorf(exitcode.Busy, "панель занята: %s в состоянии %q", p.ID, a.Status)
 		}
 		id := task.NewID()
-		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID, Prompt: prompt})
+		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID,
+			Target: o.notify, Prompt: prompt})
 		if _, err := client().Prompt(p.ID, prompt, nil, 0); err != nil {
 			return exitcode.Wrap(exitcode.BadCall, err)
 		}
@@ -1029,7 +1030,7 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
 			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
 		out["notified"] = task.Deliver(ctx, client(), j, res.Task, o.notify, text,
-			task.DeliverOptions{Deadline: o.notifyWait})
+			task.DeliverOptions{Stage: task.StageFinished, Deadline: o.notifyWait})
 	}
 	if err := emit(o, out); err != nil {
 		return err
@@ -1094,7 +1095,15 @@ func cmdDone(id, reason string) error {
 	if i := strings.IndexByte(reason, ' '); i > 0 && isOutcomeWord(reason[:i]) {
 		outcome, reason = reason[:i], strings.TrimSpace(reason[i+1:])
 	}
-	return task.Report(journal.Open(defaultJournal()), id, outcome, reason)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	res, err := task.Report(ctx, id, outcome, reason, task.ReportOptions{
+		Client: client(), Journal: journal.Open(defaultJournal()),
+	})
+	if err != nil {
+		return err
+	}
+	return emit(opts{}, res)
 }
 
 func isOutcomeWord(w string) bool {
@@ -1123,6 +1132,9 @@ func cmdTasks() error {
 		where := r.Pane
 		if r.Event == journal.Notified {
 			where = r.Target
+			if r.Stage != "" {
+				where += "/" + r.Stage
+			}
 		}
 		fmt.Printf("%s %-8s %-9s %-8s %s %s\n",
 			r.Time.Format("02.01 15:04"), r.Task, r.Event, where, r.Outcome, oneLine(r.Reason))
@@ -1137,22 +1149,31 @@ func cmdTasks() error {
 // и не был разбужен. Без этой строки сбой виден только в логе отсоединённого
 // наблюдателя, куда никто не смотрит.
 func undeliveredWakes(recs []journal.Record) []string {
-	asked, woken := map[string]bool{}, map[string]bool{}
+	type key struct{ task, stage string }
+	seen, woken, order := map[key]string{}, map[key]bool{}, []key{}
 	for _, r := range recs {
 		if r.Event != journal.Notified {
 			continue
 		}
-		asked[r.Task] = true
+		k := key{r.Task, r.Stage}
+		if _, ok := seen[k]; !ok {
+			order = append(order, k)
+		}
+		seen[k] = r.Outcome
 		if r.Outcome == "разбужен" {
-			woken[r.Task] = true
+			woken[k] = true
 		}
 	}
 	var out []string
-	for _, r := range recs {
-		if r.Event == journal.Notified && asked[r.Task] && !woken[r.Task] {
-			out = append(out, r.Task+" ("+r.Outcome+")")
-			asked[r.Task] = false
+	for _, k := range order {
+		if woken[k] {
+			continue
 		}
+		stage := k.stage
+		if stage == "" {
+			stage = task.StageFinished
+		}
+		out = append(out, fmt.Sprintf("%s/%s (%s)", k.task, stage, seen[k]))
 	}
 	return out
 }

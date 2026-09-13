@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"github.com/surraulistic/claudex/internal/journal"
+	"github.com/surraulistic/claudex/internal/task"
 	"reflect"
 	"sort"
 	"strings"
@@ -143,5 +144,20 @@ func TestTasksNamesWhatWasNeverDelivered(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(got, " "), "готовая") {
 		t.Fatal("разбуженная в список не попадает")
+	}
+}
+
+func TestTasksSeparatesStagesOfTheSameTask(t *testing.T) {
+	// Исход по сроку и пришедший позже отчёт — разные события. Если считать их
+	// одним, доставленный таймаут скрывает недоставленный отчёт.
+	recs := []journal.Record{
+		{Task: "поздняя", Event: journal.Notified, Stage: task.StageFinished, Outcome: "разбужен"},
+		{Task: "поздняя", Event: journal.Notified, Stage: task.StageReported,
+			Outcome: "не разбужен, показано человеку"},
+		{Task: "чистая", Event: journal.Notified, Stage: task.StageFinished, Outcome: "разбужен"},
+	}
+	got := undeliveredWakes(recs)
+	if len(got) != 1 || !strings.Contains(got[0], "поздняя/"+task.StageReported) {
+		t.Fatalf("названа именно недоставленная стадия, получено %v", got)
 	}
 }

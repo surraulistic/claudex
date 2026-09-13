@@ -152,11 +152,110 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 
 // Report вызывается изнутри панели: свою панель процесс знает из окружения,
 // которое herdr кладёт в каждую.
-func Report(j *journal.Journal, id, outcome, reason string) error {
-	return j.Append(journal.Record{
+type ReportOptions struct {
+	Client  *herdr.Client
+	Journal *journal.Journal
+	// Deadline — сколько ждать освобождения ведущего. Здесь он короткий, в
+	// отличие от наблюдателя: done выполняется внутри хода самой задачи, и
+	// держать её минутами нельзя. Не дождались — говорим человеку сразу.
+	Deadline time.Duration
+	Poll     time.Duration
+}
+
+type ReportResult struct {
+	Task      string    `json:"task"`
+	Late      bool      `json:"late"`
+	Delivered *Delivery `json:"delivered,omitempty"`
+	Skipped   string    `json:"skipped,omitempty"`
+}
+
+// Report записывает отчёт задачи и, если её уже похоронили, доставляет его сам.
+//
+// Наблюдатель живёт ровно до своего срока. Задача, не уложившаяся в него,
+// продолжает работать и отчитывается позже — этот отчёт прежде не доходил
+// никуда: наблюдателя уже нет, а done только дописывал строку в журнал.
+// Срок наблюдателя не делает задачу законченной.
+func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (ReportResult, error) {
+	res := ReportResult{Task: id}
+	if o.Journal == nil {
+		return res, fmt.Errorf("журнал не задан")
+	}
+	before, _ := o.Journal.Read()
+
+	if err := o.Journal.Append(journal.Record{
 		Task: id, Event: journal.Reported, Pane: os.Getenv("HERDR_PANE_ID"),
 		Outcome: outcome, Reason: reason,
-	})
+	}); err != nil {
+		return res, err
+	}
+
+	st := stateOf(before, id)
+	switch {
+	case !st.finished:
+		res.Skipped = "наблюдатель ещё ждёт — он и доставит"
+		return res, nil
+	case st.delivered[StageReported]:
+		res.Skipped = "поздний отчёт уже доставлен"
+		return res, nil
+	case st.target == "":
+		res.Skipped = "ведущий не назначался, доставлять некому"
+		return res, nil
+	}
+
+	res.Late = true
+	if o.Client == nil {
+		res.Skipped = "herdr недоступен"
+		return res, nil
+	}
+	if o.Deadline <= 0 {
+		o.Deadline = 15 * time.Second
+	}
+	d := Deliver(ctx, o.Client, o.Journal, id, st.target,
+		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
+		DeliverOptions{Stage: StageReported, Deadline: o.Deadline, Poll: o.Poll})
+	res.Delivered = &d
+	return res, nil
+}
+
+type taskState struct {
+	finished  bool
+	target    string
+	delivered map[string]bool
+}
+
+// stateOf собирает по журналу то, что нужно решить о поздней доставке.
+// Стадия считается доставленной, только если кого-то действительно достигли:
+// провалившуюся попытку повторить стоит, удавшуюся — нет.
+func stateOf(recs []journal.Record, id string) taskState {
+	st := taskState{delivered: map[string]bool{}}
+	for _, r := range recs {
+		if r.Task != id {
+			continue
+		}
+		switch r.Event {
+		case journal.Started:
+			if r.Target != "" {
+				st.target = r.Target
+			}
+		case journal.Finished:
+			st.finished = true
+		case journal.Notified:
+			if r.Target != "" {
+				st.target = r.Target
+			}
+			if r.Outcome != "не доставлено" {
+				st.delivered[orElse(r.Stage, StageFinished)] = true
+			}
+		}
+	}
+	return st
+}
+
+func orElse(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 func withReportInstruction(prompt, self, id string) string {
@@ -191,7 +290,15 @@ type Delivery struct {
 	Reason   string        `json:"reason,omitempty"`
 }
 
+const (
+	StageFinished = "finished" // исход, известный наблюдателю, в том числе по сроку
+	StageReported = "reported" // настоящий отчёт задачи, пришедший позже
+)
+
 type DeliverOptions struct {
+	// Stage — что именно доставляется. Дедупликация ведётся по паре
+	// задача+стадия: повторный done не должен будить ведущего второй раз.
+	Stage string
 	// Deadline — сколько ждать, пока ведущий освободится. Ожидание живёт в уже
 	// запущенном наблюдателе и стоит только опроса herdr: токенов оно не тратит,
 	// поэтому пятнадцати секунд здесь было мало на порядок.
@@ -233,7 +340,7 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 				d.OK = true
 				d.Waited = time.Since(started)
 				d.Seconds = int(d.Waited.Seconds())
-				record(j, id, target, d)
+				record(j, id, target, o.Stage, d)
 				return d
 			} else {
 				last = err
@@ -246,14 +353,14 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			d.Reason = fmt.Sprintf("ведущий не освободился за %s: %v", o.Deadline, last)
 			d.Fallback = c.Notify("claudex: поручение "+id+" завершено",
 				text+"\n\nРазбудить "+target+" не удалось: "+last.Error()) == nil
-			record(j, id, target, d)
+			record(j, id, target, o.Stage, d)
 			return d
 		case <-time.After(o.Poll):
 		}
 	}
 }
 
-func record(j *journal.Journal, id, target string, d Delivery) {
+func record(j *journal.Journal, id, target, stage string, d Delivery) {
 	if j == nil {
 		return
 	}
@@ -266,7 +373,7 @@ func record(j *journal.Journal, id, target string, d Delivery) {
 		outcome = "не доставлено"
 	}
 	j.Append(journal.Record{
-		Task: id, Event: journal.Notified, Target: target,
+		Task: id, Event: journal.Notified, Target: target, Stage: stage,
 		Outcome: outcome, Reason: d.Reason,
 	})
 }

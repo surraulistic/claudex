@@ -241,6 +241,17 @@ lists at the end anything that never reached its leader.
 `ok` means the leader was prompted. `fallback` means the human was told
 directly. Both false means nobody was reached — read the `reason`.
 
+A watcher lives only until its own deadline. A task that overruns it keeps
+working and reports later, and **that late report is delivered too**: `claudex
+done` checks whether the task was already closed and, if so, wakes the leader
+itself or tells the human. A deadline is not a final state.
+
+Delivery is deduplicated per task **and stage** — `finished` (what the watcher
+saw, a timeout included) and `reported` (the real report that arrived later) are
+different events, each delivered once. Running `done` twice does not wake anyone
+twice; a delivery that reached nobody is retried on the next `done`. `claudex
+tasks` lists undelivered stages as `<task>/<stage>`.
+
 **Use `--detach` unless you deliberately want to block.** Without it the call
 holds your turn for as long as the pane works, and nobody can talk to you
 meanwhile. A trailing `&` does **not** help: the child inherits stdout, the pipe
