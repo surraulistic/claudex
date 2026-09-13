@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/herdr/herdrtest"
@@ -413,5 +414,105 @@ func TestLateReportWithoutLeaderIsNotSpam(t *testing.T) {
 	}
 	if len(f.Requests()) != 0 {
 		t.Fatal("и в herdr не ходили")
+	}
+}
+
+func agentWith(status, session string) string {
+	return `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p17","agent":"codex",` +
+		`"agent_status":"` + status + `","agent_session":{"value":"` + session + `"}}}}`
+}
+
+// Панель переживает смену агента, разговор в ней — нет. Будить надо тот, что
+// поручение затеял, иначе сообщение о чужой задаче уедет человеку, который её
+// не посылал.
+func TestWakeGoesToTheSessionThatStartedItNotJustThePane(t *testing.T) {
+	f, j, c := delivery(t, "idle")
+	f.Reply("agent.get", agentWith("idle", "разговор-А"))
+
+	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+		DeliverOptions{Stage: StageReported, WantSession: "разговор-А",
+			Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if !d.OK {
+		t.Fatalf("тот же разговор — будим, получено %+v", d)
+	}
+}
+
+func TestWakeRefusesAPaneWhoseConversationChanged(t *testing.T) {
+	f, j, c := delivery(t, "idle")
+	f.Reply("agent.get", agentWith("idle", "разговор-Б"))
+
+	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+		DeliverOptions{Stage: StageReported, WantSession: "разговор-А",
+			Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if d.OK {
+		t.Fatal("в чужой разговор писать нельзя")
+	}
+	if !d.Fallback {
+		t.Fatalf("вместо этого говорим человеку, получено %+v", d)
+	}
+	if !strings.Contains(d.Reason, "другой разговор") {
+		t.Fatalf("причина названа, получено %q", d.Reason)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("в панель не ушло ничего")
+	}
+	recs, _ := j.Read()
+	if len(recs) != 1 || recs[0].Outcome != "не разбужен, показано человеку" {
+		t.Fatalf("отказ виден в журнале, получено %+v", recs)
+	}
+}
+
+func TestWakeProceedsWhenThereIsNothingToCompare(t *testing.T) {
+	// Привязки может не быть: герой не всегда сообщает разговор. Тогда
+	// проверять нечего, и отказывать не за что.
+	for _, c := range []struct{ want, has string }{
+		{"", "разговор-Б"}, // не записали при заведении
+		{"разговор-А", ""}, // герой не сообщает сейчас
+	} {
+		f, j, cl := delivery(t, "idle")
+		f.Reply("agent.get", agentWith("idle", c.has))
+		d := Deliver(context.Background(), cl, j, "т1", "wE:p17", "готово",
+			DeliverOptions{Stage: StageReported, WantSession: c.want,
+				Deadline: time.Second, Poll: 10 * time.Millisecond})
+		if !d.OK {
+			t.Fatalf("want=%q has=%q: получено %+v", c.want, c.has, d)
+		}
+	}
+}
+
+func TestLateReportKeepsTheBindingFromDelegationTime(t *testing.T) {
+	// Поздний отчёт приходит спустя час; за это время панель могла сменить
+	// разговор, и привязка нужна именно та, что снята при заведении.
+	f, j, c := delivery(t, "idle")
+	f.Reply("agent.get", agentWith("idle", "разговор-Б"))
+	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+		Target: "wE:p17", TargetSession: "разговор-А"})
+	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Outcome: TimedOut})
+
+	res, _ := Report(context.Background(), "т1", "готово", "поздний отчёт",
+		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if res.Delivered == nil || res.Delivered.OK || !res.Delivered.Fallback {
+		t.Fatalf("чужому разговору не пишем, человеку говорим: %+v", res.Delivered)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("в панель не ушло ничего")
+	}
+}
+
+func TestShortCutsWholeCharacters(t *testing.T) {
+	// Байтовый срез рубил кириллическую букву пополам, и в причине отказа
+	// оказывался мусор вместо имени разговора.
+	got := short("Ярославна-длинное-имя")
+	if !utf8.ValidString(got) {
+		t.Fatalf("срез оставляет целые буквы, получено %q", got)
+	}
+	if r := []rune(got); len(r) != 9 || string(r[:8]) != "Ярославн" {
+		t.Fatalf("получено %q", got)
+	}
+	if a, b := short("7e403273-2034-4296"), short("01a07921-5154-7980"); a == b {
+		t.Fatal("разные идентификаторы остаются различимы")
+	}
+	if got := short("коротко"); got != "коротко" {
+		t.Fatalf("короткое не трогается, получено %q", got)
 	}
 }

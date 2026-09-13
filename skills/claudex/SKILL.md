@@ -223,7 +223,16 @@ Waiting for the pane to start is Herdr's job — the send and the wait leave in 
 single `agent.prompt` call, so there is no gap for a fast answer to fall
 through. Measured: a 25-second task took 34 seconds end to end, not 0.
 
-Add `--notify <target>` to wake another pane when the task ends.
+Add `--notify <target>` to wake another pane when the task ends. Without it,
+`--detach` wakes **the session that started the delegation** (`HERDR_PANE_ID`) —
+waking anyone else has to be asked for by name.
+
+The wake is bound to a conversation, not to a pane. The target's session id is
+captured when the task is created and checked again before writing: a pane
+outlives the agent in it, and an hour later it may hold somebody else's
+conversation. If it does, nothing is written there — the human is told instead,
+with `в … теперь другой разговор` as the reason. This matters most for late
+reports, which arrive long after the pane could have moved on.
 
 Waking waits for the target to go free — writing into a busy pane would land in
 somebody else's turn. The wait lives in the watcher process and costs polling,

@@ -36,8 +36,12 @@ type Record struct {
 	// Stage — какую стадию доставляла запись notified. Исход по сроку и
 	// пришедший позже настоящий отчёт — разные события, и доставляются они
 	// порознь.
-	Stage   string `json:"stage,omitempty"`
-	Attempt int    `json:"attempt,omitempty"`
+	Stage string `json:"stage,omitempty"`
+	// TargetSession — разговор, который был в целевой панели, когда поручение
+	// заводили. Панель переживает смену агента, разговор — нет, и будить надо
+	// именно тот, что поручение затеял.
+	TargetSession string `json:"target_session,omitempty"`
+	Attempt       int    `json:"attempt,omitempty"`
 }
 
 type Journal struct {

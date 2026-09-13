@@ -57,17 +57,24 @@ type Options struct {
 	Self string
 	// Force отправляет задание панели, которая ждёт решения человека. Осознанно
 	// и только по прямой просьбе.
-	Force   bool
+	Force bool
+	// Notify — панель, которую будить по завершении. Пусто значит «никого»;
+	// поздний отчёт всё равно уйдёт тому, кто поручение затеял.
+	Notify  string
 	Attempt int
 }
 
 type Result struct {
-	Task     string
-	Outcome  string // наша классификация: отчиталась / без отчёта / не уложилась
-	Said     string // как сама задача назвала исход
-	Reason   string
-	Pane     string
-	Duration time.Duration
+	// WakeTarget и WakeSession — кого будить и какой разговор там должен быть.
+	// Снимаются в момент заведения поручения, а не доставки.
+	WakeTarget  string
+	WakeSession string
+	Task        string
+	Outcome     string // наша классификация: отчиталась / без отчёта / не уложилась
+	Said        string // как сама задача назвала исход
+	Reason      string
+	Pane        string
+	Duration    time.Duration
 }
 
 func Delegate(ctx context.Context, o Options) (Result, error) {
@@ -89,11 +96,17 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	if o.Self == "" {
 		o.Self = selfPath()
 	}
+	// Будить будем именно тот разговор, который поручение затеял: панель
+	// переживает смену агента, а разговор в ней — нет.
+	wake := orElse(o.Notify, os.Getenv("HERDR_PANE_ID"))
+	wakeSession := sessionOf(o.Client, wake)
+
 	id := newID()
 	started := time.Now()
-	res := Result{Task: id, Pane: o.Pane}
+	res := Result{Task: id, Pane: o.Pane, WakeTarget: wake, WakeSession: wakeSession}
 	o.Journal.Append(journal.Record{
 		Task: id, Event: journal.Started, Pane: o.Pane,
+		Target: wake, TargetSession: wakeSession,
 		Prompt: o.Prompt, Attempt: o.Attempt,
 	})
 
@@ -212,7 +225,8 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	}
 	d := Deliver(ctx, o.Client, o.Journal, id, st.target,
 		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
-		DeliverOptions{Stage: StageReported, Deadline: o.Deadline, Poll: o.Poll})
+		DeliverOptions{Stage: StageReported, WantSession: st.session,
+			Deadline: o.Deadline, Poll: o.Poll})
 	res.Delivered = &d
 	return res, nil
 }
@@ -220,6 +234,7 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 type taskState struct {
 	finished  bool
 	target    string
+	session   string
 	delivered map[string]bool
 }
 
@@ -235,7 +250,7 @@ func stateOf(recs []journal.Record, id string) taskState {
 		switch r.Event {
 		case journal.Started:
 			if r.Target != "" {
-				st.target = r.Target
+				st.target, st.session = r.Target, r.TargetSession
 			}
 		case journal.Finished:
 			st.finished = true
@@ -295,7 +310,24 @@ const (
 	StageReported = "reported" // настоящий отчёт задачи, пришедший позже
 )
 
+// sessionOf — какой разговор сейчас живёт в панели. Пусто значит, что герой
+// его не сообщает: тогда привязки нет и проверять нечего.
+func sessionOf(c *herdr.Client, pane string) string {
+	if c == nil || pane == "" {
+		return ""
+	}
+	a, err := c.Get(pane)
+	if err != nil {
+		return ""
+	}
+	return a.Session.Value
+}
+
 type DeliverOptions struct {
+	// WantSession — разговор, который должен быть в панели. Если там теперь
+	// другой, писать туда нельзя: сообщение о чужом поручении уедет человеку,
+	// который его не посылал.
+	WantSession string
 	// Stage — что именно доставляется. Дедупликация ведётся по паре
 	// задача+стадия: повторный done не должен будить ведущего второй раз.
 	Stage string
@@ -333,6 +365,15 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		switch {
 		case err != nil:
 			last = err
+		case o.WantSession != "" && pane.Session.Value != "" && pane.Session.Value != o.WantSession:
+			d.Waited = time.Since(started)
+			d.Seconds = int(d.Waited.Seconds())
+			d.Reason = fmt.Sprintf("в %s теперь другой разговор (%s вместо %s): поручение затевал не он",
+				target, short(pane.Session.Value), short(o.WantSession))
+			d.Fallback = c.Notify("claudex: поручение "+id+" завершено",
+				text+"\n\n"+d.Reason) == nil
+			record(j, id, target, o.Stage, d)
+			return d
 		case !freeStates[pane.Status]:
 			last = fmt.Errorf("%s в состоянии %q", target, pane.Status)
 		default:
@@ -358,6 +399,16 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		case <-time.After(o.Poll):
 		}
 	}
+}
+
+// Резать по символам, а не по байтам: у кириллического имени разговора
+// байтовый срез рубит букву пополам, и диагностика становится бесполезной.
+func short(id string) string {
+	r := []rune(id)
+	if len(r) > 8 {
+		return string(r[:8]) + "…"
+	}
+	return id
 }
 
 func record(j *journal.Journal, id, target, stage string, d Delivery) {

@@ -985,8 +985,9 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 			return exitcode.Errorf(exitcode.Busy, "панель занята: %s в состоянии %q", p.ID, a.Status)
 		}
 		id := task.NewID()
+		wake := firstNonEmpty(o.notify, os.Getenv("HERDR_PANE_ID"))
 		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID,
-			Target: o.notify, Prompt: prompt})
+			Target: wake, TargetSession: sessionOfPane(wake), Prompt: prompt})
 		if _, err := client().Prompt(p.ID, prompt, nil, 0); err != nil {
 			return exitcode.Wrap(exitcode.BadCall, err)
 		}
@@ -1000,9 +1001,14 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	if o.detach {
 		// Отсоединённый наблюдатель пишет в свой журнал; без пробуждения его
 		// результат не прочтёт никто.
+		// Умолчание — та самая сессия, которая поручение затевает: будить
+		// кого-то ещё можно только назвав его прямо.
+		if o.notify == "" {
+			o.notify = os.Getenv("HERDR_PANE_ID")
+		}
 		if o.notify == "" {
 			return exitcode.Errorf(exitcode.BadCall,
-				"--detach без --notify: результат наблюдателя некому прочитать")
+				"--detach без --notify и вне панели herdr: результат некому прочитать")
 		}
 		return detach(o, p.ID, prompt)
 	}
@@ -1011,7 +1017,7 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	defer stop()
 	res, err := task.Delegate(ctx, task.Options{
 		Client: client(), Journal: j, Pane: p.ID, Prompt: prompt,
-		Timeout: o.timeout, Force: o.force,
+		Timeout: o.timeout, Force: o.force, Notify: o.notify,
 	})
 	if err != nil {
 		if errors.Is(err, task.ErrBusy) {
@@ -1030,7 +1036,8 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
 			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
 		out["notified"] = task.Deliver(ctx, client(), j, res.Task, o.notify, text,
-			task.DeliverOptions{Stage: task.StageFinished, Deadline: o.notifyWait})
+			task.DeliverOptions{Stage: task.StageFinished, WantSession: res.WakeSession,
+				Deadline: o.notifyWait})
 	}
 	if err := emit(o, out); err != nil {
 		return err
@@ -1083,6 +1090,18 @@ func detach(o opts, pane, prompt string) error {
 	return emit(o, map[string]any{
 		"pane": pane, "detached": true, "pid": pid, "log": detachLog(),
 	})
+}
+
+// sessionOfPane — разговор, живущий сейчас в панели.
+func sessionOfPane(pane string) string {
+	if pane == "" {
+		return ""
+	}
+	a, err := client().Get(pane)
+	if err != nil {
+		return ""
+	}
+	return a.Session.Value
 }
 
 func detachLog() string {
