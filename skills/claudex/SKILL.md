@@ -303,25 +303,33 @@ different events, each delivered once. Running `done` twice does not wake anyone
 twice; a delivery that reached nobody is retried on the next `done`. `claudex
 tasks` lists undelivered stages as `<task>/<stage>`.
 
-**Use `--detach` unless you deliberately want to block.** Without it the call
-holds your turn for as long as the pane works, and nobody can talk to you
-meanwhile. A trailing `&` does **not** help: the child inherits stdout, the pipe
-stays open, and the shell waits for EOF anyway.
+**Let your own harness do the waking — it is the only routing that is provably
+correct.** Run `claudex delegate` as a normal command and hold the handle your
+harness gives you. In Codex that is `exec` + `wait`:
 
-```bash
-claudex delegate install "<task>" --detach --notify "<your own pane>"
+```
+exec("claudex delegate install '<task>'", yield_time_ms: 5000)   → cell_id
+wait(cell_id, yield_time_ms: 600000)   → claudex JSON, in this conversation
 ```
 
-It returns in about 0.15 s with the watcher's `pid` and a `log` path. The
-watcher runs in its own session, outlives your turn, and wakes you when the pane
-settles. `--detach` requires `--notify` — a detached watcher writes to its log,
-and without a notification nobody would ever read it (exit `4`).
+The `cell_id` belongs to the conversation that ran `exec`; nothing else can wait
+on it, so the result cannot land anywhere else. The turn is not held: `exec`
+yields and `wait` is issued when convenient.
 
-Blocking form, when you truly want to wait and nothing else is going on:
+**Do not use `--detach --notify` for this.** It severs that parent-child link and
+leaves claudex to route by pane, which cannot work: Codex runs several
+conversations behind one pane and Herdr names only one of them. Measured — a
+report bound to the id Herdr reported was delivered into a conversation that had
+never heard of the task. `--detach` remains only for work whose result a **human**
+will read, never as a way to wake a conversation.
+
+If the handle is lost — harness restarted, `wait` abandoned — pull the task by
+the id `delegate` printed, which only this conversation holds:
 
 ```bash
-claudex delegate install "<task>"
+claudex tasks --task 742309b7
 ```
+
 
 ## Driving a session
 

@@ -51,6 +51,7 @@ type opts struct {
 	notifyWait    time.Duration
 	detach        bool
 	force         bool
+	task          string
 }
 
 func main() {
@@ -83,6 +84,7 @@ func run() error {
 	fs.BoolVar(&o.force, "force", false, "delegate: писать и в панель, ждущую решения человека")
 	fs.BoolVar(&o.noWait, "no-wait", false, "delegate: отправить и выйти")
 	fs.BoolVar(&o.full, "full", false, "index: пересобрать с нуля")
+	fs.StringVar(&o.task, "task", "", "tasks: состояние одного поручения по его идентификатору")
 	// Флаги принимаются где угодно, в том числе после запроса: прежняя версия
 	// так умела, и «claudex find "миграция" --limit 3» пишут именно так.
 	// Разбор из стандартной библиотеки останавливается на первом позиционном
@@ -142,7 +144,7 @@ func run() error {
 	case "index":
 		return cmdIndex(o)
 	case "tasks":
-		return cmdTasks()
+		return cmdTasks(o, args[1:])
 	default:
 		return cmdDigest(o, args[0])
 	}
@@ -192,7 +194,7 @@ func usage() {
   claudex delegate <цель> "<задача>"     поручить и дождаться, одной командой
   claudex done <id> "<что вышло>"        отчитаться о порученной задаче
   claudex index [--full]                 пересобрать индекс из базы cass
-  claudex tasks                          журнал поручений
+  claudex tasks [--task <id>]            журнал поручений; с --task — одно
 
 Цель — pane_id, session_id, кусок заголовка или рабочий каталог.
 
@@ -1147,10 +1149,19 @@ func cmdIndex(o opts) error {
 	return emit(o, st)
 }
 
-func cmdTasks() error {
+func cmdTasks(o opts, args []string) error {
 	recs, err := journal.Open(defaultJournal()).Read()
 	if err != nil {
 		return err
+	}
+	// Один идентификатор — это адресация без панелей: его держит только тот,
+	// кто поручение затеял.
+	if id := firstNonEmpty(o.task, first(args)); id != "" {
+		st := task.StateOfTask(recs, id)
+		if !st.Known {
+			return exitcode.Errorf(exitcode.NotFound, "поручения %s в журнале нет", id)
+		}
+		return emit(o, st)
 	}
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].Time.Before(recs[j].Time) })
 	for _, r := range recs {
@@ -1201,6 +1212,13 @@ func undeliveredWakes(recs []journal.Record) []string {
 		out = append(out, fmt.Sprintf("%s/%s (%s)", k.task, stage, seen[k]))
 	}
 	return out
+}
+
+func first(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }
 
 func oneID(args []string) (int64, error) {

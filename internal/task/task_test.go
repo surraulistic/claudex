@@ -750,3 +750,33 @@ func TestLostCarriesTheMachineReadableCause(t *testing.T) {
 		t.Fatalf("причина доезжает до недоставленного, получено %+v", got)
 	}
 }
+
+func TestStateOfTaskIsAddressingWithoutPanes(t *testing.T) {
+	// Идентификатор поручения держит только тот разговор, который его затеял:
+	// вытягивание по нему не нуждается ни в панели, ни в сессии.
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "чужая", Time: now, Event: journal.Started, Pane: "wE:pX"},
+		{Task: "моя", Time: now, Event: journal.Started, Pane: "wE:p2N", Target: "wE:p17"},
+		{Task: "моя", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "SNEW-1686"},
+		{Task: "моя", Time: now, Event: journal.Finished, Outcome: "отчиталась"},
+		{Task: "моя", Time: now, Event: journal.Notified, Stage: StageFinished,
+			Outcome: NotDelivered, Cause: CauseSharedPane},
+	}
+	st := StateOfTask(recs, "моя")
+	if !st.Known || st.Pane != "wE:p2N" || st.Target != "wE:p17" {
+		t.Fatalf("получено %+v", st)
+	}
+	if !strings.Contains(st.Report, "SNEW-1686") || st.Outcome != "отчиталась" {
+		t.Fatalf("отчёт и исход на месте, получено %+v", st)
+	}
+	if len(st.Deliveries) != 1 || st.Deliveries[0].Cause != CauseSharedPane {
+		t.Fatalf("судьба доставки видна, получено %+v", st.Deliveries)
+	}
+	if strings.Contains(st.Report, "чужая") {
+		t.Fatal("чужого в выдаче нет")
+	}
+	if StateOfTask(recs, "нетакая").Known {
+		t.Fatal("незнакомое поручение помечено неизвестным")
+	}
+}

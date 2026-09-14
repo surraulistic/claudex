@@ -246,6 +246,55 @@ type Lost struct {
 	Report string `json:"report,omitempty"`
 }
 
+// State — всё, что журнал знает про одну задачу. Вытягивается по
+// идентификатору, который выдал delegate: его держит только тот разговор,
+// который поручение затеял, и потому это адресация без панелей.
+type State struct {
+	Task       string      `json:"task"`
+	Pane       string      `json:"pane,omitempty"`
+	Target     string      `json:"target,omitempty"`
+	Started    string      `json:"started,omitempty"`
+	Finished   string      `json:"finished,omitempty"`
+	Outcome    string      `json:"outcome,omitempty"`
+	Report     string      `json:"report,omitempty"`
+	Deliveries []Delivered `json:"deliveries,omitempty"`
+	Known      bool        `json:"known"`
+}
+
+type Delivered struct {
+	Stage   string `json:"stage"`
+	At      string `json:"at"`
+	Outcome string `json:"outcome"`
+	Cause   string `json:"cause,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+func StateOfTask(recs []journal.Record, id string) State {
+	st := State{Task: id}
+	for _, r := range recs {
+		if r.Task != id {
+			continue
+		}
+		st.Known = true
+		switch r.Event {
+		case journal.Started:
+			st.Pane, st.Target = r.Pane, r.Target
+			st.Started = r.Time.Format(time.RFC3339)
+		case journal.Reported:
+			st.Report = strings.TrimSpace(r.Outcome + " " + r.Reason)
+		case journal.Finished:
+			st.Finished = r.Time.Format(time.RFC3339)
+			st.Outcome = r.Outcome
+		case journal.Notified:
+			st.Deliveries = append(st.Deliveries, Delivered{
+				Stage: orElse(r.Stage, StageFinished), At: r.Time.Format(time.RFC3339),
+				Outcome: r.Outcome, Cause: r.Cause, Reason: r.Reason,
+			})
+		}
+	}
+	return st
+}
+
 // LostReports собирает по журналу всё, что осталось никем не полученным.
 func LostReports(recs []journal.Record) []Lost {
 	type key struct{ task, stage string }
