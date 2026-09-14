@@ -5,6 +5,7 @@ import (
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/task"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -173,5 +174,27 @@ func TestPaneListingCarriesNoForeignReports(t *testing.T) {
 	}
 	if strings.Contains(string(src), `"undelivered"`) {
 		t.Fatal("выдача панелей не должна нести чужие отчёты")
+	}
+}
+
+func TestWakeIsRefusedBeforeAnythingIsSent(t *testing.T) {
+	// Поручение, которому некуда вернуться, не заводится вовсе: вызывающий
+	// узнаёт об этом в своём ходу, а не из лога, который никто не читает.
+	dir := t.TempDir()
+	j := journal.Open(filepath.Join(dir, "tasks.jsonl"))
+	j.Append(journal.Record{Task: "a", Event: journal.Started, Target: "wF:codex", TargetSession: "01a07921"})
+	j.Append(journal.Record{Task: "b", Event: journal.Started, Target: "wF:codex", TargetSession: "01a09c3c"})
+
+	err := wakeIsPossible(j, opts{notify: "wF:codex"})
+	if err == nil {
+		t.Fatal("панель с несколькими разговорами адресом не считается")
+	}
+	if !strings.Contains(err.Error(), "exec") || !strings.Contains(err.Error(), "wait") {
+		t.Fatalf("в отказе сказано, чем заменить, получено %q", err)
+	}
+
+	// Без пробуждения поручение берётся: результат вернёт сам вызов.
+	if err := wakeIsPossible(j, opts{}); err != nil {
+		t.Fatalf("обычный запуск не требует адреса, получено %v", err)
 	}
 }

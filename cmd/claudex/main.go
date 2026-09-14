@@ -978,6 +978,10 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	}
 	j := journal.Open(defaultJournal())
 
+	if err := wakeIsPossible(j, o); err != nil {
+		return err
+	}
+
 	if o.noWait {
 		a, err := client().Get(p.ID)
 		if err != nil {
@@ -1115,6 +1119,26 @@ func sessionOfPane(pane string) string {
 func detachLog() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claudex", "detached.log")
+}
+
+// wakeIsPossible отказывает до отправки, если пробуждение некуда адресовать.
+// Отказ уходит в ход вызывающего: он успевает сделать иначе, а не узнаёт о
+// потере из лога, который никто не читает.
+func wakeIsPossible(j *journal.Journal, o opts) error {
+	if o.notify == "" && !o.detach {
+		return nil
+	}
+	wake := firstNonEmpty(o.notify, os.Getenv("HERDR_PANE_ID"))
+	sess := sessionOfPane(wake)
+	if v := task.MayWrite(wake, sess, sess, task.SharedPane(j, wake)); !v.OK() {
+		return exitcode.Errorf(exitcode.BadCall,
+			"результат будет некуда доставить: %s.\n"+
+				"Запустите без --detach и --notify, а ждите своим харнессом: в Codex это "+
+				"exec(…, yield_time_ms) и wait(cell_id) — дескриптор держит только этот "+
+				"разговор, и промахнуться нечем. Потерян дескриптор — claudex tasks --task <id>.",
+			v.Reason())
+	}
+	return nil
 }
 
 func cmdDone(id, reason string) error {
