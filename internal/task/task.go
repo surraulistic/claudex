@@ -241,6 +241,7 @@ type Lost struct {
 	Stage  string `json:"stage"`
 	Target string `json:"target"`
 	At     string `json:"at"`
+	Cause  string `json:"cause,omitempty"`
 	Reason string `json:"reason"`
 	Report string `json:"report,omitempty"`
 }
@@ -266,7 +267,7 @@ func LostReports(recs []journal.Record) []Lost {
 				continue
 			}
 			state[k] = &Lost{
-				Task: r.Task, Stage: k.stage, Target: r.Target,
+				Task: r.Task, Stage: k.stage, Target: r.Target, Cause: r.Cause,
 				At: r.Time.Format(time.RFC3339), Reason: r.Outcome + ": " + r.Reason,
 			}
 		}
@@ -352,6 +353,7 @@ type Delivery struct {
 	Waited   time.Duration `json:"-"`
 	Seconds  int           `json:"waited_seconds"`
 	Fallback bool          `json:"fallback,omitempty"`
+	Cause    string        `json:"cause,omitempty"`
 	// Refused — почему herdr отказался показывать. Пусто при удачном показе.
 	Refused string `json:"refused,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -363,6 +365,14 @@ const (
 	WokeUp       = "разбужен"
 	ToldHuman    = "не разбужен, показано человеку"
 	NotDelivered = "не доставлено"
+)
+
+// Почему доставка не состоялась — машиночитаемо.
+const (
+	CauseWrongConversation  = "wrong_conversation"
+	CauseUnconfirmedBinding = "unconfirmed_binding"
+	CauseSharedPane         = "pane_hosts_several_conversations"
+	CauseLeaderBusy         = "leader_busy"
 )
 
 const (
@@ -417,24 +427,31 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	started := time.Now()
 	d := Delivery{Target: target}
 
+	shared := sharedPane(j, target)
+
 	ctx, cancel := context.WithTimeout(ctx, o.Deadline)
 	defer cancel()
 	var last error
 	for {
 		pane, err := c.Get(target)
+		allowed := mayWrite(target, o.WantSession, pane.Session.Value, shared)
 		switch {
 		case err != nil:
 			last = err
-		case !sameConversation(o.WantSession, pane.Session.Value):
+		case !allowed.ok:
 			d.Waited = time.Since(started)
 			d.Seconds = int(d.Waited.Seconds())
-			d.Reason = mismatch(target, o.WantSession, pane.Session.Value)
+			d.Cause, d.Reason = allowed.cause, allowed.reason
+			// Человеку — уведомлением herdr, и только им: превращать чужой
+			// отчёт в реплику неизвестного разговора нельзя ни при каких
+			// обстоятельствах.
 			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
 				text+"\n\n"+d.Reason)
 			record(j, id, target, o.Stage, d)
 			return d
 		case !freeStates[pane.Status]:
 			last = fmt.Errorf("%s в состоянии %q", target, pane.Status)
+			d.Cause = CauseLeaderBusy
 		default:
 			if _, err := c.Prompt(target, text, nil, 0); err == nil {
 				d.OK = true
@@ -492,22 +509,72 @@ func tellHuman(c *herdr.Client, title, body string) (bool, string) {
 // Запрещено, пока не доказано. Неизвестный с любой стороны идентификатор —
 // это не «наверное, тот же», а «подтвердить нечем»: у панели бывает пусто
 // в agent_session, и прежнее мягкое правило писало в неё что угодно.
-func sameConversation(want, have string) bool {
-	return want != "" && have != "" && want == have
+type verdict struct {
+	ok     bool
+	cause  string
+	reason string
 }
 
-func mismatch(target, want, have string) string {
+func (v verdict) OK() bool       { return v.ok }
+func (v verdict) Cause() string  { return v.cause }
+func (v verdict) Reason() string { return v.reason }
+
+// MayWrite и SharedPane открыты для зонда: правило отказа должно быть
+// проверяемо на настоящем журнале, а не только в тестах.
+func MayWrite(target, want, have string, shared []string) verdict {
+	return mayWrite(target, want, have, shared)
+}
+
+func SharedPane(j *journal.Journal, target string) []string { return sharedPane(j, target) }
+
+// mayWrite — можно ли писать отчёт в эту панель.
+//
+// Запрещено, пока не доказано. Совпадения панели и идентификатора сессии мало:
+// измерено, что Codex ведёт несколько разговоров разом, а herdr показывает у
+// панели только один из них — проверка проходит, а текст уходит в соседний
+// разговор. Поэтому панель, за которой журнал видел больше одного разговора,
+// адресом не считается вовсе.
+func mayWrite(target, want, have string, shared []string) verdict {
 	switch {
 	case want == "":
-		return fmt.Sprintf("при заведении поручения разговор в %s не был записан: "+
-			"подтвердить, что это он, нечем", target)
+		return verdict{false, CauseUnconfirmedBinding, fmt.Sprintf(
+			"при заведении поручения разговор в %s не был записан: подтвердить, что это он, нечем", target)}
 	case have == "":
-		return fmt.Sprintf("herdr не сообщает, какой разговор сейчас в %s: "+
-			"подтвердить, что это %s, нечем", target, short(want))
-	default:
-		return fmt.Sprintf("в %s теперь другой разговор (%s вместо %s): поручение затевал не он",
-			target, short(have), short(want))
+		return verdict{false, CauseUnconfirmedBinding, fmt.Sprintf(
+			"herdr не сообщает, какой разговор сейчас в %s: подтвердить, что это %s, нечем",
+			target, short(want))}
+	case have != want:
+		return verdict{false, CauseWrongConversation, fmt.Sprintf(
+			"в %s теперь другой разговор (%s вместо %s): поручение затевал не он",
+			target, short(have), short(want))}
+	case len(shared) > 1:
+		return verdict{false, CauseSharedPane, fmt.Sprintf(
+			"панель %s вела несколько разговоров (%s): herdr показывает один, "+
+				"и совпадение идентификатора не доказывает, что слушает именно он",
+			target, strings.Join(shared, ", "))}
 	}
+	return verdict{ok: true}
+}
+
+// sharedPane — какие разговоры журнал видел за этой панелью.
+func sharedPane(j *journal.Journal, target string) []string {
+	if j == nil {
+		return nil
+	}
+	recs, err := j.Read()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range recs {
+		if r.Target != target || r.TargetSession == "" || seen[r.TargetSession] {
+			continue
+		}
+		seen[r.TargetSession] = true
+		out = append(out, short(r.TargetSession))
+	}
+	return out
 }
 
 func short(id string) string {
@@ -535,6 +602,6 @@ func record(j *journal.Journal, id, target, stage string, d Delivery) {
 	}
 	j.Append(journal.Record{
 		Task: id, Event: journal.Notified, Target: target, Stage: stage,
-		Outcome: outcome, Reason: d.Reason,
+		Cause: d.Cause, Outcome: outcome, Reason: d.Reason,
 	})
 }

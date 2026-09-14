@@ -260,6 +260,22 @@ each naming its reason:
 `delegate` reports the binding up front as `wake.session_bound`, so a task that
 can never be delivered is visible at once rather than half an hour later.
 
+**A matching session id is necessary but not sufficient.** Measured: Codex runs
+several conversations at once behind one pane, and Herdr names only one of them
+in `agent_session`. A report bound to the id Herdr reported was delivered — and
+landed in a different conversation that was never told about the task. So a pane
+the journal has seen host more than one conversation is not an address at all:
+delivery is refused with `cause: pane_hosts_several_conversations`, whatever the
+ids say. `go run ./cmd/routecheck` prints, per pane, whether a report would be
+written there and why not.
+
+Every refusal carries a machine-readable `cause`: `wrong_conversation`,
+`unconfirmed_binding`, `pane_hosts_several_conversations`, `leader_busy`. None of
+them counts as delivered, and none of them writes into the live conversation —
+the fallback is a Herdr notification to the human, never a message in somebody's
+thread. Undelivered work is listed by `claudex tasks`, which a person reads; the
+pane listings deliberately carry nothing about other conversations' tasks.
+
 Waking waits for the target to go free — writing into a busy pane would land in
 somebody else's turn. The wait lives in the watcher process and costs polling,
 not tokens, so `--notify-timeout` defaults to 1800 s rather than seconds.

@@ -654,3 +654,99 @@ func TestDelegateWithoutReachableLeaderLeavesTheBindingEmpty(t *testing.T) {
 		t.Fatalf("привязки нет, получено %q", res.WakeSession)
 	}
 }
+
+// Одна панель Codex ведёт несколько разговоров разом: измерено, что herdr
+// показывает у wE:p17 один идентификатор, пока Codex пишет три файла — два
+// лицензионных и один по багам. Совпадение идентификатора не доказывает, что
+// слушает именно тот разговор, поэтому такая панель адресом не считается.
+func journalWithTwoConversations(t *testing.T, j *journal.Journal) {
+	t.Helper()
+	j.Append(journal.Record{Task: "лиценз", Event: journal.Started, Pane: "wE:p13",
+		Target: "wE:p17", TargetSession: "01a07921"})
+	j.Append(journal.Record{Task: "баги", Event: journal.Started, Pane: "wE:p2N",
+		Target: "wE:p17", TargetSession: leaderSession})
+}
+
+func TestSharedPaneIsNotAnAddress(t *testing.T) {
+	f, j, c := delivery(t, "idle")
+	journalWithTwoConversations(t, j)
+
+	d := Deliver(context.Background(), c, j, "баги", "wE:p17", "Payment закрыт: SNEW-1686",
+		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
+			Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if d.OK {
+		t.Fatal("идентификатор совпал, но панель ведёт несколько разговоров — писать нельзя")
+	}
+	if d.Cause != CauseSharedPane {
+		t.Fatalf("причина машиночитаема, получено %q", d.Cause)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("в активный разговор не ушло ничего")
+	}
+	if !d.Fallback {
+		t.Fatal("человеку сказано")
+	}
+}
+
+func TestForeignReportNeverBecomesAMessageOfAnotherConversation(t *testing.T) {
+	// Запасной канал — уведомление herdr, а не реплика. Отчёт по багам не
+	// должен превратиться в сообщение лицензионного разговора.
+	f, j, c := delivery(t, "idle")
+	f.Reply("agent.get", agentWith("idle", "01a07921"))
+	j.Append(journal.Record{Task: "баги", Event: journal.Started, Pane: "wE:p2N",
+		Target: "wE:p17", TargetSession: leaderSession})
+
+	d := Deliver(context.Background(), c, j, "баги", "wE:p17", "Payment закрыт: SNEW-1686/1687",
+		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
+			Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if d.Cause != CauseWrongConversation {
+		t.Fatalf("причина wrong_conversation, получено %q", d.Cause)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("ни одной реплики в чужой разговор")
+	}
+	body, _ := f.LastRequest("notification.show")["params"].(map[string]any)["body"].(string)
+	if !strings.Contains(body, "SNEW-1686") {
+		t.Fatalf("сам отчёт ушёл человеку, получено %q", body)
+	}
+	recs, _ := j.Read()
+	last := recs[len(recs)-1]
+	if last.Event != journal.Notified || last.Cause != CauseWrongConversation {
+		t.Fatalf("причина попала в журнал, получено %+v", last)
+	}
+	if strings.HasPrefix(last.Outcome, WokeUp) {
+		t.Fatalf("доставленным это не считается, получено %q", last.Outcome)
+	}
+}
+
+func TestLateReportIntoASharedPaneIsAlsoRefused(t *testing.T) {
+	// Поздний отчёт приходит через час, когда панель тем более успела
+	// сменить разговор.
+	f, j, c := delivery(t, "idle")
+	journalWithTwoConversations(t, j)
+	j.Append(journal.Record{Task: "баги", Event: journal.Finished, Outcome: TimedOut})
+
+	res, _ := Report(context.Background(), "баги", "готово", "SNEW-1686 и SNEW-1687 закрыты",
+		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if res.Delivered == nil || res.Delivered.OK {
+		t.Fatalf("в общую панель поздний отчёт не пишется, получено %+v", res.Delivered)
+	}
+	if res.Delivered.Cause != CauseSharedPane {
+		t.Fatalf("причина названа, получено %q", res.Delivered.Cause)
+	}
+	if f.LastRequest("agent.prompt") != nil {
+		t.Fatal("ни одной реплики в чужой разговор")
+	}
+}
+
+func TestLostCarriesTheMachineReadableCause(t *testing.T) {
+	now := time.Now()
+	got := LostReports([]journal.Record{
+		{Task: "баги", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "SNEW-1686"},
+		{Task: "баги", Time: now, Event: journal.Notified, Stage: StageFinished,
+			Target: "wE:p17", Cause: CauseWrongConversation, Outcome: NotDelivered},
+	})
+	if len(got) != 1 || got[0].Cause != CauseWrongConversation {
+		t.Fatalf("причина доезжает до недоставленного, получено %+v", got)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/task"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -162,14 +163,15 @@ func TestTasksSeparatesStagesOfTheSameTask(t *testing.T) {
 	}
 }
 
-func TestUndeliveredAppearsOnlyWhenThereIsSomethingToSay(t *testing.T) {
-	// Ключ должен броситься в глаза, когда он есть, и не мозолить, когда нет:
-	// sessions читают в каждом обращении к панелям.
-	if _, has := withLost(map[string]any{"panes": nil}, nil)["undelivered"]; has {
-		t.Fatal("пустой список в выдачу не кладётся")
+func TestPaneListingCarriesNoForeignReports(t *testing.T) {
+	// Через это поле чужой отчёт и попал в лицензионный разговор: выдачу
+	// панелей читает любой агент, а отчёт принадлежит одному разговору.
+	// Недоставленное остаётся в `claudex tasks`, который смотрит человек.
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	out := withLost(map[string]any{"panes": nil}, []task.Lost{{Task: "т1", Stage: "reported"}})
-	if _, has := out["undelivered"]; !has {
-		t.Fatal("потерянное обязано быть в выдаче")
+	if strings.Contains(string(src), `"undelivered"`) {
+		t.Fatal("выдача панелей не должна нести чужие отчёты")
 	}
 }
