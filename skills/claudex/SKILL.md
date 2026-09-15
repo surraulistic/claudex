@@ -27,6 +27,7 @@ claudex brief             # every live pane at once — status, tail, signals
 claudex index             # catch the index up; --full rebuilds from scratch
 claudex tasks             # journal of everything delegated
 claudex digest <task-id>  # what actually happened during one delegated task
+claudex undelivered       # reports that never reached the leader, with the cause
 ```
 
 The index is incremental: a catch-up costs seconds, a full rebuild about half a
@@ -454,6 +455,31 @@ What ClauDex does with what you type:
 So type the id if you have it, and do not agonise if you don't. What you must not
 do is invent one: an id you are unsure about is worse than no id at all, because a
 wrong-but-plausible id can match a real closed task.
+
+### When the callback cannot land
+
+A thread that was alive when the task was created can be closed by the time the
+report is ready. ClauDex refuses to queue into a closed conversation — a message
+there is read by nobody — and it never substitutes a different live thread: the
+address *is* the conversation, and a neighbour is not a stand-in.
+
+The report is not lost. It stays in an explicit pull channel:
+
+```bash
+claudex undelivered          # every report the leader never got, in full
+claudex undelivered --pretty # same as JSON
+```
+
+Each entry carries the task, the intended address, the machine-readable cause
+(`thread_not_live`, `thread_unknown`, `queue_failed`, `wrong_conversation`, …)
+and the **whole report text**, not a summary of it.
+
+Two things follow. A popup shown to the human does **not** count as delivery —
+the human reads it when they are at the machine; the conversation still never
+learns the task ended. And because it does not count, the next `claudex done`
+retries the delivery: a conversation that has since reopened gets the report on
+that retry. The human is only shown the popup once per stage, so retrying is
+cheap and quiet.
 
 ## Driving a session
 

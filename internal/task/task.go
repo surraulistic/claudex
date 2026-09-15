@@ -266,15 +266,20 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	d := Deliver(ctx, o.Client, o.Journal, id, w.Target,
 		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
 		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
-			Compose: compose, Deadline: o.Deadline, Poll: o.Poll})
+			Compose: compose, HumanTold: st.toldHuman[StageReported],
+			Deadline: o.Deadline, Poll: o.Poll})
 	res.Delivered = &d
 	return res, nil
 }
 
-// Lost — завершение, о котором не узнал никто: ни ведущий, ни человек.
-// Отдаётся в выдаче sessions и brief, потому что её и без того постоянно
-// запрашивают: это канал, который не зависит от того, показал ли herdr
-// уведомление.
+// Lost — отчёт, который не дошёл до ведущего.
+//
+// Показ человеку сюда не засчитывается: всплывашку herdr прочитают, когда
+// будут за машиной, а разговор так и не узнает, что поручение кончилось.
+//
+// Вытягивается командой `claudex undelivered` — в выдачу панелей это не
+// кладётся намеренно: её читает любой агент, а отчёт принадлежит одному
+// разговору.
 type Lost struct {
 	Task   string `json:"task"`
 	Stage  string `json:"stage"`
@@ -334,7 +339,19 @@ func StateOfTask(recs []journal.Record, id string) State {
 	return st
 }
 
-// LostReports собирает по журналу всё, что осталось никем не полученным.
+// ReachedLeader — дошло ли до ведущего. Дошло — только пробуждение.
+//
+// Показ человеку доставкой не является: человек прочитает всплывашку herdr,
+// когда будет за машиной, а ведущий разговор так и не узнает, что поручение
+// закончилось. Раньше здесь стояла проверка «не начинается с НЕ ДОСТАВЛЕНО», и
+// под неё показ человеку не подпадал — отчёт исчезал из канала недоставленного
+// и повторы подавлялись как «уже доставлено». Замерено: отчёт задачи 465a77fc
+// записан трижды и не ушёл в Codex ни разу.
+func ReachedLeader(outcome string) bool {
+	return strings.HasPrefix(outcome, WokeUp)
+}
+
+// LostReports собирает по журналу всё, что до ведущего не дошло.
 func LostReports(recs []journal.Record) []Lost {
 	type key struct{ task, stage string }
 	state := map[key]*Lost{}
@@ -350,8 +367,8 @@ func LostReports(recs []journal.Record) []Lost {
 			if _, ok := state[k]; !ok {
 				order = append(order, k)
 			}
-			if !strings.HasPrefix(r.Outcome, NotDelivered) {
-				state[k] = nil // до кого-то дошло
+			if ReachedLeader(r.Outcome) {
+				state[k] = nil
 				continue
 			}
 			state[k] = &Lost{
@@ -380,13 +397,16 @@ type taskState struct {
 	started   time.Time
 	pane      string
 	delivered map[string]bool
+	// toldHuman — человеку про эту стадию уже показывали. Повторять доставку
+	// ведущему нужно, а всплывашку человеку на каждый повтор — нет.
+	toldHuman map[string]bool
 }
 
 // stateOf собирает по журналу то, что нужно решить о поздней доставке.
 // Стадия считается доставленной, только если кого-то действительно достигли:
 // провалившуюся попытку повторить стоит, удавшуюся — нет.
 func stateOf(recs []journal.Record, id string) taskState {
-	st := taskState{delivered: map[string]bool{}}
+	st := taskState{delivered: map[string]bool{}, toldHuman: map[string]bool{}}
 	for _, r := range recs {
 		if r.Task != id {
 			continue
@@ -408,8 +428,13 @@ func stateOf(recs []journal.Record, id string) taskState {
 			if r.Target != "" {
 				st.target = r.Target
 			}
-			if !strings.HasPrefix(r.Outcome, NotDelivered) {
+			// Повтор нужен ровно тогда, когда ведущий не получил ничего:
+			// закрытый тред открывается снова, и следующий done попадает.
+			if ReachedLeader(r.Outcome) {
 				st.delivered[orElse(r.Stage, StageFinished)] = true
+			}
+			if strings.HasPrefix(r.Outcome, ToldHuman) {
+				st.toldHuman[orElse(r.Stage, StageFinished)] = true
 			}
 		}
 	}
@@ -579,6 +604,9 @@ type DeliverOptions struct {
 	// Человеку в уведомление herdr уходит именно сводка, а не дайджест:
 	// всплывашка на пол-экрана — это не уведомление.
 	Compose func(summary string) string
+	// HumanTold — человеку про эту стадию уже показывали. Повторную доставку
+	// ведущему это не отменяет, всплывашку — отменяет.
+	HumanTold bool
 	// QueueAttempts и QueueGap — повторы у очереди треда. Наблюдатель может
 	// позволить себе долгие, `done` внутри хода задачи — нет.
 	QueueAttempts int
@@ -693,8 +721,10 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		d.Waited = time.Since(started)
 		d.Seconds = int(d.Waited.Seconds())
 		d.Cause, d.Reason = v.cause, v.reason
-		d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
-			text+"\n\n"+d.Reason)
+		if !o.HumanTold {
+			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+				text+"\n\n"+d.Reason)
+		}
 		record(j, id, thread, KindThread, o.Stage, d)
 		return d
 	}
@@ -715,8 +745,10 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 
 	d.Cause = CauseQueueFailed
 	d.Reason = fmt.Sprintf("очередь треда %s не приняла отчёт: %v", short(thread), err)
-	d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
-		text+"\n\n"+d.Reason)
+	if !o.HumanTold {
+		d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+			text+"\n\n"+d.Reason)
+	}
 	record(j, id, thread, KindThread, o.Stage, d)
 	return d
 }

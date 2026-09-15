@@ -143,6 +143,8 @@ func run() error {
 		return cmdDelegate(o, args[1], strings.Join(args[2:], " "))
 	case "done":
 		return cmdDone(o, args[1:])
+	case "undelivered":
+		return cmdUndelivered(o)
 	case "digest":
 		if len(args) < 2 {
 			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
@@ -204,6 +206,7 @@ func usage() {
   claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
                                          сам сверит его с активным поручением
   claudex digest <id>                    ход работы по поручению: что делалось
+  claudex undelivered                    отчёты, не дошедшие до ведущего, целиком
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks [--task <id>]            журнал поручений; с --task — одно
 
@@ -1156,11 +1159,11 @@ func detachLog() string {
 // Отказ уходит в ход вызывающего: он успевает сделать иначе, а не узнаёт о
 // потере из лога, который никто не читает.
 func wakeIsPossible(j *journal.Journal, o opts) error {
-	if o.notify == "" && o.notifyThread == "" && !o.detach {
-		return nil
-	}
 	wake := task.ResolveWake(client(), o.notify, o.notifyThread)
 
+	// Тред проверяется всегда, даже когда адрес не назван флагом, а взят из
+	// CODEX_THREAD_ID. Переменная переживает закрытие разговора, и молча
+	// принятый устаревший адрес — это отчёт, который потом некуда доставить.
 	if wake.Kind == task.KindThread {
 		// У треда доказывать нечего, кроме того, что он открыт: адрес и есть
 		// разговор, промахнуться соседним нельзя.
@@ -1171,6 +1174,9 @@ func wakeIsPossible(j *journal.Journal, o opts) error {
 		return nil
 	}
 
+	if o.notify == "" && !o.detach {
+		return nil
+	}
 	if v := task.MayWrite(wake.Target, wake.Session, wake.Session,
 		task.SharedPane(j, wake.Target)); !v.OK() {
 		return exitcode.Errorf(exitcode.BadCall,
@@ -1244,6 +1250,46 @@ func taskDigest(o opts, id, prompt string, from, to time.Time, pane string) dige
 		d.Entries = db.Since
 	}
 	return digest.Build(d)
+}
+
+// cmdUndelivered — канал вытягивания: всё, что до ведущего не дошло, вместе с
+// причиной и полным текстом отчёта.
+//
+// Без него отчёт закрытого треда оставался только в журнале, а журнал никто не
+// читает построчно: ровно так пропал отчёт задачи 465a77fc.
+func cmdUndelivered(o opts) error {
+	recs, err := journal.Open(defaultJournal()).Read()
+	if err != nil {
+		return err
+	}
+	lost := task.LostReports(recs)
+	if o.pretty {
+		return emit(o, map[string]any{"undelivered": lost, "count": len(lost)})
+	}
+	if len(lost) == 0 {
+		fmt.Println("недоставленного нет")
+		return nil
+	}
+	for _, l := range lost {
+		fmt.Printf("── %s · стадия %s · %s\n", l.Task, l.Stage, l.At)
+		fmt.Printf("   адрес:  %s\n", l.Target)
+		fmt.Printf("   причина: %s\n", l.Reason)
+		if l.Cause != "" {
+			fmt.Printf("   код:     %s\n", l.Cause)
+		}
+		if l.Report != "" {
+			fmt.Printf("   отчёт:\n%s\n", indent(l.Report))
+		}
+	}
+	return nil
+}
+
+func indent(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		b.WriteString("     " + line + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func cmdTaskDigest(o opts, id string) error {

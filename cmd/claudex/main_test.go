@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/task"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -167,13 +166,25 @@ func TestTasksSeparatesStagesOfTheSameTask(t *testing.T) {
 func TestPaneListingCarriesNoForeignReports(t *testing.T) {
 	// Через это поле чужой отчёт и попал в лицензионный разговор: выдачу
 	// панелей читает любой агент, а отчёт принадлежит одному разговору.
-	// Недоставленное остаётся в `claudex tasks`, который смотрит человек.
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(src), `"undelivered"`) {
-		t.Fatal("выдача панелей не должна нести чужие отчёты")
+	// Недоставленное лежит в отдельной команде, которую зовёт человек.
+	//
+	// Проверяется сама выдача, а не текст main.go: гейт по исходнику ловит
+	// только знакомое написание и молчит про любой обходной путь.
+	for _, v := range []any{paneView{}, briefView{}} {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys map[string]any
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			t.Fatal(err)
+		}
+		for k := range keys {
+			if strings.Contains(strings.ToLower(k), "report") ||
+				strings.Contains(strings.ToLower(k), "undelivered") {
+				t.Fatalf("в выдаче панелей поле %q: чужой отчёт туда не кладут", k)
+			}
+		}
 	}
 }
 

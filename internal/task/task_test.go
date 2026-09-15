@@ -576,7 +576,10 @@ func TestTransientRefusalIsRetried(t *testing.T) {
 	}
 }
 
-func TestLostReportsNamesWhatNobodyLearned(t *testing.T) {
+func TestUndeliveredHoldsWhatTheLeaderNeverGot(t *testing.T) {
+	// Смысл канала — «ведущий не получил», а не «не узнал никто». Показ
+	// человеку отчёт не доставляет: всплывашку прочитают, когда будут за
+	// машиной, а разговор так и не узнает, что поручение кончилось.
 	now := time.Now()
 	recs := []journal.Record{
 		{Task: "11111111", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "карта флота готова"},
@@ -586,11 +589,14 @@ func TestLostReportsNamesWhatNobodyLearned(t *testing.T) {
 		{Task: "т3", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
 	}
 	got := LostReports(recs)
-	if len(got) != 1 {
-		t.Fatalf("потеряна одна, получено %+v", got)
+	if len(got) != 2 {
+		t.Fatalf("не дошло до ведущего две, получено %+v", got)
 	}
 	if got[0].Task != "11111111" || got[0].Stage != StageFinished || got[0].Target != "wE:p17" {
 		t.Fatalf("получено %+v", got[0])
+	}
+	if got[1].Task != "т2" {
+		t.Fatalf("показ человеку остаётся недоставленным, получено %+v", got[1])
 	}
 	if !strings.Contains(got[0].Report, "карта флота готова") {
 		t.Fatalf("сам отчёт при потере не теряется, получено %q", got[0].Report)
