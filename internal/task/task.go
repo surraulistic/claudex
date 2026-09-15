@@ -572,7 +572,7 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			// обстоятельствах.
 			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
 				text+"\n\n"+d.Reason)
-			record(j, id, target, o.Stage, d)
+			record(j, id, target, KindPane, o.Stage, d)
 			return d
 		case !freeStates[pane.Status]:
 			last = fmt.Errorf("%s в состоянии %q", target, pane.Status)
@@ -582,7 +582,7 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 				d.OK = true
 				d.Waited = time.Since(started)
 				d.Seconds = int(d.Waited.Seconds())
-				record(j, id, target, o.Stage, d)
+				record(j, id, target, KindPane, o.Stage, d)
 				return d
 			} else {
 				last = err
@@ -595,7 +595,7 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			d.Reason = fmt.Sprintf("ведущий не освободился за %s: %v", o.Deadline, last)
 			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
 				text+"\n\nРазбудить "+target+" не удалось: "+last.Error())
-			record(j, id, target, o.Stage, d)
+			record(j, id, target, KindPane, o.Stage, d)
 			return d
 		case <-time.After(o.Poll):
 		}
@@ -639,7 +639,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		d.Cause, d.Reason = v.cause, v.reason
 		d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
 			text+"\n\n"+d.Reason)
-		record(j, id, thread, o.Stage, d)
+		record(j, id, thread, KindThread, o.Stage, d)
 		return d
 	}
 
@@ -649,7 +649,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	d.Seconds = int(d.Waited.Seconds())
 	if err == nil {
 		d.OK = true
-		record(j, id, thread, o.Stage, d)
+		record(j, id, thread, KindThread, o.Stage, d)
 		return d
 	}
 
@@ -657,7 +657,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	d.Reason = fmt.Sprintf("очередь треда %s не приняла отчёт: %v", short(thread), err)
 	d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
 		text+"\n\n"+d.Reason)
-	record(j, id, thread, o.Stage, d)
+	record(j, id, thread, KindThread, o.Stage, d)
 	return d
 }
 
@@ -802,7 +802,7 @@ func short(id string) string {
 	return id
 }
 
-func record(j *journal.Journal, id, target, stage string, d Delivery) {
+func record(j *journal.Journal, id, target, kind, stage string, d Delivery) {
 	if j == nil {
 		return
 	}
@@ -818,7 +818,7 @@ func record(j *journal.Journal, id, target, stage string, d Delivery) {
 		}
 	}
 	j.Append(journal.Record{
-		Task: id, Event: journal.Notified, Target: target, Stage: stage,
+		Task: id, Event: journal.Notified, Target: target, TargetKind: kind, Stage: stage,
 		Cause: d.Cause, Outcome: outcome, Reason: d.Reason,
 	})
 }

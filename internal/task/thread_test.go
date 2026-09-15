@@ -243,6 +243,12 @@ func TestThreadDeliveryOutcomeLandsInTheJournal(t *testing.T) {
 	if recs[0].Target != leaderThread || recs[0].Stage != StageReported {
 		t.Fatalf("адрес и стадия записаны, получено %+v", recs[0])
 	}
+	// Вид адреса нужен и здесь, а не только в записи о заведении: иначе по
+	// журналу не отличить доставку в тред от доставки в панель, а именно по
+	// нему и разбирают, куда уехал отчёт.
+	if recs[0].TargetKind != KindThread {
+		t.Fatalf("доставка в тред помечена как тред, получено %q", recs[0].TargetKind)
+	}
 }
 
 func TestLateThreadReportKeepsTheBindingFromDelegationTime(t *testing.T) {
@@ -393,5 +399,9 @@ func TestPaneDeliveryIsUnchangedWhenKindIsAbsent(t *testing.T) {
 	}
 	if f.LastRequest("agent.prompt") == nil {
 		t.Fatal("сообщение ушло в панель")
+	}
+	recs, _ := j.Read()
+	if len(recs) != 1 || recs[0].TargetKind != KindPane {
+		t.Fatalf("панельная доставка помечена как панель, получено %+v", recs)
 	}
 }
