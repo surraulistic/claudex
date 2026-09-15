@@ -47,6 +47,13 @@ type Record struct {
 	// Пусто читается как панель: записи, заведённые до появления адресации по
 	// треду, других адресов не знали.
 	TargetKind string `json:"target_kind,omitempty"`
+	// ClaimedTask — идентификатор, который назвал отчитывающийся, если он
+	// отличается от того, под которым запись легла. Пусто значит «назвали
+	// верно». Держать его обязательно: исправление должно быть видно в журнале,
+	// иначе разбор инцидента опирается на догадку.
+	ClaimedTask string `json:"claimed_task,omitempty"`
+	// Correction — почему идентификатор пришлось исправить.
+	Correction string `json:"correction,omitempty"`
 	Attempt    int    `json:"attempt,omitempty"`
 }
 

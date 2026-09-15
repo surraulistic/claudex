@@ -173,12 +173,13 @@ func TestReportUsesPaneFromEnvironment(t *testing.T) {
 	// HERDR_PANE_ID, который herdr кладёт в окружение каждой панели.
 	_, j, _ := setup(t, "idle")
 	t.Setenv("HERDR_PANE_ID", "wE:p7")
-	if _, err := Report(context.Background(), "т1", "готово", "всё сделано",
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p7"})
+	if _, err := Report(context.Background(), "11111111", "готово", "всё сделано",
 		ReportOptions{Journal: j}); err != nil {
 		t.Fatal(err)
 	}
 	recs, _ := j.Read()
-	if len(recs) != 1 || recs[0].Pane != "wE:p7" || recs[0].Event != journal.Reported {
+	if len(recs) != 2 || recs[1].Pane != "wE:p7" || recs[1].Event != journal.Reported {
 		t.Fatalf("отчёт с панелью из окружения, получено %+v", recs)
 	}
 }
@@ -221,7 +222,7 @@ func TestDeliverWaitsForTheLeaderInsteadOfGivingUp(t *testing.T) {
 		time.Sleep(80 * time.Millisecond)
 		f.Reply("agent.get", agentWith("idle", leaderSession))
 	}()
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{WantSession: leaderSession, Deadline: 3 * time.Second, Poll: 10 * time.Millisecond})
 	if !d.OK {
 		t.Fatalf("дождались и разбудили, получено %+v", d)
@@ -235,7 +236,7 @@ func TestDeliverFallsBackToTheHumanWhenLeaderStaysBusy(t *testing.T) {
 	// Ограничение вне claudex: ведущий может быть занят сколько угодно. Тогда
 	// факт уходит человеку уведомлением herdr — мимо агентов и без токенов.
 	f, j, c := delivery(t, "working")
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "поручение готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "поручение готово",
 		DeliverOptions{WantSession: leaderSession, Deadline: 60 * time.Millisecond, Poll: 10 * time.Millisecond})
 	if d.OK {
 		t.Fatal("ведущий так и не освободился")
@@ -267,7 +268,7 @@ func TestDeliveryOutcomeLandsInTheJournal(t *testing.T) {
 		{"working", "не разбужен, показано человеку", 40 * time.Millisecond},
 	} {
 		_, j, cl := delivery(t, c.status)
-		Deliver(context.Background(), cl, j, "т1", "wE:p17", "готово",
+		Deliver(context.Background(), cl, j, "11111111", "wE:p17", "готово",
 			DeliverOptions{WantSession: leaderSession, Deadline: c.deadline, Poll: 10 * time.Millisecond})
 		recs, _ := j.Read()
 		var got *journal.Record
@@ -289,7 +290,7 @@ func TestDeliverStopsOnContextCancel(t *testing.T) {
 	_, j, c := delivery(t, "working")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	d := Deliver(ctx, c, j, "т1", "wE:p17", "готово",
+	d := Deliver(ctx, c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{WantSession: leaderSession, Deadline: time.Hour, Poll: 10 * time.Millisecond})
 	if d.OK {
 		t.Fatal("отменённая доставка не считается удавшейся")
@@ -302,11 +303,11 @@ func TestDeliverStopsOnContextCancel(t *testing.T) {
 // уже не было.
 func timedOut(t *testing.T, j *journal.Journal, target string) {
 	t.Helper()
-	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: target, TargetSession: leaderSession})
-	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Pane: "wE:p13",
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Pane: "wE:p13",
 		Outcome: TimedOut, Reason: "context deadline exceeded"})
-	j.Append(journal.Record{Task: "т1", Event: journal.Notified, Target: target,
+	j.Append(journal.Record{Task: "11111111", Event: journal.Notified, Target: target,
 		Stage: StageFinished, Outcome: "разбужен"})
 }
 
@@ -314,8 +315,8 @@ func TestLateReportWakesTheLeaderTheWatcherCouldNotWaitFor(t *testing.T) {
 	f, j, c := delivery(t, "idle")
 	timedOut(t, j, "wE:p17")
 
-	res, err := Report(context.Background(), "т1", "готово", "каталог опубликован",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond})
+	res, err := Report(context.Background(), "11111111", "готово", "каталог опубликован",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,8 +335,8 @@ func TestLateReportFallsBackToHumanWhenLeaderIsBusy(t *testing.T) {
 	f, j, c := delivery(t, "working")
 	timedOut(t, j, "wE:p17")
 
-	res, _ := Report(context.Background(), "т1", "готово", "каталог опубликован",
-		ReportOptions{Client: c, Journal: j, Deadline: 40 * time.Millisecond, Poll: 10 * time.Millisecond})
+	res, _ := Report(context.Background(), "11111111", "готово", "каталог опубликован",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: 40 * time.Millisecond, Poll: 10 * time.Millisecond})
 	if res.Delivered == nil || res.Delivered.OK || !res.Delivered.Fallback {
 		t.Fatalf("человеку показано, получено %+v", res.Delivered)
 	}
@@ -351,13 +352,13 @@ func TestLateReportFallsBackToHumanWhenLeaderIsBusy(t *testing.T) {
 func TestRepeatedDoneDoesNotWakeTheLeaderTwice(t *testing.T) {
 	f, j, c := delivery(t, "idle")
 	timedOut(t, j, "wE:p17")
-	o := ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond}
+	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: 10 * time.Millisecond}
 
-	if res, _ := Report(context.Background(), "т1", "готово", "первый", o); !res.Late {
+	if res, _ := Report(context.Background(), "11111111", "готово", "первый", o); !res.Late {
 		t.Fatal("первый поздний отчёт доставляется")
 	}
 	prompts := len(f.Requests())
-	res, _ := Report(context.Background(), "т1", "готово", "второй", o)
+	res, _ := Report(context.Background(), "11111111", "готово", "второй", o)
 	if res.Late || res.Skipped == "" {
 		t.Fatalf("повтор не будит второй раз, получено %+v", res)
 	}
@@ -382,13 +383,13 @@ func TestFailedDeliveryIsRetriedOnTheNextDone(t *testing.T) {
 	f, j, c := delivery(t, "working")
 	f.Reply("notification.show", `{"id":"x","error":{"code":"boom","message":"нет"}}`)
 	timedOut(t, j, "wE:p17")
-	o := ReportOptions{Client: c, Journal: j, Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond}
+	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond}
 
-	if res, _ := Report(context.Background(), "т1", "готово", "первый", o); res.Delivered.Fallback {
+	if res, _ := Report(context.Background(), "11111111", "готово", "первый", o); res.Delivered.Fallback {
 		t.Fatal("человеку показать не удалось")
 	}
 	f.Reply("agent.get", agentWith("idle", leaderSession))
-	res, _ := Report(context.Background(), "т1", "готово", "второй", o)
+	res, _ := Report(context.Background(), "11111111", "готово", "второй", o)
 	if !res.Late || res.Delivered == nil || !res.Delivered.OK {
 		t.Fatalf("недоставленное повторяется, получено %+v", res)
 	}
@@ -397,11 +398,11 @@ func TestFailedDeliveryIsRetriedOnTheNextDone(t *testing.T) {
 func TestReportWhileWatcherAliveDoesNotDeliverItself(t *testing.T) {
 	// Наблюдатель ещё ждёт отчёт через журнал — вторая доставка была бы дублем.
 	f, j, c := delivery(t, "idle")
-	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: "wE:p17", TargetSession: leaderSession})
 
-	res, _ := Report(context.Background(), "т1", "готово", "рано",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second})
+	res, _ := Report(context.Background(), "11111111", "готово", "рано",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second})
 	if res.Late || res.Delivered != nil {
 		t.Fatalf("живой наблюдатель доставляет сам, получено %+v", res)
 	}
@@ -413,8 +414,8 @@ func TestReportWhileWatcherAliveDoesNotDeliverItself(t *testing.T) {
 func TestLateReportWithoutLeaderIsNotSpam(t *testing.T) {
 	f, j, c := delivery(t, "idle")
 	timedOut(t, j, "")
-	res, _ := Report(context.Background(), "т1", "готово", "некому",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second})
+	res, _ := Report(context.Background(), "11111111", "готово", "некому",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second})
 	if res.Late || res.Skipped == "" {
 		t.Fatalf("без ведущего доставлять некому, получено %+v", res)
 	}
@@ -435,7 +436,7 @@ func TestWakeGoesToTheSessionThatStartedItNotJustThePane(t *testing.T) {
 	f, j, c := delivery(t, "idle")
 	f.Reply("agent.get", agentWith("idle", "разговор-А"))
 
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{Stage: StageReported, WantSession: "разговор-А",
 			Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if !d.OK {
@@ -447,7 +448,7 @@ func TestWakeRefusesAPaneWhoseConversationChanged(t *testing.T) {
 	f, j, c := delivery(t, "idle")
 	f.Reply("agent.get", agentWith("idle", "разговор-Б"))
 
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{Stage: StageReported, WantSession: "разговор-А",
 			Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if d.OK {
@@ -479,7 +480,7 @@ func TestWakeRefusesWhenTheBindingCannotBeConfirmed(t *testing.T) {
 	} {
 		f, j, cl := delivery(t, "idle")
 		f.Reply("agent.get", agentWith("idle", c.has))
-		d := Deliver(context.Background(), cl, j, "т1", "wE:p17", "готово",
+		d := Deliver(context.Background(), cl, j, "11111111", "wE:p17", "готово",
 			DeliverOptions{Stage: StageReported, WantSession: c.want,
 				Deadline: time.Second, Poll: 10 * time.Millisecond})
 		if d.OK {
@@ -502,12 +503,12 @@ func TestLateReportKeepsTheBindingFromDelegationTime(t *testing.T) {
 	// разговор, и привязка нужна именно та, что снята при заведении.
 	f, j, c := delivery(t, "idle")
 	f.Reply("agent.get", agentWith("idle", "разговор-Б"))
-	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: "wE:p17", TargetSession: "разговор-А"})
-	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Outcome: TimedOut})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Outcome: TimedOut})
 
-	res, _ := Report(context.Background(), "т1", "готово", "поздний отчёт",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond})
+	res, _ := Report(context.Background(), "11111111", "готово", "поздний отчёт",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if res.Delivered == nil || res.Delivered.OK || !res.Delivered.Fallback {
 		t.Fatalf("чужому разговору не пишем, человеку говорим: %+v", res.Delivered)
 	}
@@ -543,7 +544,7 @@ func TestRefusedNotificationIsNotCalledDelivered(t *testing.T) {
 	f.Reply("notification.show",
 		`{"id":"x","result":{"type":"notification_show","shown":false,"reason":"busy"}}`)
 
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
 			Deadline: 30 * time.Millisecond, Poll: 10 * time.Millisecond})
 	if d.Fallback {
@@ -567,7 +568,7 @@ func TestTransientRefusalIsRetried(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 		f.Reply("notification.show", `{"id":"x","result":{"shown":true,"reason":"shown"}}`)
 	}()
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
 			Deadline: 20 * time.Millisecond, Poll: 5 * time.Millisecond})
 	if !d.Fallback {
@@ -578,8 +579,8 @@ func TestTransientRefusalIsRetried(t *testing.T) {
 func TestLostReportsNamesWhatNobodyLearned(t *testing.T) {
 	now := time.Now()
 	recs := []journal.Record{
-		{Task: "т1", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "карта флота готова"},
-		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Target: "wE:p17",
+		{Task: "11111111", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "карта флота готова"},
+		{Task: "11111111", Time: now, Event: journal.Notified, Stage: StageFinished, Target: "wE:p17",
 			Outcome: NotDelivered + " (herdr: busy)", Reason: "теперь другой разговор"},
 		{Task: "т2", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: ToldHuman},
 		{Task: "т3", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
@@ -588,7 +589,7 @@ func TestLostReportsNamesWhatNobodyLearned(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("потеряна одна, получено %+v", got)
 	}
-	if got[0].Task != "т1" || got[0].Stage != StageFinished || got[0].Target != "wE:p17" {
+	if got[0].Task != "11111111" || got[0].Stage != StageFinished || got[0].Target != "wE:p17" {
 		t.Fatalf("получено %+v", got[0])
 	}
 	if !strings.Contains(got[0].Report, "карта флота готова") {
@@ -602,8 +603,8 @@ func TestLostReportsNamesWhatNobodyLearned(t *testing.T) {
 func TestLaterSuccessClearsTheLoss(t *testing.T) {
 	now := time.Now()
 	recs := []journal.Record{
-		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: NotDelivered},
-		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
+		{Task: "11111111", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: NotDelivered},
+		{Task: "11111111", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
 	}
 	if got := LostReports(recs); len(got) != 0 {
 		t.Fatalf("дошедшее позже перестаёт быть потерей, получено %+v", got)
@@ -613,8 +614,8 @@ func TestLaterSuccessClearsTheLoss(t *testing.T) {
 func TestLostReportsSeparatesStages(t *testing.T) {
 	now := time.Now()
 	recs := []journal.Record{
-		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
-		{Task: "т1", Time: now, Event: journal.Notified, Stage: StageReported, Outcome: NotDelivered},
+		{Task: "11111111", Time: now, Event: journal.Notified, Stage: StageFinished, Outcome: WokeUp},
+		{Task: "11111111", Time: now, Event: journal.Notified, Stage: StageReported, Outcome: NotDelivered},
 	}
 	got := LostReports(recs)
 	if len(got) != 1 || got[0].Stage != StageReported {
@@ -663,7 +664,7 @@ func journalWithTwoConversations(t *testing.T, j *journal.Journal) {
 	t.Helper()
 	j.Append(journal.Record{Task: "лиценз", Event: journal.Started, Pane: "wE:p13",
 		Target: "wE:p17", TargetSession: "01a07921"})
-	j.Append(journal.Record{Task: "баги", Event: journal.Started, Pane: "wE:p2N",
+	j.Append(journal.Record{Task: "ba614444", Event: journal.Started, Pane: "wE:p2N",
 		Target: "wE:p17", TargetSession: leaderSession})
 }
 
@@ -671,7 +672,7 @@ func TestSharedPaneIsNotAnAddress(t *testing.T) {
 	f, j, c := delivery(t, "idle")
 	journalWithTwoConversations(t, j)
 
-	d := Deliver(context.Background(), c, j, "баги", "wE:p17", "Payment закрыт: SNEW-1686",
+	d := Deliver(context.Background(), c, j, "ba614444", "wE:p17", "Payment закрыт: SNEW-1686",
 		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
 			Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if d.OK {
@@ -693,10 +694,10 @@ func TestForeignReportNeverBecomesAMessageOfAnotherConversation(t *testing.T) {
 	// должен превратиться в сообщение лицензионного разговора.
 	f, j, c := delivery(t, "idle")
 	f.Reply("agent.get", agentWith("idle", "01a07921"))
-	j.Append(journal.Record{Task: "баги", Event: journal.Started, Pane: "wE:p2N",
+	j.Append(journal.Record{Task: "ba614444", Event: journal.Started, Pane: "wE:p2N",
 		Target: "wE:p17", TargetSession: leaderSession})
 
-	d := Deliver(context.Background(), c, j, "баги", "wE:p17", "Payment закрыт: SNEW-1686/1687",
+	d := Deliver(context.Background(), c, j, "ba614444", "wE:p17", "Payment закрыт: SNEW-1686/1687",
 		DeliverOptions{Stage: StageFinished, WantSession: leaderSession,
 			Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if d.Cause != CauseWrongConversation {
@@ -724,10 +725,10 @@ func TestLateReportIntoASharedPaneIsAlsoRefused(t *testing.T) {
 	// сменить разговор.
 	f, j, c := delivery(t, "idle")
 	journalWithTwoConversations(t, j)
-	j.Append(journal.Record{Task: "баги", Event: journal.Finished, Outcome: TimedOut})
+	j.Append(journal.Record{Task: "ba614444", Event: journal.Finished, Outcome: TimedOut})
 
-	res, _ := Report(context.Background(), "баги", "готово", "SNEW-1686 и SNEW-1687 закрыты",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: 10 * time.Millisecond})
+	res, _ := Report(context.Background(), "ba614444", "готово", "SNEW-1686 и SNEW-1687 закрыты",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p2N", Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if res.Delivered == nil || res.Delivered.OK {
 		t.Fatalf("в общую панель поздний отчёт не пишется, получено %+v", res.Delivered)
 	}
@@ -742,8 +743,8 @@ func TestLateReportIntoASharedPaneIsAlsoRefused(t *testing.T) {
 func TestLostCarriesTheMachineReadableCause(t *testing.T) {
 	now := time.Now()
 	got := LostReports([]journal.Record{
-		{Task: "баги", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "SNEW-1686"},
-		{Task: "баги", Time: now, Event: journal.Notified, Stage: StageFinished,
+		{Task: "ba614444", Time: now, Event: journal.Reported, Outcome: "готово", Reason: "SNEW-1686"},
+		{Task: "ba614444", Time: now, Event: journal.Notified, Stage: StageFinished,
 			Target: "wE:p17", Cause: CauseWrongConversation, Outcome: NotDelivered},
 	})
 	if len(got) != 1 || got[0].Cause != CauseWrongConversation {

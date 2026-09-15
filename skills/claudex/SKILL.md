@@ -423,6 +423,38 @@ Still requiring an explicit read, because no digest can carry it honestly:
 The rule of thumb: treat the digest as a briefing that tells you where to look,
 and verify in the repository anything you are about to build a decision on.
 
+### You are not required to remember the task id
+
+`claudex done` no longer trusts the id you type. It reads `HERDR_PANE_ID`, looks
+up which task is actually live for that pane, and files the report there.
+
+```bash
+claudex done <task-id> "<one line>"   # normal
+claudex done "<one line>"             # id omitted — resolved from the pane
+```
+
+This exists because the id you remember goes stale. A session that has been
+running for hours and has been compacted remembers the **first** id it ever saw,
+not the current one. Measured on the live journal: one pane filed seventeen
+reports against a task that had been closed that morning, while the task actually
+running got none — and the leader was never woken.
+
+What ClauDex does with what you type:
+
+- **live id for your pane** — filed as given;
+- **stale, unknown, foreign, or a whole report pasted where the id goes** — filed
+  against your pane's one live task instead, and the journal records both what you
+  typed and why it was changed (`claimed_task`, `correction`);
+- **your own already-reported id, nothing else live** — kept as is; a repeated
+  `done` is how a delivery that reached nobody gets retried;
+- **nothing live, or several live at once** — refused with the candidates named.
+  Nothing is written. Guessing here would produce a false report, which is worse
+  than a missing one because it looks real.
+
+So type the id if you have it, and do not agonise if you don't. What you must not
+do is invent one: an id you are unsure about is worse than no id at all, because a
+wrong-but-plausible id can match a real closed task.
+
 ## Driving a session
 
 `claudex` is read-only by design. Live control is Herdr, addressed by the same

@@ -177,7 +177,9 @@ type ReportOptions struct {
 	Journal *journal.Journal
 	// Compose — см. DeliverOptions.Compose. Здесь он получает ещё и границы
 	// поручения, снятые из журнала: раньше них работы по нему не было.
-	Compose func(summary string, from, to time.Time, pane string) string
+	Compose func(summary, task string, from, to time.Time, pane string) string
+	// Pane — панель, из которой отчитываются. Пусто читается как $HERDR_PANE_ID.
+	Pane string
 	// Deadline — сколько ждать освобождения ведущего. Здесь он короткий, в
 	// отличие от наблюдателя: done выполняется внутри хода самой задачи, и
 	// держать её минутами нельзя. Не дождались — говорим человеку сразу.
@@ -186,10 +188,14 @@ type ReportOptions struct {
 }
 
 type ReportResult struct {
-	Task      string    `json:"task"`
-	Late      bool      `json:"late"`
-	Delivered *Delivery `json:"delivered,omitempty"`
-	Skipped   string    `json:"skipped,omitempty"`
+	Task string `json:"task"`
+	// Resolution — под каким идентификатором отчёт записан и почему не под
+	// названным. Возвращается наружу, чтобы исправление было видно вызывающему,
+	// а не только в журнале.
+	Resolution Resolution `json:"resolution,omitempty"`
+	Late       bool       `json:"late"`
+	Delivered  *Delivery  `json:"delivered,omitempty"`
+	Skipped    string     `json:"skipped,omitempty"`
 }
 
 // Report записывает отчёт задачи и, если её уже похоронили, доставляет его сам.
@@ -205,9 +211,24 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	}
 	before, _ := o.Journal.Read()
 
+	// Сначала выясняем, чей это отчёт, и только потом пишем. Прежний порядок
+	// был обратным, и поэтому в журнал попадали отчёты под чужим и вовсе не
+	// существующим идентификатором — запись появлялась до любой проверки.
+	pane := o.Pane
+	if pane == "" {
+		pane = os.Getenv("HERDR_PANE_ID")
+	}
+	r, err := Resolve(before, pane, id)
+	if err != nil {
+		return res, err
+	}
+	id = r.Task
+	res.Task, res.Resolution = id, r
+
 	if err := o.Journal.Append(journal.Record{
-		Task: id, Event: journal.Reported, Pane: os.Getenv("HERDR_PANE_ID"),
+		Task: id, Event: journal.Reported, Pane: pane,
 		Outcome: outcome, Reason: reason,
+		ClaimedTask: claimedIfDiffers(r), Correction: r.Note,
 	}); err != nil {
 		return res, err
 	}
@@ -237,9 +258,9 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	w := WakeOf(st.kind, st.target, st.session)
 	var compose func(string) string
 	if o.Compose != nil {
-		from, pane := st.started, st.pane
+		from, cpane := st.started, st.pane
 		compose = func(summary string) string {
-			return o.Compose(summary, from, time.Now(), pane)
+			return o.Compose(summary, id, from, time.Now(), cpane)
 		}
 	}
 	d := Deliver(ctx, o.Client, o.Journal, id, w.Target,
@@ -393,6 +414,14 @@ func stateOf(recs []journal.Record, id string) taskState {
 		}
 	}
 	return st
+}
+
+// claimedIfDiffers — что назвали, если это не то, подо что легло.
+func claimedIfDiffers(r Resolution) string {
+	if !r.Corrected {
+		return ""
+	}
+	return r.Claimed
 }
 
 func orElse(v, def string) string {

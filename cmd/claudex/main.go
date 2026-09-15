@@ -142,10 +142,7 @@ func run() error {
 		}
 		return cmdDelegate(o, args[1], strings.Join(args[2:], " "))
 	case "done":
-		if len(args) < 2 {
-			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
-		}
-		return cmdDone(o, args[1], strings.Join(args[2:], " "))
+		return cmdDone(o, args[1:])
 	case "digest":
 		if len(args) < 2 {
 			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
@@ -204,7 +201,8 @@ func usage() {
                                          (только фоном: ход держит до срока)
   claudex delegate <цель> "<задача>"     поручить; с --no-wait --notify-thread —
                                          не занимая ход, отчёт придёт сообщением
-  claudex done <id> "<что вышло>"        отчитаться о порученной задаче
+  claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
+                                         сам сверит его с активным поручением
   claudex digest <id>                    ход работы по поручению: что делалось
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks [--task <id>]            журнал поручений; с --task — одно
@@ -1261,7 +1259,15 @@ func cmdTaskDigest(o opts, id string) error {
 	return nil
 }
 
-func cmdDone(o opts, id, reason string) error {
+// cmdDone принимает и «done <id> <текст>», и «done <текст>» без идентификатора.
+// Помнить id идеально сессия не обязана — за принадлежность отчёта отвечает
+// ClauDex, а не тот, кто отчитывается.
+func cmdDone(o opts, args []string) error {
+	var id string
+	if len(args) > 0 && task.IsTaskID(args[0]) {
+		id, args = args[0], args[1:]
+	}
+	reason := strings.Join(args, " ")
 	outcome := "готово"
 	if i := strings.IndexByte(reason, ' '); i > 0 && isOutcomeWord(reason[:i]) {
 		outcome, reason = reason[:i], strings.TrimSpace(reason[i+1:])
@@ -1272,7 +1278,10 @@ func cmdDone(o opts, id, reason string) error {
 		Client: client(), Journal: journal.Open(defaultJournal()),
 		// Ведущему уходит не только строка исхода: по одной строке продолжать
 		// планирование нельзя, а перечитывать транскрипт руками он не обязан.
-		Compose: func(summary string, from, to time.Time, pane string) string {
+		//
+		// Идентификатор здесь приходит уже разрешённый: собирать дайджест по
+		// названному значило бы показать ведущему чужую работу.
+		Compose: func(summary, id string, from, to time.Time, pane string) string {
 			prompt, _, _, _ := taskWindow(id)
 			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
 		},

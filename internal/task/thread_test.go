@@ -75,7 +75,7 @@ func TestThreadDeliveryAddressesTheConversationItself(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
 	if !d.OK {
 		t.Fatalf("живой тред принимает очередь, получено %+v", d)
 	}
@@ -104,7 +104,7 @@ func TestThreadDeliverySurvivesPaneReuse(t *testing.T) {
 	j.Append(journal.Record{Task: "т0", Event: journal.Started,
 		Target: "wE:p17", TargetSession: "разговор-Б"})
 
-	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
 	if !d.OK {
 		t.Fatalf("смена разговора в панели треду не мешает, получено %+v", d)
 	}
@@ -122,7 +122,7 @@ func TestThreadDeliveryRefusesAClosedThread(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "т1", otherThread, "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", otherThread, "готово", threadOpts())
 	if d.OK {
 		t.Fatal("в закрытый тред класть нельзя")
 	}
@@ -144,7 +144,7 @@ func TestThreadDeliveryRefusesAnUnknownThread(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "т1",
+	d := Deliver(context.Background(), c, j, "11111111",
 		"01a0ffff-0000-7000-8000-000000000000", "готово", threadOpts())
 	if d.OK {
 		t.Fatal("неизвестный тред — это «подтвердить нечем», а не «наверное, тот же»")
@@ -163,7 +163,7 @@ func TestThreadDeliveryRefusesAMissingBinding(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "т1", "", "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", "", "готово", threadOpts())
 	if d.OK {
 		t.Fatal("без привязки доставлять некуда")
 	}
@@ -184,7 +184,7 @@ func TestThreadDeliveryRefusesASessionName(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "т1", "license service", "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", "license service", "готово", threadOpts())
 	if d.OK {
 		t.Fatal("имя адресом быть не может")
 	}
@@ -210,7 +210,7 @@ func TestQueueFailureIsNotCalledDelivered(t *testing.T) {
 	}
 	defer func() { codex.Queue = prev }()
 
-	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
 	if d.OK {
 		t.Fatal("очередь не приняла — это отказ")
 	}
@@ -233,7 +233,7 @@ func TestThreadDeliveryOutcomeLandsInTheJournal(t *testing.T) {
 	codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
-	Deliver(context.Background(), c, j, "т1", leaderThread, "готово", threadOpts())
+	Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
 	recs, _ := j.Read()
 	if len(recs) != 1 {
 		t.Fatalf("одна запись о доставке, получено %+v", recs)
@@ -257,12 +257,12 @@ func TestLateThreadReportKeepsTheBindingFromDelegationTime(t *testing.T) {
 	// из окружения: к этому времени процесс может выполняться где угодно.
 	sent := codexHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
-	j.Append(journal.Record{Task: "т1", Event: journal.Started, Pane: "wE:p13",
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread})
-	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Outcome: TimedOut})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Outcome: TimedOut})
 
-	res, err := Report(context.Background(), "т1", "готово", "поздний отчёт",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: time.Millisecond})
+	res, err := Report(context.Background(), "11111111", "готово", "поздний отчёт",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,13 +280,13 @@ func TestLateThreadReportKeepsTheBindingFromDelegationTime(t *testing.T) {
 func TestRepeatedDoneDoesNotQueueTheThreadTwice(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
-	j.Append(journal.Record{Task: "т1", Event: journal.Started,
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread})
-	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Outcome: TimedOut})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Outcome: TimedOut})
 
-	o := ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: time.Millisecond}
-	Report(context.Background(), "т1", "готово", "первый", o)
-	res, _ := Report(context.Background(), "т1", "готово", "второй", o)
+	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: time.Millisecond}
+	Report(context.Background(), "11111111", "готово", "первый", o)
+	res, _ := Report(context.Background(), "11111111", "готово", "второй", o)
 
 	if res.Skipped == "" {
 		t.Fatalf("второй done никого не будит, получено %+v", res)
@@ -301,14 +301,14 @@ func TestFailedThreadDeliveryIsRetriedOnTheNextDone(t *testing.T) {
 	// не дошедший с первого раза, теряется навсегда.
 	sent := codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
-	j.Append(journal.Record{Task: "т1", Event: journal.Started,
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread})
-	j.Append(journal.Record{Task: "т1", Event: journal.Finished, Outcome: TimedOut})
-	j.Append(journal.Record{Task: "т1", Event: journal.Notified, Target: leaderThread,
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Outcome: TimedOut})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Notified, Target: leaderThread,
 		Stage: StageReported, Outcome: NotDelivered})
 
-	res, _ := Report(context.Background(), "т1", "готово", "повтор",
-		ReportOptions{Client: c, Journal: j, Deadline: time.Second, Poll: time.Millisecond})
+	res, _ := Report(context.Background(), "11111111", "готово", "повтор",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: time.Millisecond})
 	if res.Delivered == nil || !res.Delivered.OK {
 		t.Fatalf("повторили и дошли, получено %+v", res.Delivered)
 	}
@@ -392,7 +392,7 @@ func TestPaneDeliveryIsUnchangedWhenKindIsAbsent(t *testing.T) {
 	// Опции без Kind ведут себя ровно как раньше: вся панельная ветка должна
 	// остаться нетронутой, иначе починка одного сломала бы другое.
 	f, j, c := threadDelivery(t)
-	d := Deliver(context.Background(), c, j, "т1", "wE:p17", "готово",
+	d := Deliver(context.Background(), c, j, "11111111", "wE:p17", "готово",
 		DeliverOptions{Stage: StageReported, WantSession: leaderSession,
 			Deadline: time.Second, Poll: 10 * time.Millisecond})
 	if !d.OK {
@@ -415,7 +415,7 @@ func TestComposeEnrichesTheQueuedMessageOnly(t *testing.T) {
 	o := threadOpts()
 	o.Compose = func(s string) string { return s + " + ДАЙДЖЕСТ" }
 
-	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", o)
+	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", o)
 	if !d.OK {
 		t.Fatalf("доставка прошла, получено %+v", d)
 	}
@@ -430,7 +430,7 @@ func TestDirectCallbackWithoutComposeIsUnchanged(t *testing.T) {
 	sent := codexHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
 	if !d.OK || len(*sent) != 1 || (*sent)[0].message != "готово" {
 		t.Fatalf("сводка уходит как есть, получено %+v %+v", d, *sent)
 	}
@@ -443,7 +443,7 @@ func TestRefusedThreadShowsTheHumanTheSummaryNotTheDigest(t *testing.T) {
 	o := threadOpts()
 	o.Compose = func(s string) string { return s + " + ДАЙДЖЕСТ" }
 
-	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", o)
+	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", o)
 	if d.OK {
 		t.Fatal("закрытый тред не принимает очередь")
 	}
