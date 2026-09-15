@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -403,5 +404,54 @@ func TestPaneDeliveryIsUnchangedWhenKindIsAbsent(t *testing.T) {
 	recs, _ := j.Read()
 	if len(recs) != 1 || recs[0].TargetKind != KindPane {
 		t.Fatalf("панельная доставка помечена как панель, получено %+v", recs)
+	}
+}
+
+func TestComposeEnrichesTheQueuedMessageOnly(t *testing.T) {
+	// Ведущему в тред уходит сводка вместе с дайджестом. Человеку во
+	// всплывашку herdr — только сводка: уведомление на пол-экрана бесполезно.
+	sent := codexHome(t, leaderThread)
+	_, j, c := threadDelivery(t)
+	o := threadOpts()
+	o.Compose = func(s string) string { return s + " + ДАЙДЖЕСТ" }
+
+	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", o)
+	if !d.OK {
+		t.Fatalf("доставка прошла, получено %+v", d)
+	}
+	if len(*sent) != 1 || (*sent)[0].message != "готово + ДАЙДЖЕСТ" {
+		t.Fatalf("в очередь ушёл дайджест, получено %+v", *sent)
+	}
+}
+
+func TestDirectCallbackWithoutComposeIsUnchanged(t *testing.T) {
+	// Обратная совместимость: без индекса и вне Claude-сессии дайджест собрать
+	// не из чего, и прямой callback обязан работать ровно как раньше.
+	sent := codexHome(t, leaderThread)
+	_, j, c := threadDelivery(t)
+
+	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", threadOpts())
+	if !d.OK || len(*sent) != 1 || (*sent)[0].message != "готово" {
+		t.Fatalf("сводка уходит как есть, получено %+v %+v", d, *sent)
+	}
+}
+
+func TestRefusedThreadShowsTheHumanTheSummaryNotTheDigest(t *testing.T) {
+	// Тред закрыт, отчёт идёт человеку. Дайджест сюда подмешивать нельзя.
+	codexHome(t) // ни одного живого замка
+	f, j, c := threadDelivery(t)
+	o := threadOpts()
+	o.Compose = func(s string) string { return s + " + ДАЙДЖЕСТ" }
+
+	d := Deliver(context.Background(), c, j, "т1", leaderThread, "готово", o)
+	if d.OK {
+		t.Fatal("закрытый тред не принимает очередь")
+	}
+	req := f.LastRequest("notification.show")
+	if req == nil {
+		t.Fatal("человеку сказали")
+	}
+	if strings.Contains(fmt.Sprint(req), "ДАЙДЖЕСТ") {
+		t.Fatal("во всплывашку herdr дайджест не уезжает")
 	}
 }

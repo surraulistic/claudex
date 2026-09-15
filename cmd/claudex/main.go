@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/surraulistic/claudex/internal/codex"
+	"github.com/surraulistic/claudex/internal/digest"
 	"github.com/surraulistic/claudex/internal/exitcode"
 	"github.com/surraulistic/claudex/internal/freshness"
 	"github.com/surraulistic/claudex/internal/herdr"
@@ -144,7 +145,12 @@ func run() error {
 		if len(args) < 2 {
 			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
 		}
-		return cmdDone(args[1], strings.Join(args[2:], " "))
+		return cmdDone(o, args[1], strings.Join(args[2:], " "))
+	case "digest":
+		if len(args) < 2 {
+			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
+		}
+		return cmdTaskDigest(o, args[1])
 	case "index":
 		return cmdIndex(o)
 	case "tasks":
@@ -197,6 +203,7 @@ func usage() {
   claudex watch <цель>                   дождаться, пока панель освободится
   claudex delegate <цель> "<задача>"     поручить и дождаться, одной командой
   claudex done <id> "<что вышло>"        отчитаться о порученной задаче
+  claudex digest <id>                    ход работы по поручению: что делалось
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks [--task <id>]            журнал поручений; с --task — одно
 
@@ -1178,7 +1185,81 @@ func wakeIsPossible(j *journal.Journal, o opts) error {
 	return nil
 }
 
-func cmdDone(id, reason string) error {
+// taskWindow — границы поручения и панель, где оно выполнялось, по журналу.
+func taskWindow(id string) (prompt string, from, to time.Time, pane string) {
+	recs, err := journal.Open(defaultJournal()).Read()
+	if err != nil {
+		return
+	}
+	for _, r := range recs {
+		if r.Task != id {
+			continue
+		}
+		switch r.Event {
+		case journal.Started:
+			if from.IsZero() {
+				from = r.Time
+			}
+			if r.Prompt != "" {
+				prompt = r.Prompt
+			}
+			if r.Pane != "" {
+				pane = r.Pane
+			}
+		case journal.Finished, journal.Reported:
+			to = r.Time
+		}
+	}
+	return
+}
+
+// taskDigest собирает ход работы за окно поручения. Источников может не быть
+// ни одного — дайджест тогда состоит из названных причин, и это правильнее
+// молчания.
+func taskDigest(o opts, id, prompt string, from, to time.Time, pane string) digest.Digest {
+	d := digest.Options{Task: id, Prompt: prompt, From: from, To: to, Pane: pane,
+		Chars: o.chars, TailLines: o.tailLines}
+	if pane != "" {
+		d.Key = sessionOfPane(pane)
+		c := client()
+		d.Tail = func(target string, lines int) ([]string, error) {
+			p, err := resolve(target)
+			if err != nil {
+				return nil, err
+			}
+			return tailFor(c, p, lines), nil
+		}
+	}
+	db, err := store.Open(o.db)
+	if err == nil {
+		defer db.Close()
+		d.LookupHead = func(key string) (digest.Head, error) {
+			h, err := db.Digest(key, 1, 1)
+			if err != nil {
+				return digest.Head{}, err
+			}
+			return digest.Head{LastActivity: time.Unix(h.LastTS, 0),
+				SourcePath: h.SourcePath, Entries: h.EntryCount}, nil
+		}
+		d.Entries = db.Since
+	}
+	return digest.Build(d)
+}
+
+func cmdTaskDigest(o opts, id string) error {
+	prompt, from, to, pane := taskWindow(id)
+	if from.IsZero() {
+		return exitcode.Errorf(exitcode.NotFound, "поручения %s в журнале нет", id)
+	}
+	d := taskDigest(o, id, prompt, from, to, pane)
+	if o.pretty {
+		return emit(o, d)
+	}
+	fmt.Print(d.Text("(дайджест по запросу)"))
+	return nil
+}
+
+func cmdDone(o opts, id, reason string) error {
 	outcome := "готово"
 	if i := strings.IndexByte(reason, ' '); i > 0 && isOutcomeWord(reason[:i]) {
 		outcome, reason = reason[:i], strings.TrimSpace(reason[i+1:])
@@ -1187,6 +1268,12 @@ func cmdDone(id, reason string) error {
 	defer stop()
 	res, err := task.Report(ctx, id, outcome, reason, task.ReportOptions{
 		Client: client(), Journal: journal.Open(defaultJournal()),
+		// Ведущему уходит не только строка исхода: по одной строке продолжать
+		// планирование нельзя, а перечитывать транскрипт руками он не обязан.
+		Compose: func(summary string, from, to time.Time, pane string) string {
+			prompt, _, _, _ := taskWindow(id)
+			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
+		},
 	})
 	if err != nil {
 		return err

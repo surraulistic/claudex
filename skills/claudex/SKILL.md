@@ -26,6 +26,7 @@ Search is plain SQLite FTS5 over that index, so it matches any language.
 claudex brief             # every live pane at once — status, tail, signals
 claudex index             # catch the index up; --full rebuilds from scratch
 claudex tasks             # journal of everything delegated
+claudex digest <task-id>  # what actually happened during one delegated task
 ```
 
 The index is incremental: a catch-up costs seconds, a full rebuild about half a
@@ -368,6 +369,40 @@ the id `delegate` printed, which only this conversation holds:
 claudex tasks --task 742309b7
 ```
 
+
+### What arrives in the thread is a summary, not Claude's answer
+
+Claude is the messenger here, not the author of record. The message ClauDex queues
+into your thread is a **digest it assembled**, and the one-line outcome inside it
+is the least of what it carries. Do not plan off that line alone.
+
+Arriving automatically, bounded to the task window:
+
+- **what was delegated** — the prompt as it was recorded, not as you remember it;
+- **the work** — tool calls and their results: commands run, files edited, tests;
+- **what was said** — the assistant's own reasoning turns, clipped;
+- **a live pane tail** read from herdr, so it is fresh even when the index is not;
+- **freshness and coverage** — how far the cass index lags, and whether it reached
+  the task window at all.
+
+Two of those deserve care. A digest whose coverage line says the index did not
+reach the window has **empty work sections on purpose**: ClauDex would rather show
+nothing than pass off older, unrelated work in the same conversation as this
+task's. And a `dropped` count means a long session was trimmed to a budget — what
+you see is a sample, not the whole run.
+
+Still requiring an explicit read, because no digest can carry it honestly:
+
+- the **full transcript** — `claudex digest <task-id>` for the task-scoped view,
+  `claudex <target>` for the pane as a whole;
+- the **repository** — `git -C <repo> log`, `git status`, `git show <sha>`. A
+  digest reports that a commit was made; only the repo proves what is in it;
+- anything **outside the task window**, which the digest deliberately excludes;
+- anything the index has not caught up on yet — the freshness line tells you when
+  that is the case, and the live tail is then your only fresh evidence.
+
+The rule of thumb: treat the digest as a briefing that tells you where to look,
+and verify in the repository anything you are about to build a decision on.
 
 ## Driving a session
 

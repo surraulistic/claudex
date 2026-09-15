@@ -31,6 +31,8 @@ type Entry struct {
 	Len    int
 	Text   string
 	Anchor bool
+	// Tool — запись инструмента, а не реплика: команда, её вывод, правка файла.
+	Tool bool
 }
 
 type Digest struct {
@@ -127,6 +129,47 @@ func prefix(chars int) int {
 		return n
 	}
 	return 4096
+}
+
+// Since — записи разговора в окне времени, включая инструментальные.
+//
+// Дайджест поручения обязан показывать не только реплики, но и то, что реально
+// делалось: команды и их результаты живут в is_tool, и без них «что сделано»
+// подменяется пересказом. Инструментальные приходят отдельным полем, потому что
+// режутся они жёстче — их много и они длинные.
+//
+// Окно закрыто слева и справа: поручение начинается позже начала разговора и
+// заканчивается раньше его конца, а выдавать соседнюю работу за свою нельзя.
+func (s *Store) Since(target string, fromMS, toMS int64, limit, chars int) ([]Entry, error) {
+	id, err := s.convID(target)
+	if err != nil {
+		return nil, err
+	}
+	if toMS <= 0 {
+		toMS = 1<<62 - 1
+	}
+	rows, err := s.db.Query(`
+		select m.id, m.role, m.created_at/1000, m.len, m.is_tool,
+		       substr((select content from msg_fts where rowid = m.id), 1, ?)
+		from msg m
+		where m.conv_id = ? and m.created_at >= ? and m.created_at <= ?
+		order by m.created_at asc, m.id asc limit ?`,
+		prefix(chars), id, fromMS, toMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Entry
+	for rows.Next() {
+		var e Entry
+		var tool int
+		if err := rows.Scan(&e.ID, &e.Kind, &e.TS, &e.Len, &tool, &e.Text); err != nil {
+			return nil, err
+		}
+		e.Tool = tool != 0
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 type Hit struct {

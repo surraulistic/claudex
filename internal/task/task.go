@@ -76,12 +76,12 @@ type Result struct {
 	WakeSession string
 	// WakeKind — панель это или тред Codex.
 	WakeKind string
-	Task        string
-	Outcome     string // наша классификация: отчиталась / без отчёта / не уложилась
-	Said        string // как сама задача назвала исход
-	Reason      string
-	Pane        string
-	Duration    time.Duration
+	Task     string
+	Outcome  string // наша классификация: отчиталась / без отчёта / не уложилась
+	Said     string // как сама задача назвала исход
+	Reason   string
+	Pane     string
+	Duration time.Duration
 }
 
 func Delegate(ctx context.Context, o Options) (Result, error) {
@@ -175,6 +175,9 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 type ReportOptions struct {
 	Client  *herdr.Client
 	Journal *journal.Journal
+	// Compose — см. DeliverOptions.Compose. Здесь он получает ещё и границы
+	// поручения, снятые из журнала: раньше них работы по нему не было.
+	Compose func(summary string, from, to time.Time, pane string) string
 	// Deadline — сколько ждать освобождения ведущего. Здесь он короткий, в
 	// отличие от наблюдателя: done выполняется внутри хода самой задачи, и
 	// держать её минутами нельзя. Не дождались — говорим человеку сразу.
@@ -232,10 +235,17 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 		o.Deadline = 15 * time.Second
 	}
 	w := WakeOf(st.kind, st.target, st.session)
+	var compose func(string) string
+	if o.Compose != nil {
+		from, pane := st.started, st.pane
+		compose = func(summary string) string {
+			return o.Compose(summary, from, time.Now(), pane)
+		}
+	}
 	d := Deliver(ctx, o.Client, o.Journal, id, w.Target,
 		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
 		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
-			Deadline: o.Deadline, Poll: o.Poll})
+			Compose: compose, Deadline: o.Deadline, Poll: o.Poll})
 	res.Delivered = &d
 	return res, nil
 }
@@ -340,10 +350,14 @@ func LostReports(recs []journal.Record) []Lost {
 }
 
 type taskState struct {
-	finished  bool
-	target    string
-	session   string
-	kind      string
+	finished bool
+	target   string
+	session  string
+	kind     string
+	// started — когда поручение завели, pane — где его выполняли. Отсюда
+	// берётся окно дайджеста: раньше started работы по этому поручению не было.
+	started   time.Time
+	pane      string
 	delivered map[string]bool
 }
 
@@ -358,6 +372,12 @@ func stateOf(recs []journal.Record, id string) taskState {
 		}
 		switch r.Event {
 		case journal.Started:
+			if st.started.IsZero() {
+				st.started = r.Time
+			}
+			if r.Pane != "" {
+				st.pane = r.Pane
+			}
 			if r.Target != "" {
 				st.target, st.session, st.kind = r.Target, r.TargetSession, r.TargetKind
 			}
@@ -523,6 +543,13 @@ type DeliverOptions struct {
 	// поэтому пятнадцати секунд здесь было мало на порядок.
 	Deadline time.Duration
 	Poll     time.Duration
+	// Compose превращает сводку в то, что уедет в очередь треда: сводка плюс
+	// дайджест работы. Пусто значит «слать как есть» — прямой callback обязан
+	// работать и без индекса, и вне Claude-сессии.
+	//
+	// Человеку в уведомление herdr уходит именно сводка, а не дайджест:
+	// всплывашка на пол-экрана — это не уведомление.
+	Compose func(summary string) string
 	// QueueAttempts и QueueGap — повторы у очереди треда. Наблюдатель может
 	// позволить себе долгие, `done` внутри хода задачи — нет.
 	QueueAttempts int
@@ -643,7 +670,11 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		return d
 	}
 
-	err := codex.Send(ctx, thread, text,
+	queued := text
+	if o.Compose != nil {
+		queued = o.Compose(text)
+	}
+	err := codex.Send(ctx, thread, queued,
 		codex.SendOptions{Attempts: o.QueueAttempts, Gap: o.QueueGap})
 	d.Waited = time.Since(started)
 	d.Seconds = int(d.Waited.Seconds())
