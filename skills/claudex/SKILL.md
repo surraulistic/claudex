@@ -1,6 +1,6 @@
 ---
 name: claudex
-description: Read what the other Claude Code sessions on this machine are doing and what they already decided, and hand work to one of them. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work — and whenever you are about to give a task to another session and need to know when it finished — `claudex delegate` sends the task and waits for that task, where a bare `herdr agent prompt` leaves the work untracked. Also reads a single entry or the conversation around it in full.
+description: Read what the other Claude Code sessions on this machine are doing and what they already decided, and hand work to one of them. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work — and whenever you are about to give a task to another session and need to know when it finished — `claudex delegate` sends the task and reports back on it — by default without blocking your thread — where a bare `herdr agent prompt` leaves the work untracked. Also reads a single entry or the conversation around it in full.
 metadata:
   short-description: State and history of the Claude Code sessions on this machine
 ---
@@ -173,6 +173,11 @@ claudex watch install            # blocks until the pane leaves `working`, then 
 claudex watch install --timeout 600
 ```
 
+**Never run it in the foreground of a Codex thread.** It blocks until the pane
+changes state — up to the timeout — and for that whole time the thread accepts no
+input: you cannot steer, correct, or cancel. The same goes for a foreground
+`claudex delegate` without `--no-wait`.
+
 Run it **in the background**. It holds no model, spends no tokens, and does not
 poll: it blocks inside Herdr, which already tracks pane state. When the pane
 goes idle, done or blocked, the process prints `{"pane", "status",
@@ -191,8 +196,10 @@ logged. Correlation cannot be added afterwards — the watch has to begin with t
 send, and a bare prompt does not do that.
 
 ```bash
-claudex delegate install "<task>"          # send, wait, return the result
-claudex delegate install "<task>" --no-wait
+# default: send and return at once; the report arrives later as its own message
+claudex delegate install "<task>" --no-wait --notify-thread "$CODEX_THREAD_ID"
+
+claudex delegate install "<task>"          # blocks this thread until the task ends
 ```
 
 Outcomes are distinct on purpose, and both the JSON and the exit code carry
@@ -304,18 +311,30 @@ different events, each delivered once. Running `done` twice does not wake anyone
 twice; a delivery that reached nobody is retried on the next `done`. `claudex
 tasks` lists undelivered stages as `<task>/<stage>`.
 
-**Let your own harness do the waking — it is the only routing that is provably
-correct.** Run `claudex delegate` as a normal command and hold the handle your
-harness gives you. In Codex that is `exec` + `wait`:
+**Default: send in the background and let the report come back as a message.**
+
+```bash
+claudex delegate install "<task>" --no-wait --notify-thread "$CODEX_THREAD_ID"
+```
+
+This returns immediately. Your thread stays open to input the whole time the task
+runs — you can keep working, steer, or cancel. When the task finishes, `claudex
+done` queues the report **into this same conversation** as an ordinary message,
+carrying the digest described below. The address is the thread, so the report
+cannot land anywhere else.
+
+Omit `--notify-thread` when `CODEX_THREAD_ID` is set: your own thread is chosen
+automatically.
+
+`exec` + `wait` is the exception, not the rule. It holds a cell you must come back
+to, and in Codex `wait` is pull-based polling — a long wait is billed as repeated
+turns, not as idle time. Reach for it only when the very next thing you do depends
+on the result and there is nothing else to get on with:
 
 ```
 exec("claudex delegate install '<task>'", yield_time_ms: 5000)   → cell_id
 wait(cell_id, yield_time_ms: 600000)   → claudex JSON, in this conversation
 ```
-
-The `cell_id` belongs to the conversation that ran `exec`; nothing else can wait
-on it, so the result cannot land anywhere else. The turn is not held: `exec`
-yields and `wait` is issued when convenient.
 
 **Do not use `--detach --notify` for this.** It severs that parent-child link and
 leaves claudex to route by pane, which cannot work: Codex runs several
