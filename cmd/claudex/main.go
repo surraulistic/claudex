@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/exitcode"
 	"github.com/surraulistic/claudex/internal/freshness"
 	"github.com/surraulistic/claudex/internal/herdr"
@@ -47,6 +48,7 @@ type opts struct {
 	raw           bool
 	pretty        bool
 	notify        string
+	notifyThread  string
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -76,6 +78,8 @@ func run() error {
 	fs.IntVar(&o.after, "after", 20, "context: записей после якоря")
 	fs.StringVar(&o.timeoutRaw, "timeout", "1800", "watch/delegate: срок ожидания, секунды или 30m")
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
+	fs.StringVar(&o.notifyThread, "notify-thread", "",
+		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
 	fs.StringVar(&o.notifyWaitRaw, "notify-timeout", "1800",
 		"delegate: сколько ждать, пока ведущий освободится")
 	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
@@ -212,6 +216,8 @@ func usage() {
   --detach           delegate: отдать ожидание отдельному процессу
   --force            delegate: писать и в панель, ждущую решения человека
   --notify <цель>    delegate: разбудить эту панель по завершении
+  --notify-thread ID delegate: вернуть результат в этот тред Codex — адрес есть
+                     сам разговор (умолчание: $CODEX_THREAD_ID)
   --notify-timeout N delegate: сколько ждать освобождения ведущего (1800);
                      не дождались — факт уходит человеку уведомлением herdr
   --raw              запрос уходит в FTS5 как есть, без экранирования
@@ -993,9 +999,10 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 			return exitcode.Errorf(exitcode.Busy, "панель занята: %s в состоянии %q", p.ID, a.Status)
 		}
 		id := task.NewID()
-		wake := firstNonEmpty(o.notify, os.Getenv("HERDR_PANE_ID"))
+		wake := task.ResolveWake(client(), o.notify, o.notifyThread)
 		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID,
-			Target: wake, TargetSession: sessionOfPane(wake), Prompt: prompt})
+			Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
+			Prompt: prompt})
 		if _, err := client().Prompt(p.ID, prompt, nil, 0); err != nil {
 			return exitcode.Wrap(exitcode.BadCall, err)
 		}
@@ -1011,12 +1018,19 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		// результат не прочтёт никто.
 		// Умолчание — та самая сессия, которая поручение затевает: будить
 		// кого-то ещё можно только назвав его прямо.
-		if o.notify == "" {
-			o.notify = os.Getenv("HERDR_PANE_ID")
+		//
+		// Тред Codex здесь предпочтительнее панели: очередь треда не зависит
+		// от связи «родитель-потомок», которую --detach как раз и рвёт.
+		if o.notify == "" && o.notifyThread == "" {
+			if t := codex.ThreadID(); t != "" {
+				o.notifyThread = t
+			} else {
+				o.notify = os.Getenv("HERDR_PANE_ID")
+			}
 		}
-		if o.notify == "" {
+		if o.notify == "" && o.notifyThread == "" {
 			return exitcode.Errorf(exitcode.BadCall,
-				"--detach без --notify и вне панели herdr: результат некому прочитать")
+				"--detach без --notify, без --notify-thread и вне панели herdr: результат некому прочитать")
 		}
 		return detach(o, p.ID, prompt)
 	}
@@ -1025,7 +1039,8 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	defer stop()
 	res, err := task.Delegate(ctx, task.Options{
 		Client: client(), Journal: j, Pane: p.ID, Prompt: prompt,
-		Timeout: o.timeout, Force: o.force, Notify: o.notify,
+		Timeout: o.timeout, Force: o.force,
+		Notify: o.notify, NotifyThread: o.notifyThread,
 	})
 	if err != nil {
 		if errors.Is(err, task.ErrBusy) {
@@ -1037,19 +1052,22 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	out := map[string]any{
 		// Привязка видна сразу: без неё пробуждение не состоится, и узнать об
 		// этом лучше здесь, а не через полчаса.
-		"wake": map[string]any{"target": res.WakeTarget,
+		"wake": map[string]any{"target": res.WakeTarget, "kind": res.WakeKind,
 			"session_bound": res.WakeSession != ""},
 		"task": res.Task, "pane": p.ID, "outcome": res.Outcome,
 		"said": res.Said, "reason": res.Reason,
 		"correlated": res.Outcome == task.Reported,
 		"seconds":    int(res.Duration.Seconds()),
 	}
-	if o.notify != "" {
+	// Пробуждение — только по прямой просьбе. Адрес, снятый из окружения,
+	// записывается для позднего отчёта, но сам ход не будит: вызывающий и так
+	// ждёт этот процесс своим харнессом, и вторая доставка была бы дублем.
+	if o.notify != "" || o.notifyThread != "" {
 		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
 			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
-		out["notified"] = task.Deliver(ctx, client(), j, res.Task, o.notify, text,
-			task.DeliverOptions{Stage: task.StageFinished, WantSession: res.WakeSession,
-				Deadline: o.notifyWait})
+		out["notified"] = task.Deliver(ctx, client(), j, res.Task, res.WakeTarget, text,
+			task.DeliverOptions{Stage: task.StageFinished, Kind: res.WakeKind,
+				WantSession: res.WakeSession, Deadline: o.notifyWait})
 	}
 	if err := emit(o, out); err != nil {
 		return err
@@ -1076,6 +1094,12 @@ func detach(o opts, pane, prompt string) error {
 	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw, "--db-path", o.db}
 	if o.notify != "" {
 		args = append(args, "--notify", o.notify, "--notify-timeout", o.notifyWaitRaw)
+	}
+	// Тред передаётся прямо, а не через окружение: потомок живёт своей группой
+	// процессов и переживает вызывающего, а CODEX_THREAD_ID у него к тому
+	// времени может уже ничего не значить.
+	if o.notifyThread != "" {
+		args = append(args, "--notify-thread", o.notifyThread, "--notify-timeout", o.notifyWaitRaw)
 	}
 	if o.force {
 		args = append(args, "--force")
@@ -1125,15 +1149,28 @@ func detachLog() string {
 // Отказ уходит в ход вызывающего: он успевает сделать иначе, а не узнаёт о
 // потере из лога, который никто не читает.
 func wakeIsPossible(j *journal.Journal, o opts) error {
-	if o.notify == "" && !o.detach {
+	if o.notify == "" && o.notifyThread == "" && !o.detach {
 		return nil
 	}
-	wake := firstNonEmpty(o.notify, os.Getenv("HERDR_PANE_ID"))
-	sess := sessionOfPane(wake)
-	if v := task.MayWrite(wake, sess, sess, task.SharedPane(j, wake)); !v.OK() {
+	wake := task.ResolveWake(client(), o.notify, o.notifyThread)
+
+	if wake.Kind == task.KindThread {
+		// У треда доказывать нечего, кроме того, что он открыт: адрес и есть
+		// разговор, промахнуться соседним нельзя.
+		if v := task.MayQueue(wake.Target, codex.State(codex.Home(), wake.Target)); !v.OK() {
+			return exitcode.Errorf(exitcode.BadCall,
+				"результат будет некуда доставить: %s.", v.Reason())
+		}
+		return nil
+	}
+
+	if v := task.MayWrite(wake.Target, wake.Session, wake.Session,
+		task.SharedPane(j, wake.Target)); !v.OK() {
 		return exitcode.Errorf(exitcode.BadCall,
 			"результат будет некуда доставить: %s.\n"+
-				"Запустите без --detach и --notify, а ждите своим харнессом: в Codex это "+
+				"Назовите тред прямо: --notify-thread <id> кладёт отчёт в очередь разговора, "+
+				"а не в панель, за которой их несколько.\n"+
+				"Либо запустите без --detach и --notify, а ждите своим харнессом: в Codex это "+
 				"exec(…, yield_time_ms) и wait(cell_id) — дескриптор держит только этот "+
 				"разговор, и промахнуться нечем. Потерян дескриптор — claudex tasks --task <id>.",
 			v.Reason())

@@ -43,7 +43,11 @@ type Record struct {
 	// заводили. Панель переживает смену агента, разговор — нет, и будить надо
 	// именно тот, что поручение затеял.
 	TargetSession string `json:"target_session,omitempty"`
-	Attempt       int    `json:"attempt,omitempty"`
+	// TargetKind — чем является Target: панелью herdr или тредом Codex.
+	// Пусто читается как панель: записи, заведённые до появления адресации по
+	// треду, других адресов не знали.
+	TargetKind string `json:"target_kind,omitempty"`
+	Attempt    int    `json:"attempt,omitempty"`
 }
 
 type Journal struct {

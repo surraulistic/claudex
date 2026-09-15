@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/journal"
 )
@@ -61,8 +62,11 @@ type Options struct {
 	Force bool
 	// Notify — панель, которую будить по завершении. Пусто значит «никого»;
 	// поздний отчёт всё равно уйдёт тому, кто поручение затеял.
-	Notify  string
-	Attempt int
+	Notify string
+	// NotifyThread — тред Codex, которому возвращать результат. Названный
+	// прямо, он старше и панели, и того, что в окружении.
+	NotifyThread string
+	Attempt      int
 }
 
 type Result struct {
@@ -70,6 +74,8 @@ type Result struct {
 	// Снимаются в момент заведения поручения, а не доставки.
 	WakeTarget  string
 	WakeSession string
+	// WakeKind — панель это или тред Codex.
+	WakeKind string
 	Task        string
 	Outcome     string // наша классификация: отчиталась / без отчёта / не уложилась
 	Said        string // как сама задача назвала исход
@@ -99,15 +105,15 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	}
 	// Будить будем именно тот разговор, который поручение затеял: панель
 	// переживает смену агента, а разговор в ней — нет.
-	wake := orElse(o.Notify, os.Getenv("HERDR_PANE_ID"))
-	wakeSession := sessionOf(o.Client, wake)
+	wake := ResolveWake(o.Client, o.Notify, o.NotifyThread)
 
 	id := newID()
 	started := time.Now()
-	res := Result{Task: id, Pane: o.Pane, WakeTarget: wake, WakeSession: wakeSession}
+	res := Result{Task: id, Pane: o.Pane,
+		WakeTarget: wake.Target, WakeSession: wake.Session, WakeKind: wake.Kind}
 	o.Journal.Append(journal.Record{
 		Task: id, Event: journal.Started, Pane: o.Pane,
-		Target: wake, TargetSession: wakeSession,
+		Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
 		Prompt: o.Prompt, Attempt: o.Attempt,
 	})
 
@@ -217,16 +223,18 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	}
 
 	res.Late = true
-	if o.Client == nil {
+	// Тред Codex адресуется без herdr — он нужен только запасному каналу.
+	if o.Client == nil && st.kind != KindThread {
 		res.Skipped = "herdr недоступен"
 		return res, nil
 	}
 	if o.Deadline <= 0 {
 		o.Deadline = 15 * time.Second
 	}
-	d := Deliver(ctx, o.Client, o.Journal, id, st.target,
+	w := WakeOf(st.kind, st.target, st.session)
+	d := Deliver(ctx, o.Client, o.Journal, id, w.Target,
 		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
-		DeliverOptions{Stage: StageReported, WantSession: st.session,
+		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
 			Deadline: o.Deadline, Poll: o.Poll})
 	res.Delivered = &d
 	return res, nil
@@ -335,6 +343,7 @@ type taskState struct {
 	finished  bool
 	target    string
 	session   string
+	kind      string
 	delivered map[string]bool
 }
 
@@ -350,7 +359,7 @@ func stateOf(recs []journal.Record, id string) taskState {
 		switch r.Event {
 		case journal.Started:
 			if r.Target != "" {
-				st.target, st.session = r.Target, r.TargetSession
+				st.target, st.session, st.kind = r.Target, r.TargetSession, r.TargetKind
 			}
 		case journal.Finished:
 			st.finished = true
@@ -422,6 +431,20 @@ const (
 	CauseUnconfirmedBinding = "unconfirmed_binding"
 	CauseSharedPane         = "pane_hosts_several_conversations"
 	CauseLeaderBusy         = "leader_busy"
+	// CauseThreadNotLive — тред Codex известен, но замка писателя у него нет:
+	// он закрыт или заархивирован, и очередь в него никто не прочитает.
+	CauseThreadNotLive = "thread_not_live"
+	// CauseThreadUnknown — про этот тред $CODEX_HOME не знает ничего.
+	CauseThreadUnknown = "thread_unknown"
+	// CauseQueueFailed — сам вызов codex queue не прошёл.
+	CauseQueueFailed = "queue_failed"
+)
+
+// Чем является адрес пробуждения. Пусто читается как панель: поручения,
+// заведённые до появления адресации по треду, других адресов не знали.
+const (
+	KindPane   = "pane"
+	KindThread = "codex_thread"
 )
 
 const (
@@ -442,7 +465,52 @@ func sessionOf(c *herdr.Client, pane string) string {
 	return a.Session.Value
 }
 
+// Wake — куда возвращать результат. Снимается один раз, при заведении
+// поручения, и дальше не пересчитывается: панель к концу работы может вести
+// уже другой разговор, а адресовать надо тому, кто поручение затеял.
+type Wake struct {
+	Kind    string `json:"kind,omitempty"`
+	Target  string `json:"target,omitempty"`
+	Session string `json:"session,omitempty"`
+}
+
+func (w Wake) Empty() bool { return w.Target == "" }
+
+// ResolveWake выбирает адрес по убыванию точности: названный тред, названная
+// панель, свой тред Codex, своя панель herdr.
+//
+// Свой тред идёт впереди своей панели намеренно. Обе переменные окружения
+// бывают выставлены разом — Codex, запущенный в панели herdr, — и тогда панель
+// адресом быть не должна: за ней стоит несколько разговоров, а за тредом ровно
+// один.
+func ResolveWake(c *herdr.Client, notifyPane, notifyThread string) Wake {
+	switch {
+	case notifyThread != "":
+		return Wake{Kind: KindThread, Target: notifyThread, Session: notifyThread}
+	case notifyPane != "":
+		return Wake{Kind: KindPane, Target: notifyPane, Session: sessionOf(c, notifyPane)}
+	}
+	if t := codex.ThreadID(); t != "" {
+		return Wake{Kind: KindThread, Target: t, Session: t}
+	}
+	if p := os.Getenv("HERDR_PANE_ID"); p != "" {
+		return Wake{Kind: KindPane, Target: p, Session: sessionOf(c, p)}
+	}
+	return Wake{}
+}
+
+// WakeOf восстанавливает адрес из журнальной записи. Старые записи вида
+// «панель + разговор» читаются как раньше.
+func WakeOf(kind, target, session string) Wake {
+	if kind == "" {
+		kind = KindPane
+	}
+	return Wake{Kind: kind, Target: target, Session: session}
+}
+
 type DeliverOptions struct {
+	// Kind — панель это или тред Codex. Пусто читается как панель.
+	Kind string
 	// WantSession — разговор, который поручение затеял. Писать в панель можно
 	// только когда там ровно он: рядом живут другие сессии того же ведущего,
 	// и попасть в чужую нельзя ни при каких обстоятельствах.
@@ -455,6 +523,10 @@ type DeliverOptions struct {
 	// поэтому пятнадцати секунд здесь было мало на порядок.
 	Deadline time.Duration
 	Poll     time.Duration
+	// QueueAttempts и QueueGap — повторы у очереди треда. Наблюдатель может
+	// позволить себе долгие, `done` внутри хода задачи — нет.
+	QueueAttempts int
+	QueueGap      time.Duration
 }
 
 // Deliver доносит до ведущего, что поручение закончилось, и не сдаётся молча.
@@ -473,6 +545,10 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	if o.Poll <= 0 {
 		o.Poll = 5 * time.Second
 	}
+	if o.Kind == KindThread {
+		return deliverThread(ctx, c, j, id, target, text, o)
+	}
+
 	started := time.Now()
 	d := Delivery{Target: target}
 
@@ -526,6 +602,95 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}
 }
 
+// deliverThread кладёт отчёт прямо в очередь названного разговора Codex.
+//
+// Ждать здесь нечего и вредно. Панель приходится караулить, потому что текст в
+// занятую уедет в чужой ход; очередь треда на то и очередь — сообщение примут
+// и в середине хода, а прочтут, когда ход кончится. Из-за этого отпадает и
+// самая дорогая ветка панельной доставки: полчаса опроса herdr ради ведущего,
+// который так и не освободился.
+//
+// Промахнуться разговором тут нельзя по устройству: адрес и есть разговор.
+// Проверять остаётся одно — что тот самый тред ещё открыт.
+func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
+	id, thread, text string, o DeliverOptions) Delivery {
+
+	started := time.Now()
+	d := Delivery{Target: thread}
+	home := codex.Home()
+
+	// Замок писателя пропадает на миг при перезапуске Codex, поэтому
+	// несколько взглядов подряд. Долго ждать закрытый тред незачем: он не
+	// откроется сам, а человеку сказать надо сейчас.
+	state := codex.State(home, thread)
+	for i := 0; state != codex.Live && i < 2; i++ {
+		select {
+		case <-ctx.Done():
+		case <-time.After(o.Poll):
+			state = codex.State(home, thread)
+			continue
+		}
+		break
+	}
+
+	if v := mayQueue(thread, state); !v.ok {
+		d.Waited = time.Since(started)
+		d.Seconds = int(d.Waited.Seconds())
+		d.Cause, d.Reason = v.cause, v.reason
+		d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+			text+"\n\n"+d.Reason)
+		record(j, id, thread, o.Stage, d)
+		return d
+	}
+
+	err := codex.Send(ctx, thread, text,
+		codex.SendOptions{Attempts: o.QueueAttempts, Gap: o.QueueGap})
+	d.Waited = time.Since(started)
+	d.Seconds = int(d.Waited.Seconds())
+	if err == nil {
+		d.OK = true
+		record(j, id, thread, o.Stage, d)
+		return d
+	}
+
+	d.Cause = CauseQueueFailed
+	d.Reason = fmt.Sprintf("очередь треда %s не приняла отчёт: %v", short(thread), err)
+	d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+		text+"\n\n"+d.Reason)
+	record(j, id, thread, o.Stage, d)
+	return d
+}
+
+// mayQueue — можно ли класть отчёт в очередь этого треда.
+//
+// Запрещено, пока не доказано, ровно как у панели. Разница в том, что
+// доказывать: у панели — что в ней всё ещё тот разговор, у треда — что он
+// вообще открыт. Закрытый тред принимает очередь молча и не читает её никогда,
+// поэтому «известен, но не жив» — это отказ, а не успех.
+func mayQueue(thread, state string) verdict {
+	switch {
+	case thread == "":
+		return verdict{false, CauseUnconfirmedBinding,
+			"при заведении поручения тред Codex не был записан: подтвердить, кому возвращать результат, нечем"}
+	case !codex.IsThreadID(thread):
+		return verdict{false, CauseUnconfirmedBinding, fmt.Sprintf(
+			"%q — не идентификатор разговора: адресовать по имени нельзя, одно имя носят несколько тредов",
+			thread)}
+	case state == codex.Known:
+		return verdict{false, CauseThreadNotLive, fmt.Sprintf(
+			"тред %s известен, но закрыт: поставленное в очередь не прочитает никто", short(thread))}
+	case state != codex.Live:
+		return verdict{false, CauseThreadUnknown, fmt.Sprintf(
+			"про тред %s в %s не знает ничего: подтвердить, что поручение затеял он, нечем",
+			short(thread), codex.Home())}
+	}
+	return verdict{ok: true}
+}
+
+// MayQueue открыт для зонда: правило отказа должно быть проверяемо на живой
+// машине, а не только в тестах.
+func MayQueue(thread, state string) verdict { return mayQueue(thread, state) }
+
 // Резать по символам, а не по байтам: у кириллического имени разговора
 // байтовый срез рубит букву пополам, и диагностика становится бесполезной.
 // tellHuman показывает исход человеку и не выдаёт отказ за успех.
@@ -536,6 +701,9 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 var humanRetryGap = 3 * time.Second
 
 func tellHuman(c *herdr.Client, title, body string) (bool, string) {
+	if c == nil {
+		return false, "herdr недоступен"
+	}
 	var reason string
 	for i := 0; i < 3; i++ {
 		if i > 0 {

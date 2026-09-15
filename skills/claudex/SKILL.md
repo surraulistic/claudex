@@ -323,6 +323,44 @@ report bound to the id Herdr reported was delivered into a conversation that had
 never heard of the task. `--detach` remains only for work whose result a **human**
 will read, never as a way to wake a conversation.
 
+### `--notify-thread`: the one address that is not a pane
+
+`--notify-thread <id>` puts the report into a Codex conversation's own queue via
+`codex queue --thread`. The address **is** the conversation, so the pane problem
+above does not arise: there is nothing to confuse it with.
+
+```bash
+claudex delegate install "<task>" --notify-thread "$CODEX_THREAD_ID"
+claudex delegate install "<task>" --detach --notify-thread "$CODEX_THREAD_ID"
+```
+
+Take the id from `CODEX_THREAD_ID`, which Codex exports into the environment.
+When it is set, you may omit the flag entirely: your own thread is chosen
+automatically and **outranks** your own pane, because several conversations sit
+behind a pane and exactly one behind a thread.
+
+This is the only case where `--detach` is a correct way to wake a conversation: a
+thread's queue does not depend on the parent-child link that `--detach` severs.
+Prefer plain `exec` + `wait` when you are going to wait anyway — it costs nothing
+and needs no thread id. Reach for `--notify-thread` when you must not hold the
+handle: detached work, or a task whose result should reach you even if this turn
+ends first.
+
+Three refusals, each naming its cause, none of them counted as delivery:
+
+- `thread_not_live` — the thread is known but closed; a queued message there
+  would never be read, so this is a refusal, not a success;
+- `thread_unknown` — `$CODEX_HOME` knows nothing about that id;
+- `unconfirmed_binding` — nothing was bound, or a **session name** was passed
+  instead of an id. Names are not addresses: three threads in the session index
+  are called `license service`.
+
+Check what would happen right now, without sending anything:
+
+```bash
+go run ./cmd/routecheck --threads
+```
+
 If the handle is lost — harness restarted, `wait` abandoned — pull the task by
 the id `delegate` printed, which only this conversation holds:
 
