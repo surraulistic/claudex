@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/cass"
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/digest"
 	"github.com/surraulistic/claudex/internal/exitcode"
@@ -55,6 +56,9 @@ type opts struct {
 	detach        bool
 	force         bool
 	task          string
+	mode          string
+	searchWaitRaw string
+	searchWait    time.Duration
 }
 
 func main() {
@@ -90,6 +94,8 @@ func run() error {
 	fs.BoolVar(&o.noWait, "no-wait", false, "delegate: отправить и выйти")
 	fs.BoolVar(&o.full, "full", false, "index: пересобрать с нуля")
 	fs.StringVar(&o.task, "task", "", "tasks: состояние одного поручения по его идентификатору")
+	fs.StringVar(&o.mode, "mode", "", "find: hybrid, semantic, lexical или auto (умолчание — $CLAUDEX_SEARCH, иначе auto)")
+	fs.StringVar(&o.searchWaitRaw, "search-timeout", "30", "find: предел ожидания cass, секунды")
 	// Флаги принимаются где угодно, в том числе после запроса: прежняя версия
 	// так умела, и «claudex find "миграция" --limit 3» пишут именно так.
 	// Разбор из стандартной библиотеки останавливается на первом позиционном
@@ -108,6 +114,11 @@ func run() error {
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
 	o.notifyWait = nw
+	sw, err := parseTimeout(o.searchWaitRaw)
+	if err != nil {
+		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	o.searchWait = sw
 
 	args := rest
 	if len(args) == 0 {
@@ -197,6 +208,7 @@ func usage() {
   claudex <цель>                         полный дайджест одной панели
   claudex search <цель> "<запрос>"       поиск внутри одной сессии
   claudex find "<запрос>"                поиск по всем транскриптам, включая закрытые
+                                         (гибрид cass + свой FTS5; см. --mode)
   claudex entry <id>                     запись целиком, без обрезки
   claudex context <id>                   разговор вокруг записи
   claudex watch <цель>                   дождаться, пока панель освободится
@@ -843,9 +855,37 @@ func group(hits []store.Hit, chars int) []sessionView {
 	return out
 }
 
+// searchMode — чем искать. Решение принимается один раз и явно: поведение
+// поиска не должно зависеть от того, установлена ли модель на этой машине.
+//
+//	lexical   только собственный FTS5 — прежнее поведение слово в слово
+//	hybrid    cass hybrid плюс FTS5, объединённые
+//	semantic  cass semantic плюс FTS5
+//	auto      как hybrid, но недоступность cass не считается ошибкой
+func searchMode(o opts) (string, error) {
+	m := strings.ToLower(strings.TrimSpace(o.mode))
+	if m == "" {
+		m = strings.ToLower(strings.TrimSpace(os.Getenv("CLAUDEX_SEARCH")))
+	}
+	switch m {
+	case "":
+		return "auto", nil
+	case "auto", "hybrid", "semantic", "lexical":
+		return m, nil
+	case "fts5", "fts":
+		return "lexical", nil
+	}
+	return "", exitcode.Errorf(exitcode.BadCall,
+		"неизвестный режим поиска %q: hybrid, semantic, lexical или auto", m)
+}
+
 func cmdFind(o opts, q string) error {
 	if strings.TrimSpace(q) == "" {
 		return exitcode.Errorf(exitcode.BadCall, "нужен запрос")
+	}
+	mode, err := searchMode(o)
+	if err != nil {
+		return err
 	}
 	db, err := store.Open(o.db)
 	if err != nil {
@@ -857,8 +897,60 @@ func cmdFind(o opts, q string) error {
 	if err != nil {
 		return err
 	}
+	if mode == "lexical" {
+		return emit(o, map[string]any{
+			"query": q, "match": match, "mode": mode,
+			"hits": len(hits), "sessions": group(hits, o.chars),
+		})
+	}
+
+	ask := cass.ModeHybrid
+	if mode == "semantic" {
+		ask = cass.ModeSemantic
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	engine := map[string]any{"requested": ask}
+	res, cerr := cass.Search(ctx, q, cass.Options{
+		Mode: ask, Limit: o.limit, Days: o.days, Timeout: o.searchWait,
+	})
+	if cerr != nil {
+		// Откат есть, но он не тихий: вызывающий видит, что семантики в этой
+		// выдаче нет, и почему.
+		engine["fallback"] = cerr.Error()
+		engine["searched"] = "lexical"
+		if mode != "auto" {
+			fmt.Fprintf(os.Stderr, "claudex: семантический поиск не выполнен (%v), выдача лексическая\n", cerr)
+		}
+		return emit(o, map[string]any{
+			"query": q, "match": match, "mode": mode, "engine": engine,
+			"hits": len(hits), "sessions": group(hits, o.chars),
+		})
+	}
+
+	engine["searched"] = res.Meta.SearchMode
+	engine["semantic_refinement"] = res.Meta.SemanticRefinement
+	engine["elapsed_ms"] = res.Meta.ElapsedMS
+	if d := res.Meta.Degraded(ask); d != "" {
+		engine["degraded"] = d
+	}
+	if n := res.Meta.StaleNote(); n != "" {
+		engine["stale"] = n
+	}
+
+	local := make([]cass.Local, 0, len(hits))
+	for _, h := range hits {
+		text, _ := textual.Cut(h.Text, o.chars)
+		local = append(local, cass.Local{
+			ID: h.ID, Session: h.SessionID, TS: h.TS, Text: text,
+			Agent: h.Agent, Workspace: h.Workspace,
+		})
+	}
+	merged := cass.Merge(res.Hits, local, o.limit)
 	return emit(o, map[string]any{
-		"query": q, "match": match, "hits": len(hits), "sessions": group(hits, o.chars),
+		"query": q, "match": match, "mode": mode, "engine": engine,
+		"hits": len(merged), "results": merged,
 	})
 }
 

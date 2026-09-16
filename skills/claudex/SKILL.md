@@ -481,6 +481,40 @@ retries the delivery: a conversation that has since reopened gets the report on
 that retry. The human is only shown the popup once per stage, so retrying is
 cheap and quiet.
 
+### `find` searches twice: semantically through cass, and lexically
+
+`claudex find` asks cass for a hybrid (semantic + lexical) search and merges the
+answer with its own FTS5 index. Two engines disagree usefully: semantic finds the
+paraphrase you half-remember, FTS5 finds the exact rare token you typed.
+
+```bash
+claudex find "почему отчёт не дошёл"              # auto (default)
+claudex find "<query>" --mode lexical             # no cass at all
+claudex find "<query>" --mode semantic --limit 20
+CLAUDEX_SEARCH=lexical claudex find "<query>"     # same, via environment
+```
+
+Every result carries `via`: `cass`, `fts5`, or `both`. `both` means two
+independent engines agreed — a stronger signal than either alone. Lexical-only
+hits keep reserved slots in the output, so a large `--limit` cannot crowd them
+out.
+
+**Read the `engine` block before trusting the ranking.** cass can return a
+perfectly successful-looking answer while having quietly fallen back to lexical —
+observed live: `"searched":"lexical", "semantic_refinement":false,
+"degraded":"семантика отключилась: semantic_backfilling"`. The `engine` block
+reports what was actually searched, whether semantic refinement really happened,
+and whether the cass index is stale or rebuilding.
+
+If cass is missing, slow, or broken, `find` falls back to FTS5 and says so in
+`engine.fallback` — it never passes a lexical answer off as a semantic one.
+
+Two limits worth knowing. A cass query costs 20–22 seconds on this archive
+(roughly half that with `cass daemon` running), which is why `--search-timeout`
+defaults to 30. And `claudex search <target>` — the per-conversation search — is
+still FTS5 only: cass has no session filter, and inside one conversation lexical
+is both adequate and instant.
+
 ## Driving a session
 
 `claudex` is read-only by design. Live control is Herdr, addressed by the same
