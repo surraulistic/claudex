@@ -111,11 +111,16 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	started := time.Now()
 	res := Result{Task: id, Pane: o.Pane,
 		WakeTarget: wake.Target, WakeSession: wake.Session, WakeKind: wake.Kind}
-	o.Journal.Append(journal.Record{
+	rec := journal.Record{
 		Task: id, Event: journal.Started, Pane: o.Pane,
 		Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
 		Prompt: o.Prompt, Attempt: o.Attempt,
-	})
+	}
+	if wake.Kind == KindThread {
+		rec.TargetState = codex.State(codex.Home(), wake.Target)
+		rec.TargetSeen = time.Now()
+	}
+	o.Journal.Append(rec)
 
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()

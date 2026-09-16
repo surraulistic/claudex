@@ -156,6 +156,8 @@ func run() error {
 		return cmdDone(o, args[1:])
 	case "undelivered":
 		return cmdUndelivered(o)
+	case "flush":
+		return cmdFlush(o)
 	case "digest":
 		if len(args) < 2 {
 			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
@@ -219,6 +221,7 @@ func usage() {
                                          сам сверит его с активным поручением
   claudex digest <id>                    ход работы по поручению: что делалось
   claudex undelivered                    отчёты, не дошедшие до ведущего, целиком
+  claudex flush                          дослать зависшее в открывшиеся разговоры
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks [--task <id>]            журнал поручений; с --task — одно
 
@@ -1089,6 +1092,10 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	if err := wakeIsPossible(j, o); err != nil {
 		return err
 	}
+	// Заведение поручения — лучший момент для дожима: разговор, который его
+	// затевает, сейчас заведомо жив, и зависшие в него отчёты уйдут прямо
+	// сейчас, не дожидаясь, пока кто-то вспомнит про claudex flush.
+	flushPending(o)
 
 	if o.noWait {
 		a, err := client().Get(p.ID)
@@ -1344,6 +1351,43 @@ func taskDigest(o opts, id, prompt string, from, to time.Time, pane string) dige
 	return digest.Build(d)
 }
 
+// flushPending дожимает зависшие отчёты в их собственные разговоры.
+//
+// Зовётся из команд, которые Codex и так выполняет: отдельного наблюдателя нет,
+// ввод не занимается, работа идёт внутри уже запущенного вызова и ограничена
+// сверху. Ошибки намеренно не поднимаются — дожим это побочная любезность, и
+// провалить из-за него основную команду нельзя.
+func flushPending(o opts) []task.Flushed {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return task.Flush(ctx, task.FlushOptions{
+		Journal: journal.Open(defaultJournal()), Client: client(),
+		Compose: func(summary, id string, from, to time.Time, pane string) string {
+			prompt, _, _, _ := taskWindow(id)
+			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
+		},
+	})
+}
+
+func cmdFlush(o opts) error {
+	done := flushPending(o)
+	if o.pretty {
+		return emit(o, map[string]any{"flushed": done, "count": len(done)})
+	}
+	if len(done) == 0 {
+		fmt.Println("дожимать нечего: либо всё доставлено, либо разговоры закрыты")
+		return nil
+	}
+	for _, f := range done {
+		status := "не ушло"
+		if f.Ok {
+			status = "доставлено"
+		}
+		fmt.Printf("  %s · стадия %s · %s → %s %s\n", f.Task, f.Stage, f.Target, status, f.Reason)
+	}
+	return nil
+}
+
 // cmdUndelivered — канал вытягивания: всё, что до ведущего не дошло, вместе с
 // причиной и полным текстом отчёта.
 //
@@ -1351,6 +1395,12 @@ func taskDigest(o opts, id, prompt string, from, to time.Time, pane string) dige
 // читает построчно: ровно так пропал отчёт задачи 465a77fc.
 func cmdUndelivered(o opts) error {
 	recs, err := journal.Open(defaultJournal()).Read()
+	if err != nil {
+		return err
+	}
+	// Прежде чем показывать список, пробуем дожать: разговор мог открыться.
+	flushPending(o)
+	recs, err = journal.Open(defaultJournal()).Read()
 	if err != nil {
 		return err
 	}

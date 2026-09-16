@@ -28,6 +28,7 @@ claudex index             # catch the index up; --full rebuilds from scratch
 claudex tasks             # journal of everything delegated
 claudex digest <task-id>  # what actually happened during one delegated task
 claudex undelivered       # reports that never reached the leader, with the cause
+claudex flush             # push those into conversations that have since reopened
 ```
 
 The index is incremental: a catch-up costs seconds, a full rebuild about half a
@@ -514,6 +515,43 @@ Two limits worth knowing. A cass query costs 20–22 seconds on this archive
 defaults to 30. And `claudex search <target>` — the per-conversation search — is
 still FTS5 only: cass has no session filter, and inside one conversation lexical
 is both adequate and instant.
+
+### A closed conversation delays the report; it does not lose it
+
+Codex conversations close and reopen under the **same** thread id — measured: one
+thread changed state four times in a day. So a report that could not be delivered
+is not dead, it is early.
+
+Undelivered reports are retried on **the next claudex call you make**. There is no
+watcher and nothing to start: the retry happens inside a command you were running
+anyway, is capped at a handful of reports, and never blocks your input.
+
+```bash
+claudex flush         # force it now, and see what moved
+claudex undelivered   # what is still waiting, with cause and full text
+```
+
+`claudex delegate` flushes first, which is the useful moment: the conversation
+creating a task is alive by definition, so anything queued for it goes out then.
+
+Three rules the retry obeys:
+
+- **only the recorded address.** A neighbouring live conversation is never
+  substituted — it never asked the question, and an answer there is noise that
+  looks like a reply;
+- **panes are left alone.** A pane changes conversation within the hour, so its
+  binding must be re-checked at delivery time, not replayed from the journal;
+- **once.** A report that landed is not sent again; the human popup is shown once
+  per stage, no matter how many retries happen.
+
+The binding itself is recorded when the task is created: `target_state` and
+`target_seen` in the journal say what the address was and when that was checked.
+Without them "the thread was alive" is just a claim.
+
+**The limit worth knowing:** Codex offers no way to ask "which conversation am I".
+`CODEX_THREAD_ID` is the only self-identification available, so ClauDex verifies
+that it is live and records the evidence — but it cannot detect an id inherited
+from a *different* conversation that also happens to be alive.
 
 ## Driving a session
 

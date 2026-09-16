@@ -54,7 +54,13 @@ type Record struct {
 	ClaimedTask string `json:"claimed_task,omitempty"`
 	// Correction — почему идентификатор пришлось исправить.
 	Correction string `json:"correction,omitempty"`
-	Attempt    int    `json:"attempt,omitempty"`
+	// TargetState и TargetSeen — доказательство привязки: чем был адрес в
+	// момент заведения поручения и когда это проверяли. Без них «тред был жив»
+	// остаётся словами: к моменту отчёта разговор успевает закрыться, и по
+	// журналу не отличить недосмотр от честной смены состояния.
+	TargetState string    `json:"target_state,omitempty"`
+	TargetSeen  time.Time `json:"target_seen,omitempty"`
+	Attempt     int       `json:"attempt,omitempty"`
 }
 
 type Journal struct {
