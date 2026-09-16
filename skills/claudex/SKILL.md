@@ -29,6 +29,7 @@ claudex tasks             # journal of everything delegated
 claudex digest <task-id>  # what actually happened during one delegated task
 claudex undelivered       # reports that never reached the leader, with the cause
 claudex flush             # push those into conversations that have since reopened
+claudex reconcile         # collect a report for a task that finished without `done`
 ```
 
 The index is incremental: a catch-up costs seconds, a full rebuild about half a
@@ -552,6 +553,45 @@ Without them "the thread was alive" is just a claim.
 `CODEX_THREAD_ID` is the only self-identification available, so ClauDex verifies
 that it is live and records the evidence — but it cannot detect an id inherited
 from a *different* conversation that also happens to be alive.
+
+### A task that finishes without calling `done`
+
+It happens: the work is finished, the final message is written on screen, and
+`claudex done` is never called. The journal then holds `started` and `finished`
+and nothing else, and the leader learns nothing — observed on task `260031f8`,
+which sat silent for two hours with its result visible on the pane the whole time.
+
+ClauDex now collects that report itself, from the **live** pane screen:
+
+```bash
+claudex reconcile      # collect what silent tasks left on screen
+```
+
+`delegate` and `undelivered` run it for you.
+
+It is deliberately hard to satisfy. Before anything is collected, four things must
+be true, and each failure is recorded with its own cause rather than guessed past:
+
+- the executor conversation recorded at delegation is **still the one in the pane**
+  (`executor_conversation_changed` otherwise) — a pane outlives the agent in it,
+  so "the pane is free" proves nothing;
+- the pane is `idle` or `done`, not `working` or `blocked` (`executor_busy`);
+- **no later task was given to that pane** (`pane_took_later_task`) — otherwise the
+  screen shows somebody else's ending;
+- there is actually something on screen (`no_final_output`).
+
+The source is the live herdr screen and only that. The cass index lags by hours,
+and substituting yesterday's text for a final report is worse than substituting
+nothing.
+
+A collected report is marked `synthetic` in the journal and gets no privileges: it
+goes through the same address check, the same inbox, the same deduplication as a
+report the task wrote itself. If the conversation is closed, it waits in
+`claudex undelivered` like any other.
+
+**A real limit:** tasks delegated before this version have no recorded executor
+binding, so they cannot be reconciled after the fact — including `260031f8`
+itself. `claudex reconcile` will say so instead of inventing a report.
 
 ## Driving a session
 

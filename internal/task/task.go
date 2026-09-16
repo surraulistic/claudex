@@ -120,6 +120,7 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 		rec.TargetState = codex.State(codex.Home(), wake.Target)
 		rec.TargetSeen = time.Now()
 	}
+	rec.PaneSession = sessionOf(o.Client, o.Pane)
 	o.Journal.Append(rec)
 
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)

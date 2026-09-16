@@ -58,6 +58,14 @@ type Record struct {
 	// момент заведения поручения и когда это проверяли. Без них «тред был жив»
 	// остаётся словами: к моменту отчёта разговор успевает закрыться, и по
 	// журналу не отличить недосмотр от честной смены состояния.
+	// PaneSession — разговор, который шёл в панели-исполнителе в момент
+	// заведения. Без него нельзя доказать, что закончил именно он: панель
+	// переживает смену агента, и «панель освободилась» доказательством не
+	// является.
+	PaneSession string `json:"pane_session,omitempty"`
+	// Synthetic — отчёт собран ClauDex из живого экрана панели, а не назван
+	// самой задачей. Помечается, потому что доверие к нему другое.
+	Synthetic   bool      `json:"synthetic,omitempty"`
 	TargetState string    `json:"target_state,omitempty"`
 	TargetSeen  time.Time `json:"target_seen,omitempty"`
 	Attempt     int       `json:"attempt,omitempty"`

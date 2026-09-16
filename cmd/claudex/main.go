@@ -158,6 +158,8 @@ func run() error {
 		return cmdUndelivered(o)
 	case "flush":
 		return cmdFlush(o)
+	case "reconcile":
+		return cmdReconcile(o)
 	case "digest":
 		if len(args) < 2 {
 			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
@@ -222,6 +224,7 @@ func usage() {
   claudex digest <id>                    ход работы по поручению: что делалось
   claudex undelivered                    отчёты, не дошедшие до ведущего, целиком
   claudex flush                          дослать зависшее в открывшиеся разговоры
+  claudex reconcile                      собрать отчёт за задачу, закончившую молча
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks [--task <id>]            журнал поручений; с --task — одно
 
@@ -1092,9 +1095,11 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	if err := wakeIsPossible(j, o); err != nil {
 		return err
 	}
-	// Заведение поручения — лучший момент для дожима: разговор, который его
-	// затевает, сейчас заведомо жив, и зависшие в него отчёты уйдут прямо
-	// сейчас, не дожидаясь, пока кто-то вспомнит про claudex flush.
+	// Заведение поручения — лучший момент и для дожима, и для сборки: разговор,
+	// который его затевает, сейчас заведомо жив, а панели, закончившие молча,
+	// уже видны. Обе ветки отказывают, пока привязка не доказана, поэтому
+	// вызывать их здесь безопасно.
+	reconcilePending(o)
 	flushPending(o)
 
 	if o.noWait {
@@ -1369,6 +1374,48 @@ func flushPending(o opts) []task.Flushed {
 	})
 }
 
+// reconcilePending собирает отчёты за задачи, закончившие молча.
+//
+// Ошибки не поднимаются по той же причине, что и у дожима: это побочная
+// любезность, и валить из-за неё основную команду нельзя.
+func reconcilePending(o opts) []task.Reconciled {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	c := client()
+	return task.Reconcile(ctx, task.ReconcileOptions{
+		Journal: journal.Open(defaultJournal()), Client: c,
+		Read: func(pane string, lines int) (string, error) {
+			return c.Read(pane, "recent", lines)
+		},
+		Compose: func(summary, id string, from, to time.Time, pane string) string {
+			prompt, _, _, _ := taskWindow(id)
+			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
+		},
+	})
+}
+
+func cmdReconcile(o opts) error {
+	got := reconcilePending(o)
+	if o.pretty {
+		return emit(o, map[string]any{"reconciled": got, "count": len(got)})
+	}
+	if len(got) == 0 {
+		fmt.Println("молчаливых поручений нет")
+		return nil
+	}
+	for _, r := range got {
+		switch {
+		case r.Delivered:
+			fmt.Printf("  %s (%s): отчёт собран с экрана и доставлен\n", r.Task, r.Pane)
+		case r.Synthetic:
+			fmt.Printf("  %s (%s): отчёт собран, но не доставлен — %s\n", r.Task, r.Pane, r.Reason)
+		default:
+			fmt.Printf("  %s (%s): не собран — %s\n", r.Task, r.Pane, r.Reason)
+		}
+	}
+	return nil
+}
+
 func cmdFlush(o opts) error {
 	done := flushPending(o)
 	if o.pretty {
@@ -1398,7 +1445,9 @@ func cmdUndelivered(o opts) error {
 	if err != nil {
 		return err
 	}
-	// Прежде чем показывать список, пробуем дожать: разговор мог открыться.
+	// Прежде чем показывать список, пробуем собрать и дожать: панель могла
+	// закончить молча, а разговор — открыться.
+	reconcilePending(o)
 	flushPending(o)
 	recs, err = journal.Open(defaultJournal()).Read()
 	if err != nil {
