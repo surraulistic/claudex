@@ -4,6 +4,10 @@
 // Подписка на статус требует pane_id, поэтому набор подписок привязан к списку
 // панелей, а появление новой заставляет переподписаться — по живому соединению
 // добавить подписку нельзя, herdr берёт один запрос на соединение.
+//
+// Отсюда же порядок «снимок, подписка, снимок ещё раз»: подписаться прежде
+// снимка нечем, а с herdr 0.9.0 подписка не повторяет накопленные события, и
+// промежуток между ними иначе теряется целиком.
 package watch
 
 import (
@@ -91,6 +95,26 @@ func (w *Watcher) session(ctx context.Context) error {
 		return err
 	}
 	defer sub.Close()
+
+	// Второй снимок закрывает окно между первым и подпиской.
+	//
+	// До herdr 0.9.0 окна не было: новый подписчик получал накопленные события,
+	// и пропущенное доезжало повтором. С 0.9.0 подписка начинается с живых
+	// событий (#1270), и всё, что случилось в этом промежутке, не приходит
+	// никогда. Для нас это панель, закончившая работу именно тогда: событие не
+	// придёт, и поручение додержится до срока.
+	//
+	// Подписаться раньше снимка нельзя: подписка на статус требует pane_id, а
+	// список панелей берётся из снимка. Поэтому окно не убирается, а
+	// перечитывается.
+	if agents, err := w.client.Agents(); err == nil {
+		w.absorb(agents)
+		// Панель, созданная в окне, осталась бы без подписки на свой статус:
+		// событие о её появлении тоже потеряно.
+		if appeared(panes, w.state.Panes()) {
+			return errResubscribe
+		}
+	}
 	w.markReady()
 
 	tick := time.NewTicker(w.opts.Reconcile)
@@ -146,6 +170,20 @@ func (w *Watcher) absorb(agents []herdr.Agent) {
 		}
 		w.notify(Change{PaneID: id, From: before[id], To: p.Status, Pane: p, ByReconcile: true})
 	}
+}
+
+// appeared — появилась ли панель, которой не было в наборе подписок.
+func appeared(before, after []state.Pane) bool {
+	known := make(map[string]bool, len(before))
+	for _, p := range before {
+		known[p.ID] = true
+	}
+	for _, p := range after {
+		if !known[p.ID] {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Watcher) notify(c Change) {

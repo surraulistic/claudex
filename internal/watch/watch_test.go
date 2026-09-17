@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -236,5 +237,52 @@ func TestUnreachableHerdrIsRetried(t *testing.T) {
 	}
 	if n < 3 {
 		t.Fatalf("попытки повторялись, запросов agent.list: %d", n)
+	}
+}
+
+func TestStatusChangeDuringTheSubscribeWindowIsNotLost(t *testing.T) {
+	// С herdr 0.9.0 подписка начинается с живых событий и накопленного не
+	// повторяет (#1270). Всё, что случилось между снимком и подпиской, иначе
+	// теряется навсегда — а это ровно панель, закончившая работу в этот миг.
+	f := herdrtest.Start(t)
+	f.Reply("agent.list", agentList([2]string{"wE:p1", "working"}))
+	f.Delay("events.subscribe", 300*time.Millisecond)
+
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		f.Reply("agent.list", agentList([2]string{"wE:p1", "idle"}))
+	}()
+
+	// Сверка отключена часовым интервалом: увидеть смену можно только вторым
+	// снимком, и больше ничем.
+	_, rec := start(t, f, Options{Reconcile: time.Hour})
+	got := rec.wait(t, 1)
+
+	if got[0].PaneID != "wE:p1" || got[0].From != "working" || got[0].To != "idle" {
+		t.Fatalf("смена в окне подписки замечена, получено %+v", got[0])
+	}
+	if !got[0].ByReconcile {
+		t.Fatal("найдено снимком, а не событием — так и должно быть помечено")
+	}
+}
+
+func TestPaneBornInTheSubscribeWindowGetsItsSubscription(t *testing.T) {
+	// Панель, появившаяся в окне, осталась бы без подписки на свой статус:
+	// событие о её рождении тоже потеряно.
+	f := herdrtest.Start(t)
+	f.Reply("agent.list", agentList([2]string{"wE:p1", "idle"}))
+	f.Delay("events.subscribe", 300*time.Millisecond)
+
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		f.Reply("agent.list",
+			agentList([2]string{"wE:p1", "idle"}, [2]string{"wE:p2", "working"}))
+	}()
+
+	start(t, f, Options{Reconcile: time.Hour})
+
+	req := f.LastRequest("events.subscribe")
+	if !strings.Contains(fmt.Sprint(req), "wE:p2") {
+		t.Fatalf("переподписались с новой панелью, получено %v", req)
 	}
 }
