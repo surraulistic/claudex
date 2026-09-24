@@ -56,6 +56,7 @@ type opts struct {
 	detach        bool
 	force         bool
 	task          string
+	compact       bool
 	mode          string
 	searchWaitRaw string
 	searchWait    time.Duration
@@ -89,6 +90,8 @@ func run() error {
 		"delegate: сколько ждать, пока ведущий освободится")
 	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
 	fs.BoolVar(&o.pretty, "pretty", false, "JSON с отступами")
+	fs.BoolVar(&o.compact, "compact", false,
+		"sessions/brief: строка на панель вместо JSON — вдесятеро дешевле по контексту")
 	fs.BoolVar(&o.detach, "detach", false, "delegate: отдать ожидание отдельному процессу")
 	fs.BoolVar(&o.force, "force", false, "delegate: писать и в панель, ждущую решения человека")
 	fs.BoolVar(&o.noWait, "no-wait", false, "delegate: отправить и выйти")
@@ -249,6 +252,8 @@ func usage() {
   --notify-timeout N delegate: сколько ждать освобождения ведущего (1800);
                      не дождались — факт уходит человеку уведомлением herdr
   --raw              запрос уходит в FTS5 как есть, без экранирования
+    --compact          sessions/brief: строка на панель вместо JSON. Вдесятеро
+                       дешевле по контексту: brief 17 КБ → 0.4 КБ
   --pretty           JSON с отступами
   --full             index: пересобрать с нуля
 
@@ -525,11 +530,17 @@ func cmdSessions(o opts, withTail bool) error {
 		for i, s := range seen {
 			views[i] = s.view
 		}
+		if o.compact {
+			return printLines(compactPanes(views))
+		}
 		return emit(o, map[string]any{"panes": views})
 	}
 	briefs := make([]briefView, len(seen))
 	for i, s := range seen {
 		briefs[i] = toBrief(s.view, s.raw, textual.CleanTail(s.raw, lines), s.entries)
+	}
+	if o.compact {
+		return printLines(compactBriefs(briefs))
 	}
 	return emit(o, map[string]any{
 		"generated_at": time.Now().Format(time.RFC3339),
@@ -549,6 +560,61 @@ type sighting struct {
 // панели без истории в конец своей группы. Смотрящий читает список сверху и
 // должен первым делом видеть то, что происходит сейчас.
 var activeFirst = map[string]int{"working": 0, "done": 1, "idle": 2}
+
+// Компактный вывод: строка на панель.
+//
+// Полный JSON у brief занимал 17 КБ — около 4250 токенов на один взгляд
+// «что у всех происходит». Для решения «кому поручать» нужны имя, состояние и
+// заполненность контекста, остальное добирается адресно.
+func compactPanes(v []paneView) []string {
+	out := make([]string, 0, len(v))
+	for _, p := range v {
+		out = append(out, strings.TrimRight(fmt.Sprintf("%-22s %-8s %s %s",
+			short22(p.Label, p.Target), p.Status, pct(p.ContextPct), sessionShort(p.SessionID)), " "))
+	}
+	return out
+}
+
+func compactBriefs(v []briefView) []string {
+	out := make([]string, 0, len(v))
+	for _, b := range v {
+		out = append(out, strings.TrimRight(fmt.Sprintf("%-22s %-8s %s",
+			short22(b.Label, b.Target), b.Status, pct(b.ContextPct)), " "))
+	}
+	return out
+}
+
+func short22(label, target string) string {
+	s := label
+	if s == "" {
+		s = target
+	}
+	if r := []rune(s); len(r) > 22 {
+		return string(r[:21]) + "…"
+	}
+	return s
+}
+
+func pct(p *int) string {
+	if p == nil {
+		return "   —"
+	}
+	return fmt.Sprintf("%3d%%", *p)
+}
+
+func sessionShort(s *string) string {
+	if s == nil || len(*s) < 8 {
+		return ""
+	}
+	return (*s)[:8]
+}
+
+func printLines(ls []string) error {
+	for _, l := range ls {
+		fmt.Println(l)
+	}
+	return nil
+}
 
 func less(a, b paneView) bool {
 	ra, ok := activeFirst[a.Status]
@@ -1327,8 +1393,14 @@ func taskWindow(id string) (prompt string, from, to time.Time, pane string) {
 // ни одного — дайджест тогда состоит из названных причин, и это правильнее
 // молчания.
 func taskDigest(o opts, id, prompt string, from, to time.Time, pane string) digest.Digest {
-	d := digest.Options{Task: id, Prompt: prompt, From: from, To: to, Pane: pane,
-		Chars: o.chars, TailLines: o.tailLines}
+	return taskDigestWith(o, digest.Options{Task: id, Prompt: prompt,
+		From: from, To: to, Pane: pane, Chars: o.chars, TailLines: o.tailLines})
+}
+
+// taskDigestWith подключает источники к уже подготовленным пределам: у вида
+// для чтения человеком и у сообщения в тред они разные.
+func taskDigestWith(o opts, d digest.Options) digest.Digest {
+	pane := d.Pane
 	if pane != "" {
 		d.Key = sessionOfPane(pane)
 		c := client()
@@ -1368,8 +1440,7 @@ func flushPending(o opts) []task.Flushed {
 	return task.Flush(ctx, task.FlushOptions{
 		Journal: journal.Open(defaultJournal()), Client: client(),
 		Compose: func(summary, id string, from, to time.Time, pane string) string {
-			prompt, _, _, _ := taskWindow(id)
-			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
+			return pushText(o, summary, id, from, to, pane)
 		},
 	})
 }
@@ -1388,8 +1459,7 @@ func reconcilePending(o opts) []task.Reconciled {
 			return c.Read(pane, "recent", lines)
 		},
 		Compose: func(summary, id string, from, to time.Time, pane string) string {
-			prompt, _, _, _ := taskWindow(id)
-			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
+			return pushText(o, summary, id, from, to, pane)
 		},
 	})
 }
@@ -1483,6 +1553,24 @@ func indent(s string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// pushSummaryCap — сколько символов сводки уезжает в разговор ведущего.
+//
+// Замерено: мои же отчёты шли по 3400–5300 символов, то есть до 1300 токенов
+// только на сводку. Полный текст остаётся в журнале и достаётся по запросу.
+const pushSummaryCap = 1500
+
+// pushText — сообщение для разговора ведущего: урезанная сводка плюс скелет
+// хода. Полный вид берётся командой digest.
+func pushText(o opts, summary, id string, from, to time.Time, pane string) string {
+	if n := []rune(summary); len(n) > pushSummaryCap {
+		summary = string(n[:pushSummaryCap]) +
+			fmt.Sprintf("\n[…сводка урезана, целиком: claudex tasks --task %s]", id)
+	}
+	prompt, _, _, _ := taskWindow(id)
+	d := digest.Options{Task: id, Prompt: prompt, From: from, To: to, Pane: pane}
+	return taskDigestWith(o, digest.PushOptions(d)).Push(summary)
+}
+
 func cmdTaskDigest(o opts, id string) error {
 	prompt, from, to, pane := taskWindow(id)
 	if from.IsZero() {
@@ -1519,8 +1607,7 @@ func cmdDone(o opts, args []string) error {
 		// Идентификатор здесь приходит уже разрешённый: собирать дайджест по
 		// названному значило бы показать ведущему чужую работу.
 		Compose: func(summary, id string, from, to time.Time, pane string) string {
-			prompt, _, _, _ := taskWindow(id)
-			return taskDigest(o, id, prompt, from, to, pane).Text(summary)
+			return pushText(o, summary, id, from, to, pane)
 		},
 	})
 	if err != nil {

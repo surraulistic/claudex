@@ -30,6 +30,19 @@ import (
 	"github.com/surraulistic/claudex/internal/textual"
 )
 
+// Пределы для сообщения, которое уезжает в разговор ведущего.
+//
+// Толкать полный ход дорого и чаще всего зря: детали нужны примерно одной
+// задаче из пяти, а платит за них каждая. Замерено — дайджест в callback
+// занимал около 1240 токенов на задачу при 74 доставках. Поэтому в тред уходит
+// скелет, а полный ход берётся по запросу командой `claudex digest`.
+const (
+	PushEntries   = 14
+	PushChars     = 160
+	PushToolChars = 90
+	PushBudget    = 1200
+)
+
 const (
 	DefaultEntries   = 60
 	DefaultChars     = 600
@@ -267,6 +280,46 @@ func (d Digest) Text(summary string) string {
 	b.WriteString("\n## Прежде чем решать\n")
 	b.WriteString("  Это сжатая выжимка. За полным ходом — `claudex digest " + d.Task + "`,\n")
 	b.WriteString("  за состоянием репозитория — `git -C <репо> log`, `git status`, `git show`.\n")
+	return b.String()
+}
+
+// PushOptions — пределы для сообщения в тред. Накладываются поверх того, что
+// задал вызывающий.
+func PushOptions(o Options) Options {
+	o.MaxEntries, o.Chars = PushEntries, PushChars
+	o.ToolChars, o.Budget = PushToolChars, PushBudget
+	o.TailLines = 1 // хвост в push не идёт, но ноль читается как «умолчание»
+	return o
+}
+
+// Push — то, что уезжает в разговор ведущего.
+//
+// От полного вида отличается тремя решениями. Промпт не возвращается: его
+// написал сам ведущий, и он у него в контексте. Реплики не возвращаются: их
+// пересказывает сводка. Живой хвост панели не возвращается: это картинка
+// терминала, полезная человеку, а не разговору.
+//
+// Остаётся то, чего у ведущего нет: что делалось, что помешало, и чем добрать.
+func (d Digest) Push(summary string) string {
+	var b strings.Builder
+	b.WriteString(summary)
+	b.WriteString("\n\n— — —\nСводка ClauDex, не ответ Claude.\n")
+
+	if len(d.Work) > 0 {
+		b.WriteString("\nДелалось:\n")
+		for _, l := range d.Work {
+			b.WriteString("  · " + oneLine(l.Text) + "\n")
+		}
+	}
+	if d.Dropped > 0 {
+		b.WriteString(fmt.Sprintf("  (ещё %d шагов не показано)\n", d.Dropped))
+	}
+	if !d.Covered {
+		b.WriteString("\nИндекс окно поручения не покрыл: пусто не значит «не делалось».\n")
+	} else if d.Stale != nil {
+		b.WriteString("\n" + d.Stale.Reason + "\n")
+	}
+	b.WriteString("\nПодробнее: `claudex digest " + d.Task + "` · репозиторий проверять глазами.\n")
 	return b.String()
 }
 

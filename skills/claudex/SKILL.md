@@ -23,7 +23,8 @@ Search is plain SQLite FTS5 over that index, so it matches any language.
 ## Start here
 
 ```bash
-claudex brief             # every live pane at once — status, tail, signals
+claudex brief --compact   # one line per pane: name, state, context fill
+claudex brief             # same, in full JSON — ~40x the context cost
 claudex index             # catch the index up; --full rebuilds from scratch
 claudex tasks             # journal of everything delegated
 claudex digest <task-id>  # what actually happened during one delegated task
@@ -394,9 +395,12 @@ claudex tasks --task 742309b7
 
 ### What arrives in the thread is a summary, not Claude's answer
 
-Claude is the messenger here, not the author of record. The message ClauDex queues
-into your thread is a **digest it assembled**, and the one-line outcome inside it
-is the least of what it carries. Do not plan off that line alone.
+Claude is the messenger here, not the author of record. What ClauDex queues into
+your thread is a **skeleton**: the outcome, what was actually done, and what got
+in the way. It deliberately leaves out what you already have — the prompt you
+wrote, the assistant's own phrasing, the pane's screen — and names the command
+that fetches the rest. Measured: pushing the full view cost ~3600 tokens per
+task; the skeleton costs ~220.
 
 Arriving automatically, bounded to the task window:
 

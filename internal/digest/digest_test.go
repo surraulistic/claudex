@@ -230,3 +230,80 @@ func hasNote(d Digest, sub string) bool {
 	}
 	return false
 }
+
+// bulky — дайджест на длинной задаче: сорок шагов, длинный промпт.
+func bulky(t *testing.T, o Options) Digest {
+	t.Helper()
+	var rows []store.Entry
+	for i := 0; i < 40; i++ {
+		rows = append(rows, entry(start.Add(time.Duration(i)*time.Second), "assistant",
+			"[Tool: Bash - "+strings.Repeat("проверка сборки и тестов ", 6)+"]", i%2 == 0))
+	}
+	o.Task, o.Key = "abc12345", "к"
+	o.From, o.To, o.Now = start, stop, stop
+	o.Prompt = strings.Repeat("длинное поручение ", 40)
+	o.LookupHead = func(string) (Head, error) { return Head{LastActivity: stop}, nil }
+	o.Entries = func(string, int64, int64, int, int) ([]store.Entry, error) { return rows, nil }
+	return Build(o)
+}
+
+func TestPushIsFarCheaperThanTheReadableView(t *testing.T) {
+	// Ради этого push и заведён: полный вид уезжал в разговор ведущего на
+	// каждую задачу, а нужен примерно одной из пяти.
+	summary := strings.Repeat("подробная сводка ", 60)
+	full := bulky(t, Options{}).Text(summary)
+	push := bulky(t, PushOptions(Options{})).Push(summary)
+
+	if len(push) >= len(full) {
+		t.Fatalf("push короче полного: push=%d full=%d", len(push), len(full))
+	}
+	// Сводка входит целиком в оба, поэтому сравниваем то, что добавлено сверху.
+	addFull, addPush := len(full)-len(summary), len(push)-len(summary)
+	t.Logf("полный %d симв (+%d сверх сводки), push %d симв (+%d)",
+		len(full), addFull, len(push), addPush)
+	if addPush*3 > addFull {
+		t.Fatalf("push добавляет втрое меньше: сверху push=%d full=%d", addPush, addFull)
+	}
+	if addPush > PushBudget+600 {
+		t.Fatalf("push держится в пределах бюджета, добавлено %d", addPush)
+	}
+}
+
+func TestPushDropsWhatTheLeaderAlreadyHas(t *testing.T) {
+	// Промпт написал сам ведущий, реплики пересказывает сводка, живой хвост —
+	// картинка терминала для человека. Всё это обратно не возвращается.
+	d := bulky(t, PushOptions(Options{Pane: "wE:p1", Tail: func(string, int) ([]string, error) {
+		return []string{"хвост терминала"}, nil
+	}}))
+	push := d.Push("сводка")
+
+	if strings.Contains(push, "длинное поручение") {
+		t.Fatal("промпт обратно не возвращается")
+	}
+	if strings.Contains(push, "хвост терминала") {
+		t.Fatal("живой хвост в тред не уезжает")
+	}
+	if !strings.Contains(push, "claudex digest abc12345") {
+		t.Fatal("сказано, чем добрать подробности")
+	}
+}
+
+func TestPushStillCarriesWhatOnlyItKnows(t *testing.T) {
+	// Урезание не должно съесть то, чего у ведущего нет: что делалось и что
+	// помешало.
+	d := bulky(t, PushOptions(Options{}))
+	push := d.Push("сводка")
+	if !strings.Contains(push, "Делалось") {
+		t.Fatalf("ход работы остаётся:\n%s", push)
+	}
+	if d.Dropped > 0 && !strings.Contains(push, "не показано") {
+		t.Fatal("о неполноте сказано")
+	}
+}
+
+func TestPushSaysWhenTheIndexMissedTheWindow(t *testing.T) {
+	d, _ := probe(t, Head{LastActivity: start.Add(-2 * time.Hour)}, nil, nil, PushOptions(Options{}))
+	if !strings.Contains(d.Push("сводка"), "не покрыл") {
+		t.Fatal("пустота объяснена и в коротком виде")
+	}
+}
