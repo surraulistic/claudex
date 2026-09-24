@@ -238,3 +238,42 @@ func TestFramingIsStrippedNotShown(t *testing.T) {
 		t.Fatalf("пустой хвост — пустая строка, получено %q", got)
 	}
 }
+
+func ptr(s string) *string { return &s }
+
+func TestDoingNowPrefersStructuredSignalsOverTheScreen(t *testing.T) {
+	// Экран — картинка терминала, и последняя строка на нём бывает чем угодно.
+	// Разобранные поля достовернее.
+	b := briefView{Tail: []string{"мусор с экрана"}}
+	b.Signals.LastUserPrompt = ptr("почини сборку")
+	if got := doingNow(b); got != "« почини сборку" {
+		t.Fatalf("просьба человека важнее экрана, получено %q", got)
+	}
+	b.Signals.CurrentToolCall = ptr("Running tests")
+	if got := doingNow(b); got != "Running tests" {
+		t.Fatalf("текущий вызов важнее просьбы, получено %q", got)
+	}
+}
+
+func TestHarnessWrappersAreNotPassedOffAsIntent(t *testing.T) {
+	// В last_user_prompt попадают вставки обвязки: пересланное сообщение чужой
+	// сессии, служебный тег. Показать такое как занятие панели — соврать.
+	for _, noise := range []string{
+		"<local-command-caveat>Caveat: …",
+		"Another Claude session sent a message: …",
+		"system-reminder: …",
+	} {
+		b := briefView{Tail: []string{"настоящий экран"}}
+		b.Signals.LastUserPrompt = ptr(noise)
+		if got := doingNow(b); got != "настоящий экран" {
+			t.Fatalf("обвязка отсеяна и взят экран, для %q получено %q", noise, got)
+		}
+	}
+}
+
+func TestDoingNowFallsBackToTheScreenWhenNothingIsParsed(t *testing.T) {
+	b := briefView{Tail: []string{"── license ──"}}
+	if got := doingNow(b); got != "license" {
+		t.Fatalf("экран остаётся запасным источником, получено %q", got)
+	}
+}

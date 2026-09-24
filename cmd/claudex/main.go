@@ -159,6 +159,8 @@ func run() error {
 		return cmdDone(o, args[1:])
 	case "undelivered":
 		return cmdUndelivered(o)
+	case "schema":
+		return cmdSchema()
 	case "flush":
 		return cmdFlush(o)
 	case "reconcile":
@@ -227,6 +229,7 @@ func usage() {
   claudex digest <id>                    ход работы по поручению: что делалось
   claudex undelivered                    отчёты, не дошедшие до ведущего, целиком
   claudex flush                          дослать зависшее в открывшиеся разговоры
+  claudex schema                         форма выдачи и готовые запросы jq
   claudex reconcile                      собрать отчёт за задачу, закончившую молча
   claudex index [--full]                 пересобрать индекс из базы cass
   claudex tasks [--task <id>]            журнал поручений; с --task — одно
@@ -588,13 +591,60 @@ func unframe(s string) string {
 	})
 }
 
+// Без занятия панели brief вырождается в список — то же, что sessions. Вся его
+// ценность в том, чем панель занята прямо сейчас.
 func compactBriefs(v []briefView) []string {
 	out := make([]string, 0, len(v))
 	for _, b := range v {
 		out = append(out, strings.TrimRight(fmt.Sprintf("%-22s %-8s %s  %s",
-			short22(b.Label, b.Target), b.Status, pct(b.ContextPct), lastLine(b.Tail)), " "))
+			short22(b.Label, b.Target), b.Status, pct(b.ContextPct), doingNow(b)), " "))
 	}
 	return out
+}
+
+// doingNow — чем панель занята, по убыванию достоверности.
+//
+// Текущий вызов инструмента и последняя просьба человека разобраны из истории:
+// это поля, а не догадка. Экран берётся последним — он картинка терминала, и
+// последняя строка на нём бывает чем угодно, от рамки до счётчика токенов.
+func doingNow(b briefView) string {
+	if s := clip(b.Signals.CurrentToolCall); s != "" {
+		return s
+	}
+	if s := clip(b.Signals.LastUserPrompt); s != "" && !machineSaid(s) {
+		return "« " + s
+	}
+	return lastLine(b.Tail)
+}
+
+// machineSaid — просьба пришла не от человека, а от обвязки: пересланное
+// сообщение другой сессии, вставка харнесса, служебный тег. Показывать такое
+// как «чем занята панель» значит врать: панель занята не этим.
+func machineSaid(s string) bool {
+	if strings.HasPrefix(s, "<") {
+		return true
+	}
+	for _, p := range []string{
+		"Another Claude session sent",
+		"Caveat: The messages below",
+		"system-reminder",
+	} {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func clip(p *string) string {
+	if p == nil {
+		return ""
+	}
+	s := strings.Join(strings.Fields(unframe(*p)), " ")
+	if r := []rune(s); len(r) > 64 {
+		return string(r[:63]) + "…"
+	}
+	return s
 }
 
 // lastLine — последняя содержательная строка экрана, обрезанная до одной строки
@@ -1513,6 +1563,54 @@ func cmdReconcile(o opts) error {
 			fmt.Printf("  %s (%s): не собран — %s\n", r.Task, r.Pane, r.Reason)
 		}
 	}
+	return nil
+}
+
+// cmdSchema печатает форму выдачи и готовые запросы к ней.
+//
+// Лежит отдельной командой намеренно: схема нужна редко, а в постоянной
+// инструкции стоила бы контекста каждой сессии. Готовые запросы важнее самой
+// схемы — выдуманное имя поля jq возвращает пустотой без ошибки, и это читается
+// как «ничего не нашлось». Проверено: `.signals.blocked` не существует, а
+// запрос молча отдал ноль строк.
+func cmdSchema() error {
+	fmt.Print(`Форма выдачи sessions и brief (--pretty для отступов):
+
+  {"panes": [{
+     target, label, kind, alias, pane_id, status, focused, watched,
+     context_pct, limits{},
+     session_id, transcript_id, cwd, title,
+     history{transcript_id, entry_count, last_activity, stale{}},   // только brief
+     signals{mr[], tickets[], repo, last_user_prompt, current_tool_call},
+     tail[]                                                         // только brief
+  }]}
+
+  status: idle | working | blocked | done | unknown
+  context_pct: заполненность окна, null если неизвестна
+
+Готовые запросы (полный JSON в контекст не попадает — только вывод):
+
+  # кому можно поручать: свободные и с запасом контекста
+  claudex sessions --pretty | jq -r '.panes[]
+    | select(.status=="idle" and (.context_pct // 0) < 70) | .label'
+
+  # у кого контекст на исходе
+  claudex sessions --pretty | jq -r '.panes[]
+    | select((.context_pct // 0) >= 80) | "\(.label) \(.context_pct)%"'
+
+  # чем заняты работающие
+  claudex brief --pretty | jq -r '.panes[] | select(.status=="working")
+    | "\(.label): \(.signals.current_tool_call // .signals.last_user_prompt // "—")"'
+
+  # где какой репозиторий
+  claudex sessions --pretty | jq -r '.panes[] | "\(.label)\t\(.cwd)"'
+
+  # история отстала от жизни
+  claudex brief --pretty | jq -r '.panes[] | select(.history.stale != null)
+    | "\(.label): \(.history.stale.reason)"'
+
+Дешевле всего: claudex brief --compact — строка на панель, без конвейера.
+`)
 	return nil
 }
 

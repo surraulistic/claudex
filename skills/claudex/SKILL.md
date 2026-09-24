@@ -23,7 +23,8 @@ Search is plain SQLite FTS5 over that index, so it matches any language.
 ## Start here
 
 ```bash
-claudex brief --compact   # one line per pane: name, state, context fill
+claudex schema            # output shape + ready-made jq queries (pay only when asked)
+claudex brief --compact   # one line per pane: name, state, what it is doing
 claudex brief             # same, in full JSON — ~40x the context cost
 claudex index             # catch the index up; --full rebuilds from scratch
 claudex tasks             # journal of everything delegated
