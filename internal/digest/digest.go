@@ -288,7 +288,7 @@ func (d Digest) Text(summary string) string {
 func PushOptions(o Options) Options {
 	o.MaxEntries, o.Chars = PushEntries, PushChars
 	o.ToolChars, o.Budget = PushToolChars, PushBudget
-	o.TailLines = 1 // хвост в push не идёт, но ноль читается как «умолчание»
+	o.TailLines = 8 // пригодится, если индекс окно не покрыл
 	return o
 }
 
@@ -315,12 +315,28 @@ func (d Digest) Push(summary string) string {
 		b.WriteString(fmt.Sprintf("  (ещё %d шагов не показано)\n", d.Dropped))
 	}
 	if !d.Covered {
-		b.WriteString("\nИндекс окно поручения не покрыл: пусто не значит «не делалось».\n")
+		// Индекс до окна не дотянулся — значит живой экран панели остаётся
+		// единственным доказательством работы, и выбрасывать его тут нельзя.
+		// Иначе ведущий получает «показывать нечего» и ничего больше.
+		b.WriteString("\nИндекс окно не покрыл, с живого экрана панели:\n")
+		for _, l := range tailFew(d.Tail) {
+			b.WriteString("  " + l + "\n")
+		}
 	} else if d.Stale != nil {
 		b.WriteString("\n" + d.Stale.Reason + "\n")
 	}
 	b.WriteString("\nПодробнее: `claudex digest " + d.Task + "` · репозиторий проверять глазами.\n")
 	return b.String()
+}
+
+// tailFew — сколько строк хвоста уезжает в тред как доказательство. Берём
+// конец: там финал, а не приглашение.
+func tailFew(tail []string) []string {
+	const n = 6
+	if len(tail) > n {
+		return tail[len(tail)-n:]
+	}
+	return tail
 }
 
 func section(b *strings.Builder, title string, lines []Line) {

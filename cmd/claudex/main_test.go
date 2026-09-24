@@ -209,3 +209,32 @@ func TestWakeIsRefusedBeforeAnythingIsSent(t *testing.T) {
 		t.Fatalf("обычный запуск не требует адреса, получено %v", err)
 	}
 }
+
+func TestCompactBriefSaysWhatThePaneIsDoing(t *testing.T) {
+	// Без хвоста brief вырождается в список панелей — то же, что sessions,
+	// только без идентификатора разговора. Вся его ценность в занятии панели.
+	got := compactBriefs([]briefView{{
+		Label: "install", Status: "working",
+		Tail: []string{"старое", "── 100% context used ──", "правлю миграции"},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("строка на панель, получено %d", len(got))
+	}
+	if !strings.Contains(got[0], "правлю миграции") {
+		t.Fatalf("занятие панели видно, получено %q", got[0])
+	}
+}
+
+func TestFramingIsStrippedNotShown(t *testing.T) {
+	// Панель рисует заголовки внутри линеек, и без снятия обрамления в выдачу
+	// попадало начало линейки вместо текста.
+	if got := lastLine([]string{"──────────── license ────────────"}); got != "license" {
+		t.Fatalf("обрамление снято, получено %q", got)
+	}
+	if got := lastLine([]string{"текст", "──────────────────────"}); got != "текст" {
+		t.Fatalf("чистая линейка пропущена, получено %q", got)
+	}
+	if got := lastLine(nil); got != "" {
+		t.Fatalf("пустой хвост — пустая строка, получено %q", got)
+	}
+}

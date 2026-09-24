@@ -307,3 +307,31 @@ func TestPushSaysWhenTheIndexMissedTheWindow(t *testing.T) {
 		t.Fatal("пустота объяснена и в коротком виде")
 	}
 }
+
+func TestUncoveredPushKeepsTheOnlyEvidenceThereIs(t *testing.T) {
+	// Урезание не должно съедать доказательство. Когда индекс окно не покрыл,
+	// живой экран панели — единственное, что доказывает работу; без него
+	// ведущий получает «показывать нечего» и больше ничего.
+	d, _ := probe(t, Head{LastActivity: start.Add(-2 * time.Hour)}, nil, nil,
+		PushOptions(Options{Pane: "wE:p1",
+			Tail: func(string, int) ([]string, error) {
+				return []string{"шум", "финал работы на экране"}, nil
+			}}))
+	push := d.Push("сводка")
+
+	if !strings.Contains(push, "финал работы на экране") {
+		t.Fatalf("хвост остаётся, когда больше нечего показать:\n%s", push)
+	}
+	if !strings.Contains(push, "не покрыл") {
+		t.Fatal("сказано, почему разделы хода пусты")
+	}
+}
+
+func TestCoveredPushDoesNotPayForTheTail(t *testing.T) {
+	// А когда ход есть, хвост не нужен: это картинка терминала для человека.
+	d := bulky(t, PushOptions(Options{Pane: "wE:p1",
+		Tail: func(string, int) ([]string, error) { return []string{"хвост терминала"}, nil }}))
+	if strings.Contains(d.Push("сводка"), "хвост терминала") {
+		t.Fatal("при покрытом окне хвост в тред не уезжает")
+	}
+}

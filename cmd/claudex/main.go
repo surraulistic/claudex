@@ -575,13 +575,43 @@ func compactPanes(v []paneView) []string {
 	return out
 }
 
+// Без хвоста brief вырождается в список панелей — то же, что sessions. Вся его
+// ценность в том, чем панель занята прямо сейчас, поэтому последняя осмысленная
+// строка экрана остаётся даже в компактном виде.
+// unframe снимает с краёв строки обрамление. Панель рисует заголовки внутри
+// линеек («──── 100% context ────»), и без этого в выдачу попадает начало
+// линейки вместо текста.
+func unframe(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return r >= 0x2500 && r <= 0x257F ||
+			r == '-' || r == '=' || r == '_' || r == ' ' || r == '.' || r == '·'
+	})
+}
+
 func compactBriefs(v []briefView) []string {
 	out := make([]string, 0, len(v))
 	for _, b := range v {
-		out = append(out, strings.TrimRight(fmt.Sprintf("%-22s %-8s %s",
-			short22(b.Label, b.Target), b.Status, pct(b.ContextPct)), " "))
+		out = append(out, strings.TrimRight(fmt.Sprintf("%-22s %-8s %s  %s",
+			short22(b.Label, b.Target), b.Status, pct(b.ContextPct), lastLine(b.Tail)), " "))
 	}
 	return out
+}
+
+// lastLine — последняя содержательная строка экрана, обрезанная до одной строки
+// вывода. Рамки и разделители пропускаются: их у панели больше, чем текста, и
+// строка «─────» не говорит ничего.
+func lastLine(tail []string) string {
+	for i := len(tail) - 1; i >= 0; i-- {
+		t := unframe(tail[i])
+		if t == "" {
+			continue
+		}
+		if r := []rune(t); len(r) > 64 {
+			return string(r[:63]) + "…"
+		}
+		return t
+	}
+	return ""
 }
 
 func short22(label, target string) string {
