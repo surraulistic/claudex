@@ -29,7 +29,7 @@ claudex brief             # same, in full JSON — ~40x the context cost
 claudex index             # catch the index up; --full rebuilds from scratch
 claudex tasks             # recent journal tail; --all for the whole thing (30k tokens)
 claudex digest <task-id>  # what actually happened during one delegated task
-claudex undelivered       # what never reached the leader; --all adds the full texts
+claudex undelivered       # what never reached the leader — and what was never sent
 claudex flush             # push those into conversations that have since reopened
 claudex reconcile         # collect a report for a task that finished without `done`
 ```

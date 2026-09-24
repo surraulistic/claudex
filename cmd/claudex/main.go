@@ -58,6 +58,8 @@ type opts struct {
 	task          string
 	compact       bool
 	all           bool
+	waitFreeRaw   string
+	waitFree      time.Duration
 	mode          string
 	searchWaitRaw string
 	searchWait    time.Duration
@@ -91,6 +93,8 @@ func run() error {
 		"delegate: сколько ждать, пока ведущий освободится")
 	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
 	fs.BoolVar(&o.pretty, "pretty", false, "JSON с отступами")
+	fs.StringVar(&o.waitFreeRaw, "wait-free", "0",
+		"delegate: ждать освобождения занятой панели, секунды или 10m (0 — отказать сразу)")
 	fs.BoolVar(&o.all, "all", false,
 		"tasks/undelivered: весь журнал целиком вместо свежего хвоста")
 	fs.BoolVar(&o.compact, "compact", false,
@@ -125,6 +129,11 @@ func run() error {
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
 	o.searchWait = sw
+	wf, err := parseTimeout(o.waitFreeRaw)
+	if err != nil {
+		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	o.waitFree = wf
 
 	args := rest
 	if len(args) == 0 {
@@ -230,7 +239,8 @@ func usage() {
   claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
                                          сам сверит его с активным поручением
   claudex digest <id>                    ход работы по поручению: что делалось
-  claudex undelivered                    отчёты, не дошедшие до ведущего, целиком
+  claudex undelivered                    что не дошло: отчёты и неотправленные
+                                         поручения; --all добавляет тексты
   claudex flush                          дослать зависшее в открывшиеся разговоры
   claudex schema                         форма выдачи и готовые запросы jq
   claudex reconcile                      собрать отчёт за задачу, закончившую молча
@@ -1260,7 +1270,14 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		// Та же проверка, что и у ожидающей ветки: blocked значит, что панель
 		// ждёт решения человека, и текст уедет ответом на этот вопрос.
 		if !task.Free(a.Status) && !o.force {
-			return exitcode.Errorf(exitcode.Busy, "панель занята: %s в состоянии %q", p.ID, a.Status)
+			// Текст сохраняется даже при отказе: иначе он есть только в
+			// контексте вызывающего, и пропажу замечают по вопросу человека.
+			j.Append(journal.Record{Task: task.NewID(), Event: journal.Refused,
+				Pane: p.ID, Prompt: prompt, Outcome: "не отправлено",
+				Reason: fmt.Sprintf("%s в состоянии %q", p.ID, a.Status)})
+			return exitcode.Errorf(exitcode.Busy,
+				"панель занята: %s в состоянии %q (текст сохранён: claudex undelivered)",
+				p.ID, a.Status)
 		}
 		id := task.NewID()
 		wake := task.ResolveWake(client(), o.notify, o.notifyThread)
@@ -1303,7 +1320,7 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	defer stop()
 	res, err := task.Delegate(ctx, task.Options{
 		Client: client(), Journal: j, Pane: p.ID, Prompt: prompt,
-		Timeout: o.timeout, Force: o.force,
+		Timeout: o.timeout, Force: o.force, WaitFree: o.waitFree,
 		Notify: o.notify, NotifyThread: o.notifyThread,
 	})
 	if err != nil {
@@ -1355,7 +1372,14 @@ func detach(o opts, pane, prompt string) error {
 	}
 	// Потомок должен получить всё, что меняет его поведение: иначе он откажет
 	// в свой лог, которого никто не читает.
-	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw, "--db-path", o.db}
+	// Ждать освобождения — смысл самого флага: отсоединённый процесс для того и
+	// заводится. Без этого потомок отказывал в свой лог, а текст исчезал.
+	waitFree := o.waitFreeRaw
+	if waitFree == "" || waitFree == "0" {
+		waitFree = o.timeoutRaw
+	}
+	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw,
+		"--wait-free", waitFree, "--db-path", o.db}
 	if o.notify != "" {
 		args = append(args, "--notify", o.notify, "--notify-timeout", o.notifyWaitRaw)
 	}
@@ -1656,6 +1680,18 @@ func cmdUndelivered(o opts) error {
 		return err
 	}
 	lost := task.LostReports(recs)
+	if ref := task.RefusedTasks(recs); len(ref) > 0 {
+		fmt.Printf("Не отправлено вовсе (%d) — текст цел, панель была занята:\n", len(ref))
+		for _, r := range ref {
+			fmt.Printf("  %s %-10s %s\n", r.At[11:19], r.Pane, cutTo(oneLine(r.Reason), 52))
+			if o.all {
+				fmt.Printf("%s\n", indent(r.Prompt))
+			} else {
+				fmt.Printf("     %s\n", cutTo(oneLine(r.Prompt), 76))
+			}
+		}
+		fmt.Println()
+	}
 	if o.pretty {
 		return emit(o, map[string]any{"undelivered": lost, "count": len(lost)})
 	}

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +61,10 @@ type Options struct {
 	// Force отправляет задание панели, которая ждёт решения человека. Осознанно
 	// и только по прямой просьбе.
 	Force bool
+	// WaitFree — сколько ждать, пока занятая панель освободится, вместо отказа.
+	// Ноль значит «не ждать». Нужен отсоединённому наблюдателю: он для того и
+	// заводится, чтобы ждать, и отказ у него уходит в лог, которого не читают.
+	WaitFree time.Duration
 	// Notify — панель, которую будить по завершении. Пусто значит «никого»;
 	// поздний отчёт всё равно уйдёт тому, кто поручение затеял.
 	Notify string
@@ -97,7 +102,23 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 		return Result{}, err
 	}
 	if !freeStates[pane.Status] && !o.Force {
-		return Result{}, fmt.Errorf("%w: %s в состоянии %q", ErrBusy, o.Pane, pane.Status)
+		if o.WaitFree <= 0 {
+			journalRefusal(o, fmt.Sprintf("%s в состоянии %q", o.Pane, pane.Status))
+			return Result{}, fmt.Errorf("%w: %s в состоянии %q", ErrBusy, o.Pane, pane.Status)
+		}
+		// Ждём освобождения вместо отказа: именно это обещает --detach, и
+		// именно этого не делал отсоединённый потомок.
+		free := make([]string, 0, len(freeStates))
+		for st := range freeStates {
+			free = append(free, st)
+		}
+		sort.Strings(free)
+		if pane, err = o.Client.Wait(o.Pane, free, o.WaitFree); err != nil || !freeStates[pane.Status] {
+			why := fmt.Sprintf("%s не освободилась за %s (состояние %q)",
+				o.Pane, o.WaitFree, pane.Status)
+			journalRefusal(o, why)
+			return Result{}, fmt.Errorf("%w: %s", ErrBusy, why)
+		}
 	}
 
 	if o.Self == "" {
@@ -278,6 +299,22 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	return res, nil
 }
 
+// refuse записывает неотправленное поручение вместе с текстом.
+//
+// Без этой записи текст исчезал совсем: отказ случался прежде любой записи в
+// журнал, уходил в лог отсоединённого процесса и не попадал даже в
+// undelivered — там лежат записанные отчёты, а здесь не было записано ничего.
+// Вызывающему при этом докладывали об успехе.
+func journalRefusal(o Options, why string) {
+	if o.Journal == nil {
+		return
+	}
+	o.Journal.Append(journal.Record{
+		Task: newID(), Event: journal.Refused, Pane: o.Pane,
+		Prompt: o.Prompt, Outcome: "не отправлено", Reason: why,
+	})
+}
+
 // Lost — отчёт, который не дошёл до ведущего.
 //
 // Показ человеку сюда не засчитывается: всплывашку herdr прочитают, когда
@@ -355,6 +392,29 @@ func StateOfTask(recs []journal.Record, id string) State {
 // записан трижды и не ушёл в Codex ни разу.
 func ReachedLeader(outcome string) bool {
 	return strings.HasPrefix(outcome, WokeUp)
+}
+
+// Refused — поручение, которое не было отправлено. Текст в нём цел: без этого
+// он исчезал совсем.
+type Refused struct {
+	Task   string `json:"task"`
+	Pane   string `json:"pane,omitempty"`
+	At     string `json:"at"`
+	Reason string `json:"reason"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+// RefusedTasks — неотправленные поручения из журнала.
+func RefusedTasks(recs []journal.Record) []Refused {
+	var out []Refused
+	for _, r := range recs {
+		if r.Event != journal.Refused {
+			continue
+		}
+		out = append(out, Refused{Task: r.Task, Pane: r.Pane,
+			At: r.Time.Format(time.RFC3339), Reason: r.Reason, Prompt: r.Prompt})
+	}
+	return out
 }
 
 // LostReports собирает по журналу всё, что до ведущего не дошло.

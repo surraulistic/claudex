@@ -787,3 +787,89 @@ func TestStateOfTaskIsAddressingWithoutPanes(t *testing.T) {
 		t.Fatal("незнакомое поручение помечено неизвестным")
 	}
 }
+
+// Случай из sdk-middleware: четыре отправки в занятую панель за ночь, три
+// отказа подряд, текст не сохранён нигде — только в контексте отправителя.
+
+func TestRefusedTaskKeepsItsTextInTheJournal(t *testing.T) {
+	f, j, o := setup(t, "working")
+	o.Prompt = "разбери дамп по observability и верни выводы"
+
+	if _, err := Delegate(context.Background(), o); err == nil {
+		t.Fatal("занятая панель — отказ")
+	}
+	_ = f
+
+	recs, _ := j.Read()
+	var ref []journal.Record
+	for _, r := range recs {
+		if r.Event == journal.Refused {
+			ref = append(ref, r)
+		}
+	}
+	if len(ref) != 1 {
+		t.Fatalf("отказ записан, получено %+v", recs)
+	}
+	if !strings.Contains(ref[0].Prompt, "разбери дамп") {
+		t.Fatalf("текст поручения цел, получено %q", ref[0].Prompt)
+	}
+	if !strings.Contains(ref[0].Reason, "working") {
+		t.Fatalf("причина названа, получено %q", ref[0].Reason)
+	}
+	if got := RefusedTasks(recs); len(got) != 1 || got[0].Prompt == "" {
+		t.Fatalf("видно снаружи, получено %+v", got)
+	}
+}
+
+func TestRefusedTaskDoesNotBecomeAnActiveAssignment(t *testing.T) {
+	// Иначе оно перехватило бы разрешение claudex done: неотправленное
+	// поручение не активно, оно не начиналось.
+	_, j, o := setup(t, "working")
+	Delegate(context.Background(), o)
+	recs, _ := j.Read()
+	if n := len(ActiveFor(recs, o.Pane)); n != 0 {
+		t.Fatalf("активных нет, получено %d", n)
+	}
+}
+
+func TestWaitFreeWaitsInsteadOfRefusing(t *testing.T) {
+	// Ровно то, что обещает --detach: отсоединённый процесс для того и
+	// заводится, чтобы ждать освобождения, а не отказывать в свой лог.
+	f, j, o := setup(t, "working")
+	f.Reply("agent.wait", agent("idle"))
+	o.WaitFree = time.Second
+	o.Prompt = "задача"
+
+	res, err := Delegate(context.Background(), o)
+	if err != nil {
+		t.Fatalf("дождались освобождения, получено %v", err)
+	}
+	if res.Task == "" {
+		t.Fatal("поручение заведено")
+	}
+	if f.LastRequest("agent.wait") == nil {
+		t.Fatal("ожидание запрошено у herdr")
+	}
+	recs, _ := j.Read()
+	for _, r := range recs {
+		if r.Event == journal.Refused {
+			t.Fatal("отказа быть не должно")
+		}
+	}
+}
+
+func TestWaitFreeGivesUpAndStillKeepsTheText(t *testing.T) {
+	f, j, o := setup(t, "working")
+	f.Reply("agent.wait", agent("working")) // так и не освободилась
+	o.WaitFree = 50 * time.Millisecond
+	o.Prompt = "задача, которую нельзя потерять"
+
+	if _, err := Delegate(context.Background(), o); err == nil {
+		t.Fatal("не освободилась — отказ")
+	}
+	recs, _ := j.Read()
+	got := RefusedTasks(recs)
+	if len(got) != 1 || !strings.Contains(got[0].Prompt, "нельзя потерять") {
+		t.Fatalf("текст цел и после неудачного ожидания, получено %+v", got)
+	}
+}
