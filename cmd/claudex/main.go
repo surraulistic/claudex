@@ -57,6 +57,7 @@ type opts struct {
 	force         bool
 	task          string
 	compact       bool
+	all           bool
 	mode          string
 	searchWaitRaw string
 	searchWait    time.Duration
@@ -90,6 +91,8 @@ func run() error {
 		"delegate: сколько ждать, пока ведущий освободится")
 	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
 	fs.BoolVar(&o.pretty, "pretty", false, "JSON с отступами")
+	fs.BoolVar(&o.all, "all", false,
+		"tasks/undelivered: весь журнал целиком вместо свежего хвоста")
 	fs.BoolVar(&o.compact, "compact", false,
 		"sessions/brief: строка на панель вместо JSON — вдесятеро дешевле по контексту")
 	fs.BoolVar(&o.detach, "detach", false, "delegate: отдать ожидание отдельному процессу")
@@ -182,7 +185,7 @@ func run() error {
 // boolFlags — флаги без значения; у остальных следующий довод считается их
 // значением, если не написан через «=».
 var boolFlags = map[string]bool{
-	"no-wait": true, "full": true, "raw": true, "pretty": true,
+	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
 }
 
@@ -232,7 +235,8 @@ func usage() {
   claudex schema                         форма выдачи и готовые запросы jq
   claudex reconcile                      собрать отчёт за задачу, закончившую молча
   claudex index [--full]                 пересобрать индекс из базы cass
-  claudex tasks [--task <id>]            журнал поручений; с --task — одно
+  claudex tasks [--task <id>]            свежий хвост журнала; с --task — одно
+                                         поручение, с --all — журнал целиком
 
 Цель — pane_id, session_id, кусок заголовка или рабочий каталог.
 
@@ -1659,6 +1663,17 @@ func cmdUndelivered(o opts) error {
 		fmt.Println("недоставленного нет")
 		return nil
 	}
+	// Отчёты здесь лежат целиком, и их десятки: замерено около 24 КБ. Списком
+	// видно, что ждёт доставки; сам текст берут адресно.
+	if !o.all {
+		for _, l := range lost {
+			fmt.Printf("%-8s %-9s %-22s %s\n", l.Task, l.Stage,
+				cutTo(l.Cause, 22), cutTo(oneLine(l.Report), 60))
+		}
+		fmt.Printf("\nвсего %d · текст целиком: claudex tasks --task <id>, либо claudex undelivered --all\n",
+			len(lost))
+		return nil
+	}
 	for _, l := range lost {
 		fmt.Printf("── %s · стадия %s · %s\n", l.Task, l.Stage, l.At)
 		fmt.Printf("   адрес:  %s\n", l.Target)
@@ -1760,6 +1775,25 @@ func cmdIndex(o opts) error {
 	return emit(o, st)
 }
 
+// Пределы вывода журнала. Полное содержимое достаётся по --all либо адресно
+// по идентификатору поручения.
+const (
+	tasksTail  = 40  // сколько последних записей показывать
+	reasonPeek = 120 // сколько символов отчёта в строке
+)
+
+// journalTail — свежий хвост журнала и сколько скрыто.
+//
+// Журнал держит отчёты целиком и растёт: замерено 120 КБ, около тридцати тысяч
+// токенов за один вызов. Для вопроса «что происходило» нужен хвост, а не
+// история с начала времён; целиком достаётся по --all.
+func journalTail(recs []journal.Record, all bool) (kept []journal.Record, hidden int) {
+	if all || len(recs) <= tasksTail {
+		return recs, 0
+	}
+	return recs[len(recs)-tasksTail:], len(recs) - tasksTail
+}
+
 func cmdTasks(o opts, args []string) error {
 	recs, err := journal.Open(defaultJournal()).Read()
 	if err != nil {
@@ -1775,6 +1809,14 @@ func cmdTasks(o opts, args []string) error {
 		return emit(o, st)
 	}
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].Time.Before(recs[j].Time) })
+	// Журнал — это все отчёты целиком, и он растёт: замерено 120 КБ, около
+	// тридцати тысяч токенов за один вызов. Для «что происходило» нужен хвост,
+	// а не история с начала времён.
+	kept, hidden := journalTail(recs, o.all)
+	if hidden > 0 {
+		fmt.Printf("… ранее %d записей, целиком: claudex tasks --all\n", hidden)
+	}
+	recs = kept
 	for _, r := range recs {
 		where := r.Pane
 		if r.Event == journal.Notified {
@@ -1783,8 +1825,12 @@ func cmdTasks(o opts, args []string) error {
 				where += "/" + r.Stage
 			}
 		}
+		reason := oneLine(r.Reason)
+		if !o.all {
+			reason = cutTo(reason, reasonPeek)
+		}
 		fmt.Printf("%s %-8s %-9s %-8s %s %s\n",
-			r.Time.Format("02.01 15:04"), r.Task, r.Event, where, r.Outcome, oneLine(r.Reason))
+			r.Time.Format("02.01 15:04"), r.Task, r.Event, where, r.Outcome, reason)
 	}
 	if undelivered := undeliveredWakes(recs); len(undelivered) > 0 {
 		fmt.Printf("\nне доставлено ведущему: %s\n", strings.Join(undelivered, ", "))

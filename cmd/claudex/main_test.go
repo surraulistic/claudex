@@ -277,3 +277,27 @@ func TestDoingNowFallsBackToTheScreenWhenNothingIsParsed(t *testing.T) {
 		t.Fatalf("экран остаётся запасным источником, получено %q", got)
 	}
 }
+
+func TestJournalTailKeepsTheOutputBounded(t *testing.T) {
+	// Весь журнал — это все отчёты целиком: замерено 120 КБ, около тридцати
+	// тысяч токенов за вызов. Столько не должно уезжать в контекст за вопрос
+	// «что происходило».
+	recs := make([]journal.Record, 500)
+	for i := range recs {
+		recs[i] = journal.Record{Task: "t", Event: journal.Reported}
+	}
+	kept, hidden := journalTail(recs, false)
+	if len(kept) != tasksTail {
+		t.Fatalf("показываем хвост, получено %d", len(kept))
+	}
+	if hidden != 500-tasksTail {
+		t.Fatalf("скрытое посчитано, получено %d", hidden)
+	}
+	if all, h := journalTail(recs, true); len(all) != 500 || h != 0 {
+		t.Fatalf("--all отдаёт всё, получено %d/%d", len(all), h)
+	}
+	short := recs[:5]
+	if k, h := journalTail(short, false); len(k) != 5 || h != 0 {
+		t.Fatalf("короткий журнал не режется, получено %d/%d", len(k), h)
+	}
+}
