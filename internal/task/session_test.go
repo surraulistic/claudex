@@ -451,3 +451,158 @@ func TestRefusalNamesAConversationAsAConversation(t *testing.T) {
 		t.Fatalf("разговор назван разговором, получено %q", err)
 	}
 }
+
+const parentPane = "wE:p1A"
+
+// mixedJournal воспроизводит состояние, в котором оказался живой журнал:
+// родительское поручение заведено панели и ещё не отчиталось, а рядом лежит
+// закрытый внутренний smoke, исполнителем которого был разговор.
+func mixedJournal() []journal.Record {
+	now := time.Now()
+	return []journal.Record{
+		{Task: "d21bb044", Event: journal.Started, Pane: parentPane,
+			Target: "01a0a268-ca14-7441-844b-8fcd24cd2e45", TargetKind: KindThread, Time: now},
+		{Task: "d21bb044", Event: journal.Finished, Pane: parentPane, Outcome: SentNoWait, Time: now},
+		{Task: "76239557", Event: journal.Started, PaneSession: workerSession,
+			Target: workerSession, TargetKind: KindSession, Time: now},
+		{Task: "76239557", Event: journal.Finished, Outcome: SentNoWait, Time: now},
+		{Task: "76239557", Event: journal.Reported, Outcome: "готово", Time: now},
+	}
+}
+
+func TestParentPaneAssignmentStillReportsUnderItself(t *testing.T) {
+	// Родитель заведён панели, внутренний smoke — разговору. Выбор исполнителя
+	// не должен уводить отчёт родителя к разговору: у панели поручение живо, у
+	// разговора закрыто.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+	t.Setenv("HERDR_PANE_ID", parentPane)
+	recs := mixedJournal()
+
+	if got := executorOf(recs, "d21bb044"); got != parentPane {
+		t.Fatalf("родитель отчитывается своей панелью, получено %q", got)
+	}
+	r, err := Resolve(recs, executorOf(recs, "d21bb044"), "d21bb044")
+	if err != nil {
+		t.Fatalf("родитель сопоставлен, получено %v", err)
+	}
+	if r.Task != "d21bb044" || r.Corrected {
+		t.Fatalf("остаёмся на родителе без подмены, получено %+v", r)
+	}
+}
+
+func TestClosedSmokeNeverSubstitutesForTheParent(t *testing.T) {
+	// Прямая подмена: отчёт родителя не должен записаться под внутренним
+	// поручением, даже когда идентификатор не назван.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+	t.Setenv("HERDR_PANE_ID", parentPane)
+	recs := mixedJournal()
+
+	// Без названного идентификатора отчёт обязан лечь на родителя: у панели
+	// он единственный живой. Уехать под закрытый внутренний smoke он не может
+	// ни при каких обстоятельствах.
+	r, err := Resolve(recs, executorOf(recs, ""), "")
+	if err != nil {
+		t.Fatalf("родитель у панели один — отчёт ложится на него, получено %v", err)
+	}
+	if r.Task != "d21bb044" {
+		t.Fatalf("отчёт ушёл не родителю, получено %+v", r)
+	}
+	if r.Task == "76239557" {
+		t.Fatal("внутренний smoke родителя не подменяет")
+	}
+	for _, a := range ActiveFor(recs, workerSession) {
+		if a.Task == "d21bb044" {
+			t.Fatal("родитель не числится за разговором")
+		}
+	}
+	if a := ActiveFor(recs, parentPane); len(a) != 1 || a[0].Task != "d21bb044" {
+		t.Fatalf("у панели активен ровно родитель, получено %+v", a)
+	}
+}
+
+func TestSilentConversationTaskIsSurfacedNotLost(t *testing.T) {
+	// Сессия довела работу до конца и не вызвала done. Экрана у разговора нет,
+	// сочинять отчёт нельзя — но и пропадать поручение не должно: сегодня
+	// silent() отсеивал всё беспанельное, и такое поручение не попадало ни в
+	// сборку, ни в канал вытягивания.
+	claudeHome(t, workerSession) // разговор жив и простаивает
+	recs := []journal.Record{
+		{Task: "5a023d9b", Event: journal.Started, PaneSession: workerSession,
+			Target: workerSession, TargetSession: workerSession, TargetKind: KindSession,
+			Time: time.Now().Add(-2 * time.Hour)},
+		{Task: "5a023d9b", Event: journal.Finished, Outcome: SentNoWait,
+			Time: time.Now().Add(-2 * time.Hour)},
+	}
+	j := sessionJournal(t)
+	for _, r := range recs {
+		j.Append(r)
+	}
+
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now(),
+	})
+	if len(got) != 1 {
+		t.Fatalf("молчаливое поручение разговора видно сборке, получено %+v", got)
+	}
+	if got[0].Synthetic {
+		t.Fatal("текста нет — сочинять отчёт нельзя")
+	}
+	if got[0].Cause == "" {
+		t.Fatalf("причина названа, получено %+v", got[0])
+	}
+}
+
+func TestBusyConversationIsNotCalledSilent(t *testing.T) {
+	// Занятость — не молчание. Назвать работающий разговор молчаливым значит
+	// подтолкнуть ведущего дёргать того, кто ещё работает.
+	cfg := t.TempDir()
+	home := filepath.Join(cfg, "sessions")
+	os.MkdirAll(home, 0o700)
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	sock, _ := os.MkdirTemp("/tmp", "cx")
+	t.Cleanup(func() { os.RemoveAll(sock) })
+	p := filepath.Join(sock, "7.sock")
+	l, err := net.Listen("unix", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	rec, _ := json.Marshal(map[string]any{
+		"pid": 7, "sessionId": workerSession, "name": "worker",
+		"status": "busy", "messagingSocketPath": p,
+	})
+	os.WriteFile(filepath.Join(home, "7.json"), rec, 0o600)
+
+	j := sessionJournal(t)
+	j.Append(journal.Record{Task: "5a023d9b", Event: journal.Started,
+		PaneSession: workerSession, Target: workerSession, TargetKind: KindSession,
+		Time: time.Now().Add(-2 * time.Hour)})
+
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now()})
+	if len(got) != 1 || got[0].Cause != CauseExecutorBusy {
+		t.Fatalf("работающий разговор не объявлен молчаливым, получено %+v", got)
+	}
+}
+
+func TestSilentConversationReportIsNeverInvented(t *testing.T) {
+	// Тот же запрет, что и на пустом экране панели: отсутствие доказательства
+	// не повод записать отчёт.
+	claudeHome(t, workerSession)
+	j := sessionJournal(t)
+	j.Append(journal.Record{Task: "5a023d9b", Event: journal.Started,
+		PaneSession: workerSession, Target: workerSession, TargetKind: KindSession,
+		Time: time.Now().Add(-2 * time.Hour)})
+
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now()})
+	if len(got) != 1 || got[0].Cause != CauseNoScreen {
+		t.Fatalf("причина названа, получено %+v", got)
+	}
+	recs, _ := j.Read()
+	for _, r := range recs {
+		if r.Event == journal.Reported {
+			t.Fatal("ложного отчёта в журнале нет")
+		}
+	}
+}

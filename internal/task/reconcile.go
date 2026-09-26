@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/claudesess"
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/textual"
@@ -114,7 +115,7 @@ func Reconcile(ctx context.Context, o ReconcileOptions) []Reconciled {
 func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assignment {
 	var out []Assignment
 	for _, a := range ActiveFor(recs, "") {
-		if a.Pane == "" || now.Sub(a.Started) < minAge {
+		if now.Sub(a.Started) < minAge {
 			continue
 		}
 		out = append(out, a)
@@ -124,6 +125,10 @@ func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assign
 
 func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o ReconcileOptions) Reconciled {
 	r := Reconciled{Task: a.Task, Pane: a.Pane}
+
+	if a.Pane == "" {
+		return reconcileConversation(recs, a, r)
+	}
 
 	bound := paneSessionOf(recs, a.Task)
 	if bound == "" {
@@ -238,4 +243,37 @@ func finalOf(o ReconcileOptions, pane string) string {
 		return ""
 	}
 	return out
+}
+
+// CauseNoScreen — разговор закончил и промолчал, а взять текст неоткуда.
+//
+// У поручения в разговор Claude Code панели нет, и живого экрана тоже: сочинять
+// за него отчёт нельзя. Но и пропадать поручение не должно — прежде silent()
+// отсеивал всё беспанельное, и такое молчание не попадало ни в сборку, ни в
+// канал вытягивания. Теперь оно видно с названной причиной.
+const CauseNoScreen = "conversation_has_no_screen"
+
+// reconcileConversation называет, чем кончилось молчание разговора.
+//
+// Собрать отчёт отсюда невозможно, и выдумывать его запрещено ровно так же, как
+// на пустом экране панели. Зато реестр отличает «ещё работает» от «закончил и
+// промолчал», а это и есть то, чего ведущему не хватало.
+func reconcileConversation(recs []journal.Record, a Assignment, r Reconciled) Reconciled {
+	id := paneSessionOf(recs, a.Task)
+	if id == "" {
+		return refuse(r, CauseExecutorUnknown,
+			"разговор-исполнитель при заведении не записан: проверять нечего")
+	}
+	s, err := claudesess.Lookup(claudesess.Home(), id)
+	if err != nil {
+		return refuse(r, CauseSessionGone,
+			fmt.Sprintf("разговор %s больше не жив: отчёта по поручению не будет", short(id)))
+	}
+	if s.Busy() {
+		return refuse(r, CauseExecutorBusy,
+			fmt.Sprintf("разговор %s занят: работа не закончена", s.Short()))
+	}
+	return refuse(r, CauseNoScreen,
+		fmt.Sprintf("разговор %s свободен, а отчёта не дал; экрана у разговора нет, "+
+			"взять текст неоткуда — попросите его вызвать claudex done %s", s.Short(), a.Task))
 }
