@@ -235,6 +235,22 @@ type ReportResult struct {
 // продолжает работать и отчитывается позже — этот отчёт прежде не доходил
 // никуда: наблюдателя уже нет, а done только дописывал строку в журнал.
 // Срок наблюдателя не делает задачу законченной.
+// executorOf — кем мы отчитываемся.
+//
+// Панель и разговор Claude Code бывают у одного процесса разом: claudex часто
+// живёт в панели herdr, внутри которой идёт сессия Claude Code. Поручение при
+// этом заведено на что-то одно, и выбирать надо по журналу, а не по тому, какая
+// переменная нашлась первой. Разговор проверяется первым: поручение в него
+// адресовано точнее, панель же переживает смену агента.
+func executorOf(recs []journal.Record) string {
+	if s := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")); s != "" {
+		if len(ActiveFor(recs, s)) > 0 {
+			return s
+		}
+	}
+	return os.Getenv("HERDR_PANE_ID")
+}
+
 func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (ReportResult, error) {
 	res := ReportResult{Task: id}
 	if o.Journal == nil {
@@ -247,7 +263,7 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	// существующим идентификатором — запись появлялась до любой проверки.
 	pane := o.Pane
 	if pane == "" {
-		pane = os.Getenv("HERDR_PANE_ID")
+		pane = executorOf(before)
 	}
 	r, err := Resolve(before, pane, id)
 	if err != nil {

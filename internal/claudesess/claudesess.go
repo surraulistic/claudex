@@ -276,3 +276,55 @@ func ownToken(socket string) string {
 	}
 	return strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_TOKEN"))
 }
+
+// ErrNoPickup — разговор так и не взялся за поручение.
+//
+// Отдельной причиной, а не таймаутом: «простаивал с самого начала» и
+// «поработал и закончил» выглядят в реестре одинаково, а значат
+// противоположное. Считать первое завершением значит выдать несделанное за
+// сделанное — ровно та ошибка, из-за которой «панель свободна» перестали
+// считать доказательством.
+var ErrNoPickup = errors.New("разговор не взялся за поручение")
+
+// WaitIdle ждёт, пока разговор возьмётся за работу и снова освободится.
+//
+// Завершением считается только пара переходов: сначала занят, потом свободен.
+// pickup — сколько ждать первого из них.
+func WaitIdle(ctx context.Context, home, id string, poll, pickup time.Duration) error {
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+	if pickup <= 0 {
+		pickup = 30 * time.Second
+	}
+	deadline := time.Now().Add(pickup)
+	took := false
+	for {
+		s, err := Resolve(home, id)
+		if err != nil {
+			// Разговор закрыли на полпути. Молчаливый успех тут хуже ошибки:
+			// поручение считалось бы выполненным.
+			return fmt.Errorf("разговор %s пропал: %w", shortOf(id), err)
+		}
+		switch {
+		case s.Busy():
+			took = true
+		case took:
+			return nil
+		case time.Now().After(deadline):
+			return fmt.Errorf("%w за %s", ErrNoPickup, pickup)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+}
+
+func shortOf(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
+}

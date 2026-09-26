@@ -278,3 +278,55 @@ func TestNamedPaneStillWinsOverOwnConversation(t *testing.T) {
 		t.Fatalf("названная панель выигрывает, получено %+v", w)
 	}
 }
+
+func TestConversationReportsUnderItsOwnAssignment(t *testing.T) {
+	// Поручение в разговор панели не имеет вовсе, и сопоставление по панели
+	// отказывало ему в собственном отчёте. Поймано живой проверкой на
+	// поручении e7c83a2b: «заведено для другой панели», хотя заведено оно было
+	// не для панели.
+	recs := []journal.Record{
+		{Task: "e7c83a2b", Event: journal.Started, PaneSession: workerSession,
+			Target: leaderThread, TargetKind: KindThread, Time: time.Now()},
+	}
+	r, err := Resolve(recs, workerSession, "")
+	if err != nil {
+		t.Fatalf("разговор отчитывается по своему поручению, получено %v", err)
+	}
+	if r.Task != "e7c83a2b" {
+		t.Fatalf("поручение опознано, получено %+v", r)
+	}
+}
+
+func TestPaneAssignmentIsStillMatchedByPane(t *testing.T) {
+	// Расширение не должно ломать панельную ветку: у неё исполнитель прежний.
+	recs := []journal.Record{
+		{Task: "aaaaaaaa", Event: journal.Started, Pane: "wE:p13",
+			PaneSession: workerSession, Time: time.Now()},
+	}
+	if a := ActiveFor(recs, "wE:p13"); len(a) != 1 {
+		t.Fatalf("панель находит своё поручение, получено %+v", a)
+	}
+	if a := ActiveFor(recs, "wE:p99"); len(a) != 0 {
+		t.Fatalf("чужая панель — ничего, получено %+v", a)
+	}
+}
+
+func TestConversationIsPreferredOnlyWhenItHasWork(t *testing.T) {
+	// claudex живёт и в панели herdr, и в сессии Claude Code разом. Выбирать
+	// исполнителя по тому, какая переменная нашлась первой, нельзя: поручение
+	// заведено на что-то одно, и решает журнал.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+	t.Setenv("HERDR_PANE_ID", "wE:p13")
+
+	paneOnly := []journal.Record{
+		{Task: "aaaaaaaa", Event: journal.Started, Pane: "wE:p13", Time: time.Now()},
+	}
+	if got := executorOf(paneOnly); got != "wE:p13" {
+		t.Fatalf("работы у разговора нет — отчитываемся панелью, получено %q", got)
+	}
+	sessionWork := append(paneOnly, journal.Record{
+		Task: "bbbbbbbb", Event: journal.Started, PaneSession: workerSession, Time: time.Now()})
+	if got := executorOf(sessionWork); got != workerSession {
+		t.Fatalf("у разговора есть своё поручение — им и отчитываемся, получено %q", got)
+	}
+}

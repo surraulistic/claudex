@@ -347,3 +347,70 @@ func TestEmptyTargetIsRefusedBeforeTheRegistryIsRead(t *testing.T) {
 		t.Fatalf("пустой адресат назван, получено %v", err)
 	}
 }
+
+// setStatus переписывает занятость в записи реестра: так её меняет и сам
+// Claude Code — переписыванием файла целиком.
+func setStatus(t *testing.T, home string, pid int, status string) {
+	t.Helper()
+	p := filepath.Join(home, fmt.Sprintf("%d.json", pid))
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	m["status"] = status
+	m["statusUpdatedAt"] = time.Now().UnixMilli()
+	nb, _ := json.Marshal(m)
+	if err := os.WriteFile(p, nb, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitIdleReturnsWhenTheWorkIsDone(t *testing.T) {
+	// Разговор берётся за работу и освобождается. Именно эта пара переходов и
+	// означает «поручение доведено до конца».
+	home := registry(t, Session{PID: 1, ID: "aaaaaaaa-0000-0000-0000-000000000000",
+		Name: "worker", Status: "idle"})
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		setStatus(t, home, 1, "busy")
+		time.Sleep(80 * time.Millisecond)
+		setStatus(t, home, 1, "idle")
+	}()
+	err := WaitIdle(context.Background(), home, "aaaaaaaa-0000-0000-0000-000000000000",
+		10*time.Millisecond, 2*time.Second)
+	if err != nil {
+		t.Fatalf("дождались завершения, получено %v", err)
+	}
+}
+
+func TestIdleBeforePickupIsNotMistakenForDone(t *testing.T) {
+	// Разговор простаивает с самого начала: он ещё не брался за поручение.
+	// Считать это завершением значит выдать несделанное за сделанное — ровно
+	// та ошибка, из-за которой «панель свободна» перестали считать
+	// доказательством.
+	home := registry(t, Session{PID: 1, ID: "aaaaaaaa-0000-0000-0000-000000000000",
+		Name: "worker", Status: "idle"})
+	err := WaitIdle(context.Background(), home, "aaaaaaaa-0000-0000-0000-000000000000",
+		10*time.Millisecond, 120*time.Millisecond)
+	if !errors.Is(err, ErrNoPickup) {
+		t.Fatalf("незанятость названа своей причиной, получено %v", err)
+	}
+}
+
+func TestConversationVanishingMidTaskIsAnError(t *testing.T) {
+	// Сессию закрыли на полпути. Молчаливый успех тут хуже ошибки: поручение
+	// считалось бы выполненным.
+	home := registry(t, Session{PID: 1, ID: "aaaaaaaa-0000-0000-0000-000000000000",
+		Name: "worker", Status: "busy"})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		os.Remove(filepath.Join(home, "1.json"))
+	}()
+	err := WaitIdle(context.Background(), home, "aaaaaaaa-0000-0000-0000-000000000000",
+		10*time.Millisecond, time.Second)
+	if err == nil || errors.Is(err, ErrNoPickup) {
+		t.Fatalf("пропажа разговора — ошибка, получено %v", err)
+	}
+}

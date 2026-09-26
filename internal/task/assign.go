@@ -42,6 +42,20 @@ func IsTaskID(s string) bool {
 
 // ActiveFor — поручения этой панели, по которым отчёта ещё не было.
 // Пустая панель значит «по всем панелям».
+// executedBy — этому ли исполнителю заведено поручение.
+//
+// Исполнитель бывает двух видов. У панельного поручения это панель herdr, у
+// поручения в разговор Claude Code панели нет вовсе, и исполнителем записан
+// разговор. Сопоставлять только по панели значит отказывать разговору в
+// собственном отчёте: живая проверка на поручении e7c83a2b дала ровно это —
+// «заведено для другой панели», хотя заведено оно было не для панели.
+func executedBy(r journal.Record, who string) bool {
+	if who == "" {
+		return true
+	}
+	return r.Pane == who || r.PaneSession == who
+}
+
 func ActiveFor(recs []journal.Record, pane string) []Assignment {
 	reported := map[string]bool{}
 	for _, r := range recs {
@@ -55,7 +69,7 @@ func ActiveFor(recs []journal.Record, pane string) []Assignment {
 		if r.Event != journal.Started || seen[r.Task] {
 			continue
 		}
-		if pane != "" && r.Pane != pane {
+		if !executedBy(r, pane) {
 			continue
 		}
 		seen[r.Task] = true

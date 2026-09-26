@@ -77,3 +77,14 @@ func deliverSession(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	record(j, id, target, KindSession, o.Stage, d)
 	return d
 }
+
+// WithReport — тот же текст поручения с припиской, как отчитаться. Нужен
+// ветке доставки в разговор: у неё нет панели, но обязанность отчитаться та же.
+// Пустой self читается как «тот же бинарь, что поручает»: на PATH может
+// лежать другая сборка, которая про `done` не знает.
+func WithReport(prompt, self, id string) string {
+	if self == "" {
+		self = selfPath()
+	}
+	return withReportInstruction(prompt, self, id)
+}
