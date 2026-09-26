@@ -321,12 +321,12 @@ func TestConversationIsPreferredOnlyWhenItHasWork(t *testing.T) {
 	paneOnly := []journal.Record{
 		{Task: "aaaaaaaa", Event: journal.Started, Pane: "wE:p13", Time: time.Now()},
 	}
-	if got := executorOf(paneOnly); got != "wE:p13" {
+	if got := executorOf(paneOnly, ""); got != "wE:p13" {
 		t.Fatalf("работы у разговора нет — отчитываемся панелью, получено %q", got)
 	}
 	sessionWork := append(paneOnly, journal.Record{
 		Task: "bbbbbbbb", Event: journal.Started, PaneSession: workerSession, Time: time.Now()})
-	if got := executorOf(sessionWork); got != workerSession {
+	if got := executorOf(sessionWork, ""); got != workerSession {
 		t.Fatalf("у разговора есть своё поручение — им и отчитываемся, получено %q", got)
 	}
 }
@@ -388,5 +388,29 @@ func TestWithoutTheSentMarkTheReportWaitsForAWatcher(t *testing.T) {
 	}
 	if res.Skipped == "" {
 		t.Fatal("пока наблюдатель ждёт, done не доставляет сам")
+	}
+}
+
+func TestRepeatDoneStaysWithTheConversationThatOwnsTheTask(t *testing.T) {
+	// Повтор done служит повтором доставки, которая никого не достигла.
+	// Закрытое поручение активным не числится, и выбор исполнителя по одной
+	// активности откатывался к панели — а у поручения в разговор панели нет,
+	// и оно переставало находиться вовсе: «заведено для другой панели», хотя
+	// заведено оно было не для панели. Поймано повтором отчёта по 76239557.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+	t.Setenv("HERDR_PANE_ID", "wE:p1A")
+
+	recs := []journal.Record{
+		{Task: "76239557", Event: journal.Started, PaneSession: workerSession, Time: time.Now()},
+		{Task: "76239557", Event: journal.Reported, Outcome: "готово", Time: time.Now()},
+		// У панели своя работа, и её много: прежде выбор уходил к ней.
+		{Task: "ad2edb8b", Event: journal.Started, Pane: "wE:p1A", Time: time.Now()},
+	}
+	if got := executorOf(recs, "76239557"); got != workerSession {
+		t.Fatalf("повтор остаётся при своём разговоре, получено %q", got)
+	}
+	// Без названного поручения прежнее поведение сохраняется.
+	if got := executorOf(recs, ""); got != "wE:p1A" {
+		t.Fatalf("без названного поручения выбираем панель, получено %q", got)
 	}
 }

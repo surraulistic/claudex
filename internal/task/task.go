@@ -242,13 +242,31 @@ type ReportResult struct {
 // этом заведено на что-то одно, и выбирать надо по журналу, а не по тому, какая
 // переменная нашлась первой. Разговор проверяется первым: поручение в него
 // адресовано точнее, панель же переживает смену агента.
-func executorOf(recs []journal.Record) string {
+func executorOf(recs []journal.Record, claimed string) string {
 	if s := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")); s != "" {
-		if len(ActiveFor(recs, s)) > 0 {
+		if len(ActiveFor(recs, s)) > 0 || startedBy(recs, s, claimed) {
 			return s
 		}
 	}
 	return os.Getenv("HERDR_PANE_ID")
+}
+
+// startedBy — заводилось ли названное поручение этим исполнителем.
+//
+// Нужно повтору отчёта. Активным закрытое поручение уже не числится, и выбор
+// по одной лишь активности откатывается к панели — а у поручения в разговор
+// панели нет, и оно перестаёт находиться вовсе. Повтор done служит повтором
+// доставки, которая никого не достигла, и отнимать его у разговора нельзя.
+func startedBy(recs []journal.Record, who, claimed string) bool {
+	if who == "" || !IsTaskID(claimed) {
+		return false
+	}
+	for _, r := range recs {
+		if r.Task == claimed && r.Event == journal.Started {
+			return executedBy(r, who)
+		}
+	}
+	return false
 }
 
 func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (ReportResult, error) {
@@ -263,7 +281,7 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	// существующим идентификатором — запись появлялась до любой проверки.
 	pane := o.Pane
 	if pane == "" {
-		pane = executorOf(before)
+		pane = executorOf(before, id)
 	}
 	r, err := Resolve(before, pane, id)
 	if err != nil {
