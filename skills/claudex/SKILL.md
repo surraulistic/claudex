@@ -195,6 +195,44 @@ different again: Herdr itself failed mid-wait.
 
 ## Delegating
 
+`claudex delegate <target> "<task>"` addresses a **conversation**, not a terminal.
+
+The target still names a herdr pane, because that is how you refer to a worker.
+What changes is where the task goes: claudex asks herdr which conversation the
+pane runs right now, and delivers to that conversation's inbox socket. The pane
+outlives the agent inside it, so "the pane is free" proves nothing about the
+conversation — that mismatch is what `executor_conversation_changed` was built
+to catch, and addressing the conversation removes it at the source.
+
+```bash
+claudex delegate license "…"            # pane named, conversation addressed
+claudex delegate --session <id|name> "…" # address a conversation directly
+claudex delegate --panel license "…"     # legacy: write into the herdr pane
+```
+
+It refuses rather than guesses. A wrong guess delivers work into somebody
+else's conversation, so every unresolved case is a refusal with a
+machine-readable cause:
+
+| cause | when |
+|---|---|
+| `pane_target_not_claude` | the pane runs something other than Claude Code |
+| `pane_identity_unproven` | herdr does not report the pane's conversation |
+| `pane_conversation_absent` | that conversation is no longer live |
+| `pane_conversation_ambiguous` | the name matches more than one conversation |
+| `pane_is_current_conversation` | the pane runs this very conversation |
+
+`--panel` keeps the previous transport for the cases the socket cannot serve:
+a pane running a non-Claude agent, or one whose conversation has closed.
+
+Everything else is unchanged and shared by both transports: `--notify-thread`
+and `--notify-session`, the journal binding, correlation of a report to its
+task, deduplication, `reconcile`, and the pull channel behind `undelivered`.
+A task resolved from a pane records **both** the pane and the conversation, so
+delivery goes by conversation while `reconcile` keeps the right to read the
+pane's screen.
+
+
 **Never send work with `herdr agent prompt` directly.** It delivers the prompt
 and stops there: nothing waits for the pane, nothing wakes you, nothing is
 logged. Correlation cannot be added afterwards — the watch has to begin with the

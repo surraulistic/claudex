@@ -53,6 +53,7 @@ type opts struct {
 	notifyThread  string
 	notifySession string
 	session       bool
+	panel         bool
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -96,6 +97,8 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.BoolVar(&o.panel, "panel", false,
+		"delegate: прежний транспорт — писать в панель herdr, а не в разговор Claude Code")
 	fs.BoolVar(&o.session, "session", false,
 		"delegate: цель — разговор Claude Code (id или имя), а не панель herdr")
 	fs.StringVar(&o.notifySession, "notify-session", "",
@@ -217,7 +220,7 @@ func run() error {
 var boolFlags = map[string]bool{
 	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
-	"session": true, "compact": true,
+	"session": true, "compact": true, "panel": true,
 }
 
 func splitArgs(argv []string) (flags, rest []string) {
@@ -258,9 +261,14 @@ func usage() {
                                          (только фоном: ход держит до срока)
   claudex tell <разговор> "<текст>"      сказать живому разговору Claude Code
   claudex peers                          какие разговоры живы и чем заняты
+  claudex delegate <цель> "<задача>"     поручить: цель называет панель, а
+                                         поручение уезжает разговору, который
+                                         она ведёт сейчас
   claudex delegate --session <разговор> "<задача>"
-                                         поручить разговору, а не панели herdr
-  claudex delegate <цель> "<задача>"     поручить; с --no-wait --notify-thread —
+                                         адресовать разговор напрямую
+  claudex delegate --panel <цель> "<задача>"
+                                         прежний транспорт: писать в панель herdr
+                                         с --no-wait --notify-thread —
                                          не занимая ход, отчёт придёт сообщением
   claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
                                          сам сверит его с активным поручением
@@ -1278,6 +1286,20 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 	p, err := resolve(tgt)
 	if err != nil {
 		return err
+	}
+	if !o.panel {
+		// Разговор — основной транспорт. Панель остаётся способом назвать
+		// адресата, но поручение уезжает тому разговору, который она ведёт
+		// сейчас, а не в терминал, переживающий смену агента.
+		s, err := task.ConversationOfPane(p.ID, p.Kind, p.SessionID)
+		if err != nil {
+			var r *task.PaneRefusal
+			if errors.As(err, &r) && r.Cause == task.RefuseNoConversation {
+				return exitcode.Wrap(exitcode.NotFound, err)
+			}
+			return exitcode.Wrap(exitcode.BadCall, err)
+		}
+		return delegateToConversation(o, s, p.ID, prompt)
 	}
 	j := journal.Open(defaultJournal())
 

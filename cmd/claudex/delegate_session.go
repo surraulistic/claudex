@@ -35,7 +35,15 @@ func cmdDelegateSession(o opts, tgt, prompt string) error {
 		}
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
+	return delegateToConversation(o, s, "", prompt)
+}
 
+// delegateToConversation — общая часть для обоих путей к разговору: названного
+// прямо через --session и разрешённого из панели. pane пуст у первого и назван
+// у второго; названный он попадает в журнал, и сборка молчаливых отчётов
+// сохраняет право прочесть экран.
+func delegateToConversation(o opts, s claudesess.Session, pane, prompt string) error {
+	var err error
 	j := journal.Open(defaultJournal())
 	if err := wakeIsPossible(j, o); err != nil {
 		return err
@@ -48,7 +56,7 @@ func cmdDelegateSession(o opts, tgt, prompt string) error {
 	// Панели у поручения нет, и подставлять её нечем. Исполнитель записывается
 	// там же, где он записывается у панельной ветки, — разговором.
 	j.Append(journal.Record{
-		Task: id, Event: journal.Started,
+		Task: id, Event: journal.Started, Pane: pane,
 		Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
 		PaneSession: s.ID, Prompt: prompt,
 	})
@@ -60,7 +68,7 @@ func cmdDelegateSession(o opts, tgt, prompt string) error {
 	err = claudesess.Send(send, s, task.WithReport(prompt, "", id))
 	cancel()
 	if err != nil {
-		j.Append(journal.Record{Task: id, Event: journal.Finished,
+		j.Append(journal.Record{Task: id, Event: journal.Finished, Pane: pane,
 			Outcome: "не отправлено", Reason: err.Error()})
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
@@ -68,7 +76,7 @@ func cmdDelegateSession(o opts, tgt, prompt string) error {
 	if o.noWait {
 		// Наблюдателя за этим поручением нет, и сказать об этом надо явно:
 		// иначе Report решит, что отчёт доставит он, и доставку пропустит.
-		if err := task.SentWithoutWaiting(j, id, ""); err != nil {
+		if err := task.SentWithoutWaiting(j, id, pane); err != nil {
 			return err
 		}
 		fmt.Printf("%s отправлено в %s (%s); отчёт придёт по claudex done\n",
@@ -77,7 +85,7 @@ func cmdDelegateSession(o opts, tgt, prompt string) error {
 	}
 
 	outcome, reason := awaitSession(ctx, j, s, id, o.timeout)
-	j.Append(journal.Record{Task: id, Event: journal.Finished,
+	j.Append(journal.Record{Task: id, Event: journal.Finished, Pane: pane,
 		Outcome: outcome, Reason: reason})
 	if o.pretty {
 		return emit(o, map[string]any{
