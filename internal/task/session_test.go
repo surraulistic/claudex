@@ -330,3 +330,63 @@ func TestConversationIsPreferredOnlyWhenItHasWork(t *testing.T) {
 		t.Fatalf("у разговора есть своё поручение — им и отчитываемся, получено %q", got)
 	}
 }
+
+// Поручение отправлено без ожидания: наблюдателя за ним нет, и отчёт обязан
+// уехать в момент вызова done. Пока в журнале нет записи о завершении отправки,
+// Report считает, что доставит наблюдатель, и пропускает доставку — отчёт тогда
+// записан, но не ушёл и даже в undelivered не виден. Так и случилось на
+// поручении 28f2b0ba: «наблюдатель ещё ждёт — он и доставит», при том что
+// ждать было некому.
+func TestReportOfANoWaitAssignmentIsDeliveredNotDeferred(t *testing.T) {
+	inbox := claudeHome(t, workerSession)
+	j := sessionJournal(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+
+	j.Append(journal.Record{
+		Task: "28f2b0ba", Event: journal.Started, PaneSession: workerSession,
+		Target: workerSession, TargetSession: workerSession, TargetKind: KindSession,
+		Prompt: "задача", Time: time.Now(),
+	})
+	if err := SentWithoutWaiting(j, "28f2b0ba", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Report(context.Background(), "28f2b0ba", "готово", "сделано",
+		ReportOptions{Journal: j, Deadline: 3 * time.Second, Poll: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Skipped != "" {
+		t.Fatalf("доставка не откладывается: наблюдателя нет, получено %q", res.Skipped)
+	}
+	select {
+	case raw := <-inbox[workerSession]:
+		if !strings.Contains(raw, "сделано") {
+			t.Fatalf("отчёт уехал в разговор, получено %q", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("отчёт дошёл до адресата")
+	}
+}
+
+func TestWithoutTheSentMarkTheReportWaitsForAWatcher(t *testing.T) {
+	// Обратная сторона: у ожидающей ветки наблюдатель есть, и вторая доставка
+	// из done была бы дублем.
+	claudeHome(t, workerSession)
+	j := sessionJournal(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+
+	j.Append(journal.Record{
+		Task: "28f2b0ba", Event: journal.Started, PaneSession: workerSession,
+		Target: workerSession, TargetSession: workerSession, TargetKind: KindSession,
+		Time: time.Now(),
+	})
+	res, err := Report(context.Background(), "28f2b0ba", "готово", "сделано",
+		ReportOptions{Journal: j})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Skipped == "" {
+		t.Fatal("пока наблюдатель ждёт, done не доставляет сам")
+	}
+}

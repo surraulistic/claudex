@@ -414,3 +414,41 @@ func TestConversationVanishingMidTaskIsAnError(t *testing.T) {
 		t.Fatalf("пропажа разговора — ошибка, получено %v", err)
 	}
 }
+
+func TestLookupReachesOwnConversationWhereResolveRefusesIt(t *testing.T) {
+	// Два разных вопроса. Человек, назвавший свой же разговор, ошибся — ему
+	// отказ. Адрес из журнала при доставке ошибкой не является: запись в
+	// собственный ящик Claude Code поддерживает, а дожим зависших отчётов
+	// выполняется при любом вызове claudex, в том числе изнутри адресата.
+	// Отказ там оставил бы отчёт висеть навсегда.
+	const self = "81fad209-733a-4b55-b5f2-6a8b9cc14eed"
+	t.Setenv("CLAUDE_CODE_SESSION_ID", self)
+	home := registry(t, Session{PID: 1, ID: self, Name: "я", Status: "busy"})
+
+	if _, err := Resolve(home, self); !errors.Is(err, ErrSelf) {
+		t.Fatalf("названный человеком свой разговор отклонён, получено %v", err)
+	}
+	got, err := Lookup(home, self)
+	if err != nil {
+		t.Fatalf("доставка в свой разговор проходит, получено %v", err)
+	}
+	if got.ID != self {
+		t.Fatalf("нашёлся именно он, получено %+v", got)
+	}
+}
+
+func TestLookupStillRefusesTheUnknownAndTheAmbiguous(t *testing.T) {
+	// Послабление касается только собственного разговора: остальные отказы
+	// доставке нужны ровно так же.
+	home := registry(t,
+		Session{PID: 1, ID: "aaaaaaaa-0000-0000-0000-000000000000", Name: "license", Status: "idle"},
+		Session{PID: 2, ID: "bbbbbbbb-0000-0000-0000-000000000000", Name: "license", Status: "idle"},
+	)
+	if _, err := Lookup(home, "payments"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("неизвестный отклонён, получено %v", err)
+	}
+	var amb *Ambiguous
+	if _, err := Lookup(home, "license"); !errors.As(err, &amb) {
+		t.Fatalf("неоднозначный отклонён, получено %v", err)
+	}
+}

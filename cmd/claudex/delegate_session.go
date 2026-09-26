@@ -66,6 +66,11 @@ func cmdDelegateSession(o opts, tgt, prompt string) error {
 	}
 
 	if o.noWait {
+		// Наблюдателя за этим поручением нет, и сказать об этом надо явно:
+		// иначе Report решит, что отчёт доставит он, и доставку пропустит.
+		if err := task.SentWithoutWaiting(j, id, ""); err != nil {
+			return err
+		}
 		fmt.Printf("%s отправлено в %s (%s); отчёт придёт по claudex done\n",
 			id, s.Short(), nameOr(s))
 		return nil

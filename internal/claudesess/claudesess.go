@@ -171,7 +171,20 @@ func List(home string) []Session {
 //
 // Имена повторяются — в живом реестре три сессии звались «license», — поэтому
 // неоднозначность заканчивается отказом со списком, а не выбором наугад.
-func Resolve(home, target string) (Session, error) {
+func Resolve(home, target string) (Session, error) { return lookup(home, target, true) }
+
+// Lookup — то же, но без отбрасывания текущей сессии.
+//
+// Отбрасывание нужно там, где адрес называет человек: Claude Code откажет в
+// сообщении самому себе, и доводить до этого отказа незачем. При доставке
+// адрес приходит из журнала, а не от человека, и запись в собственный ящик
+// сессии Claude Code поддерживает прямо — так доставляются сообщения от
+// собственных потомков. Дожим зависших отчётов выполняется при любом вызове
+// claudex, в том числе изнутри самого адресата: отказ по «это текущая сессия»
+// оставил бы такой отчёт висеть навсегда.
+func Lookup(home, target string) (Session, error) { return lookup(home, target, false) }
+
+func lookup(home, target string, dropSelf bool) (Session, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return Session{}, ErrNoTarget
@@ -193,7 +206,11 @@ func Resolve(home, target string) (Session, error) {
 		if len(hit) == 0 {
 			continue
 		}
-		if rest := withoutSelf(hit); len(rest) == 0 {
+		rest := hit
+		if dropSelf {
+			rest = withoutSelf(hit)
+		}
+		if len(rest) == 0 {
 			return Session{}, ErrSelf
 		} else if len(rest) == 1 {
 			return rest[0], nil

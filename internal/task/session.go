@@ -51,7 +51,9 @@ func deliverSession(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		return d
 	}
 
-	s, err := claudesess.Resolve(claudesess.Home(), target)
+	// Адрес пришёл из журнала, а не от человека: собственный разговор здесь
+	// законный адресат, и отбрасывать его нельзя.
+	s, err := claudesess.Lookup(claudesess.Home(), target)
 	if err != nil {
 		var amb *claudesess.Ambiguous
 		switch {
@@ -88,3 +90,27 @@ func WithReport(prompt, self, id string) string {
 	}
 	return withReportInstruction(prompt, self, id)
 }
+
+// SentWithoutWaiting отмечает, что поручение отправлено и наблюдателя за ним
+// нет.
+//
+// Без этой записи Report считает, что отчёт доставит наблюдатель, и доставку
+// пропускает — а наблюдателя при `--no-wait` не существует. Отчёт тогда
+// записан, но никуда не уходит и даже в `undelivered` не виден: молчаливая
+// потеря ровно того вида, ради предотвращения которого канал вытягивания и
+// заводился. Поймано smoke-тестом на поручении 28f2b0ba.
+//
+// Отдельной функцией, потому что тот же смысл нужен обеим веткам — панельной и
+// сессионной, — а повторённая в двух местах строка и дала расхождение.
+func SentWithoutWaiting(j *journal.Journal, id, pane string) error {
+	if j == nil {
+		return nil
+	}
+	return j.Append(journal.Record{
+		Task: id, Event: journal.Finished, Pane: pane,
+		Outcome: SentNoWait,
+	})
+}
+
+// SentNoWait — исход отправки без ожидания.
+const SentNoWait = "отправлено без ожидания"

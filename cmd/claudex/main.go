@@ -1318,8 +1318,7 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 		}
 		// Отправка без ожидания тоже попадает в журнал: иначе `tasks` о ней
 		// умолчит, а панель не получит watched в sessions.
-		j.Append(journal.Record{Task: id, Event: journal.Finished, Pane: p.ID,
-			Outcome: "отправлено без ожидания"})
+		task.SentWithoutWaiting(j, id, p.ID)
 		return emit(o, map[string]any{"task": id, "pane": p.ID, "sent": true, "waited": false})
 	}
 

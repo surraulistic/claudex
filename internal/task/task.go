@@ -294,8 +294,9 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	}
 
 	res.Late = true
-	// Тред Codex адресуется без herdr — он нужен только запасному каналу.
-	if o.Client == nil && st.kind != KindThread {
+	// Тред Codex и разговор Claude Code адресуются без herdr — он нужен только
+	// запасному каналу, уведомлению человека.
+	if o.Client == nil && st.kind != KindThread && st.kind != KindSession {
 		res.Skipped = "herdr недоступен"
 		return res, nil
 	}

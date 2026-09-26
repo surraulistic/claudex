@@ -335,3 +335,27 @@ func TestCoveredPushDoesNotPayForTheTail(t *testing.T) {
 		t.Fatal("при покрытом окне хвост в тред не уезжает")
 	}
 }
+
+func TestEmptyTailDoesNotPromiseAPaneScreen(t *testing.T) {
+	// У поручения в разговор Claude Code панели нет. Обещать её экран и не
+	// показать ничего — значит сослаться на доказательство, которого не
+	// существует. Поймано на smoke-поручении 76239557.
+	d := Digest{Task: "76239557", Covered: false}
+	got := d.Push("готово")
+	if strings.Contains(got, "с живого экрана панели") {
+		t.Fatalf("пустой хвост экрана не обещает, получено:\n%s", got)
+	}
+	if !strings.Contains(got, "показать нечего") {
+		t.Fatalf("причина названа, получено:\n%s", got)
+	}
+}
+
+func TestNonEmptyTailIsStillShownWithItsSource(t *testing.T) {
+	// Обратная сторона: когда экран — единственное доказательство, он обязан
+	// уехать вместе с указанием, откуда взят.
+	d := Digest{Task: "76239557", Covered: false, Tail: []string{"финальная строка"}}
+	got := d.Push("готово")
+	if !strings.Contains(got, "с живого экрана панели") || !strings.Contains(got, "финальная строка") {
+		t.Fatalf("хвост показан и назван источник, получено:\n%s", got)
+	}
+}
