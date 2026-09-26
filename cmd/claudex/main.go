@@ -51,6 +51,7 @@ type opts struct {
 	pretty        bool
 	notify        string
 	notifyThread  string
+	notifySession string
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -89,6 +90,8 @@ func run() error {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.StringVar(&o.notifySession, "notify-session", "",
+		"delegate: вернуть результат в этот разговор Claude Code (id или имя)")
 	fs.StringVar(&o.notifyWaitRaw, "notify-timeout", "1800",
 		"delegate: сколько ждать, пока ведущий освободится")
 	fs.BoolVar(&o.raw, "raw", false, "запрос уходит в FTS5 как есть, без экранирования")
@@ -169,6 +172,10 @@ func run() error {
 		return cmdDelegate(o, args[1], strings.Join(args[2:], " "))
 	case "done":
 		return cmdDone(o, args[1:])
+	case "tell":
+		return cmdTell(o, args[1:])
+	case "peers":
+		return cmdPeers(o)
 	case "undelivered":
 		return cmdUndelivered(o)
 	case "schema":
@@ -1280,7 +1287,7 @@ func cmdDelegate(o opts, tgt, prompt string) error {
 				p.ID, a.Status)
 		}
 		id := task.NewID()
-		wake := task.ResolveWake(client(), o.notify, o.notifyThread)
+		wake := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)
 		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID,
 			Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
 			Prompt: prompt})
@@ -1437,7 +1444,7 @@ func detachLog() string {
 // Отказ уходит в ход вызывающего: он успевает сделать иначе, а не узнаёт о
 // потере из лога, который никто не читает.
 func wakeIsPossible(j *journal.Journal, o opts) error {
-	wake := task.ResolveWake(client(), o.notify, o.notifyThread)
+	wake := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)
 
 	// Тред проверяется всегда, даже когда адрес не назван флагом, а взят из
 	// CODEX_THREAD_ID. Переменная переживает закрытие разговора, и молча

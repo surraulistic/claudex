@@ -71,7 +71,11 @@ type Options struct {
 	// NotifyThread — тред Codex, которому возвращать результат. Названный
 	// прямо, он старше и панели, и того, что в окружении.
 	NotifyThread string
-	Attempt      int
+	// NotifySession — разговор Claude Code, которому возвращать результат.
+	// Адресует разговор, а не держащую его панель: панель переживает смену
+	// агента, разговор — нет.
+	NotifySession string
+	Attempt       int
 }
 
 type Result struct {
@@ -126,7 +130,7 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	}
 	// Будить будем именно тот разговор, который поручение затеял: панель
 	// переживает смену агента, а разговор в ней — нет.
-	wake := ResolveWake(o.Client, o.Notify, o.NotifyThread)
+	wake := ResolveWake(o.Client, o.Notify, o.NotifyThread, o.NotifySession)
 
 	id := newID()
 	started := time.Now()
@@ -583,8 +587,9 @@ const (
 // Чем является адрес пробуждения. Пусто читается как панель: поручения,
 // заведённые до появления адресации по треду, других адресов не знали.
 const (
-	KindPane   = "pane"
-	KindThread = "codex_thread"
+	KindPane    = "pane"
+	KindThread  = "codex_thread"
+	KindSession = "claude_session"
 )
 
 const (
@@ -623,15 +628,23 @@ func (w Wake) Empty() bool { return w.Target == "" }
 // бывают выставлены разом — Codex, запущенный в панели herdr, — и тогда панель
 // адресом быть не должна: за ней стоит несколько разговоров, а за тредом ровно
 // один.
-func ResolveWake(c *herdr.Client, notifyPane, notifyThread string) Wake {
+func ResolveWake(c *herdr.Client, notifyPane, notifyThread, notifySession string) Wake {
 	switch {
 	case notifyThread != "":
 		return Wake{Kind: KindThread, Target: notifyThread, Session: notifyThread}
+	case notifySession != "":
+		return Wake{Kind: KindSession, Target: notifySession, Session: notifySession}
 	case notifyPane != "":
 		return Wake{Kind: KindPane, Target: notifyPane, Session: sessionOf(c, notifyPane)}
 	}
 	if t := codex.ThreadID(); t != "" {
 		return Wake{Kind: KindThread, Target: t, Session: t}
+	}
+	// Свой разговор Claude Code идёт впереди своей панели по той же причине,
+	// по какой тред идёт впереди неё: за панелью со временем встаёт другой
+	// разговор, за идентификатором — всегда тот же.
+	if s := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")); s != "" {
+		return Wake{Kind: KindSession, Target: s, Session: s}
 	}
 	if p := os.Getenv("HERDR_PANE_ID"); p != "" {
 		return Wake{Kind: KindPane, Target: p, Session: sessionOf(c, p)}
@@ -697,6 +710,9 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}
 	if o.Kind == KindThread {
 		return deliverThread(ctx, c, j, id, target, text, o)
+	}
+	if o.Kind == KindSession {
+		return deliverSession(ctx, c, j, id, target, text, o)
 	}
 
 	started := time.Now()

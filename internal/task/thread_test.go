@@ -324,7 +324,7 @@ func TestResolveWakePrefersTheThreadOverThePane(t *testing.T) {
 	asCodexChild(t, leaderThread)
 	t.Setenv("HERDR_PANE_ID", "wE:p17")
 
-	w := ResolveWake(nil, "", "")
+	w := ResolveWake(nil, "", "", "")
 	if w.Kind != KindThread || w.Target != leaderThread {
 		t.Fatalf("свой тред старше своей панели, получено %+v", w)
 	}
@@ -338,10 +338,10 @@ func TestResolveWakeHonoursExplicitNamesFirst(t *testing.T) {
 	asCodexChild(t, leaderThread)
 	t.Setenv("HERDR_PANE_ID", "wE:p17")
 
-	if w := ResolveWake(nil, "", otherThread); w.Target != otherThread || w.Kind != KindThread {
+	if w := ResolveWake(nil, "", otherThread, ""); w.Target != otherThread || w.Kind != KindThread {
 		t.Fatalf("--notify-thread старше окружения, получено %+v", w)
 	}
-	if w := ResolveWake(nil, "wE:p99", ""); w.Target != "wE:p99" || w.Kind != KindPane {
+	if w := ResolveWake(nil, "wE:p99", "", ""); w.Target != "wE:p99" || w.Kind != KindPane {
 		t.Fatalf("--notify старше окружения, получено %+v", w)
 	}
 }
@@ -364,7 +364,7 @@ func TestResolveWakeIgnoresAThreadInheritedByClaudeCode(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
 	t.Setenv("HERDR_PANE_ID", "wE:p17")
 
-	if w := ResolveWake(nil, "", ""); w.Kind != KindPane || w.Target != "wE:p17" {
+	if w := ResolveWake(nil, "", "", ""); w.Kind != KindPane || w.Target != "wE:p17" {
 		t.Fatalf("унаследованный тред адресом не считается, получено %+v", w)
 	}
 }
@@ -375,7 +375,7 @@ func TestResolveWakeFallsBackToThePaneWithoutACodexThread(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", "")
 	t.Setenv("HERDR_PANE_ID", "wE:p17")
 
-	w := ResolveWake(nil, "", "")
+	w := ResolveWake(nil, "", "", "")
 	if w.Kind != KindPane || w.Target != "wE:p17" {
 		t.Fatalf("без треда адресуем панелью, получено %+v", w)
 	}
