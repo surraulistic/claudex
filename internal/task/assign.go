@@ -90,7 +90,7 @@ const (
 	ClaimNotID   = "первым доводом пришёл текст отчёта, а не идентификатор"
 	ClaimUnknown = "такого поручения в журнале нет"
 	ClaimClosed  = "по этому поручению отчёт уже был"
-	ClaimForeign = "это поручение заведено для другой панели"
+	ClaimForeign = "это поручение заведено другому исполнителю"
 )
 
 // Resolution — под каким идентификатором писать отчёт и почему он не тот,
@@ -140,11 +140,11 @@ func Resolve(recs []journal.Record, pane, claimed string) (Resolution, error) {
 			return Resolution{Task: claimed, Claimed: claimed}, nil
 		}
 		return Resolution{}, fmt.Errorf(
-			"%s, а активных поручений у панели %s нет — отчёт записывать не под что; посмотреть: claudex tasks",
+			"%s, а активных поручений у %s нет — отчёт записывать не под что; посмотреть: claudex tasks",
 			cause, orPane(pane))
 	}
 	return Resolution{}, fmt.Errorf(
-		"%s, а активных поручений у панели %s несколько (%s) — угадывать нельзя, назовите идентификатор явно",
+		"%s, а активных поручений у %s несколько (%s) — угадывать нельзя, назовите идентификатор явно",
 		cause, orPane(pane), strings.Join(ids(active), ", "))
 }
 
@@ -161,8 +161,10 @@ func claimFault(recs []journal.Record, pane, claimed string) string {
 			return ""
 		}
 	}
-	// Поручение известно, но этой панели уже не принадлежит: либо отчёт по нему
-	// был, либо заводили его для другой панели.
+	// Поручение известно, но этому исполнителю уже не принадлежит: либо отчёт
+	// по нему был, либо заводили его другому. Исполнителем бывает и панель
+	// herdr, и разговор Claude Code — у поручения в разговор панели нет вовсе,
+	// и сверка по одной панели объявляла такое поручение чужим.
 	for _, r := range recs {
 		if r.Task != claimed {
 			continue
@@ -170,17 +172,17 @@ func claimFault(recs []journal.Record, pane, claimed string) string {
 		if r.Event == journal.Reported {
 			return ClaimClosed
 		}
-		if r.Event == journal.Started && pane != "" && r.Pane != pane {
+		if r.Event == journal.Started && pane != "" && !executedBy(r, pane) {
 			return ClaimForeign
 		}
 	}
 	return ClaimUnknown
 }
 
-// startedHere — заводилось ли это поручение именно в этой панели.
+// startedHere — заводилось ли это поручение именно этому исполнителю.
 func startedHere(recs []journal.Record, pane, task string) bool {
 	for _, r := range recs {
-		if r.Event == journal.Started && r.Task == task && (pane == "" || r.Pane == pane) {
+		if r.Event == journal.Started && r.Task == task && executedBy(r, pane) {
 			return true
 		}
 	}
@@ -205,9 +207,16 @@ func orNamed(s string) string {
 	return s
 }
 
+// orPane называет исполнителя в отказе. Им бывает и панель herdr, и разговор
+// Claude Code: у поручения в разговор панели нет вовсе, и называть его панелью
+// значит сбивать с толку ровно там, где человек разбирается, что пошло не так.
 func orPane(p string) string {
-	if p == "" {
-		return "(панель не определена)"
+	switch {
+	case p == "":
+		return "(исполнитель не определён)"
+	case strings.Count(p, "-") == 4:
+		return "разговора " + p[:8]
+	default:
+		return "панели " + p
 	}
-	return p
 }

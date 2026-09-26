@@ -414,3 +414,40 @@ func TestRepeatDoneStaysWithTheConversationThatOwnsTheTask(t *testing.T) {
 		t.Fatalf("без названного поручения выбираем панель, получено %q", got)
 	}
 }
+
+func TestRepeatedReportOnOwnConversationTaskIsAccepted(t *testing.T) {
+	// Точный идентификатор собственного поручения — не догадка, даже если
+	// отчёт по нему уже был: повтор done служит повтором доставки, которая
+	// никого не достигла. Проверка «заводилось ли здесь» смотрела только на
+	// панель, и для поручения в разговор давала ложное «заведено другому».
+	recs := []journal.Record{
+		{Task: "76239557", Event: journal.Started, PaneSession: workerSession, Time: time.Now()},
+		{Task: "76239557", Event: journal.Reported, Outcome: "готово", Time: time.Now()},
+	}
+	r, err := Resolve(recs, workerSession, "76239557")
+	if err != nil {
+		t.Fatalf("повтор по своему поручению принят, получено %v", err)
+	}
+	if r.Task != "76239557" || r.Corrected {
+		t.Fatalf("остаёмся на названном, получено %+v", r)
+	}
+}
+
+func TestRefusalNamesAConversationAsAConversation(t *testing.T) {
+	// Отказ читает человек, который разбирается, что пошло не так. Назвать
+	// разговор панелью значит отправить его искать несуществующую панель.
+	recs := []journal.Record{
+		{Task: "aaaaaaaa", Event: journal.Started, PaneSession: workerSession, Time: time.Now()},
+		{Task: "bbbbbbbb", Event: journal.Started, PaneSession: workerSession, Time: time.Now()},
+	}
+	_, err := Resolve(recs, workerSession, "")
+	if err == nil {
+		t.Fatal("двусмысленность отклонена")
+	}
+	if strings.Contains(err.Error(), "панели") {
+		t.Fatalf("разговор не назван панелью, получено %q", err)
+	}
+	if !strings.Contains(err.Error(), "разговора 44d5f44b") {
+		t.Fatalf("разговор назван разговором, получено %q", err)
+	}
+}
