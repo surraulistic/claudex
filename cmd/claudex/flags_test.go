@@ -48,3 +48,16 @@ func TestValueFlagStillTakesItsArgument(t *testing.T) {
 		t.Fatalf("позиционные целы, получено %v", rest)
 	}
 }
+
+// Список флагов в справке ведётся руками и уже разошёлся с объявленными:
+// --notify-session не значился в ней вовсе, а --session и --panel попали
+// только в примеры. Флаг, которого нет в справке, человек не найдёт.
+func TestTransportFlagsAreDocumented(t *testing.T) {
+	for _, f := range []string{
+		"--session", "--panel", "--notify-session", "--notify-thread", "--no-wait",
+	} {
+		if !strings.Contains(helpText, "\n  "+f+" ") && !strings.Contains(helpText, "\n  "+f+"\n") {
+			t.Errorf("флаг %s не описан в списке флагов справки", f)
+		}
+	}
+}

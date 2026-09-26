@@ -246,8 +246,10 @@ func splitArgs(argv []string) (flags, rest []string) {
 	return
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `claudex — сводка по сессиям Claude Code (cass + herdr)
+// helpText вынесен отдельно, чтобы полноту справки можно было проверить
+// тестом: список флагов здесь ведётся руками и уже расходился с
+// объявленными — --notify-session не значился в нём вовсе.
+const helpText = `claudex — сводка по сессиям Claude Code (cass + herdr)
 
   claudex sessions                       какие панели живы и что у них с историей
   claudex brief                          все панели разом: хвост, сигналы, история
@@ -295,11 +297,17 @@ func usage() {
   --after N          context: записей после якоря (20)
   --timeout N        watch/delegate: секунды числом либо вид 30m (1800)
   --no-wait          delegate: отправить и выйти
+  --session          delegate: цель — разговор Claude Code (id или имя), а не
+                     панель herdr
+  --panel            delegate: прежний транспорт — писать в панель herdr; нужен
+                     панели с не-Claude агентом или с закрытым разговором
   --detach           delegate: отдать ожидание отдельному процессу
   --force            delegate: писать и в панель, ждущую решения человека
   --notify <цель>    delegate: разбудить эту панель по завершении
   --notify-thread ID delegate: вернуть результат в этот тред Codex — адрес есть
                      сам разговор (умолчание: $CODEX_THREAD_ID)
+  --notify-session ID delegate: вернуть результат в этот разговор Claude Code;
+                     адресует разговор, а не держащую его панель
   --notify-timeout N delegate: сколько ждать освобождения ведущего (1800);
                      не дождались — факт уходит человеку уведомлением herdr
   --raw              запрос уходит в FTS5 как есть, без экранирования
@@ -311,7 +319,11 @@ func usage() {
 Коды выхода: 0 успех · 2 цель не найдена · 3 herdr недоступен · 4 ошибка вызова
              5 не дождался · 6 панель занята, задание не отправлено
              7 сбой herdr при ожидании — исход неизвестен
-`)
+`
+
+func usage() {
+	fmt.Fprint(os.Stderr, helpText)
+
 }
 
 // parseTimeout читает и голые секунды, и человеческий срок: прежняя версия
