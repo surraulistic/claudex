@@ -63,8 +63,11 @@ type ReconcileOptions struct {
 }
 
 type Reconciled struct {
-	Task      string `json:"task"`
-	Pane      string `json:"pane,omitempty"`
+	Task string `json:"task"`
+	Pane string `json:"pane,omitempty"`
+	// Session — разговор-исполнитель, когда панели у поручения нет. Без него
+	// вывод называет такое поручение пустыми скобками.
+	Session   string `json:"session,omitempty"`
 	Synthetic bool   `json:"synthetic,omitempty"`
 	Delivered bool   `json:"delivered,omitempty"`
 	Cause     string `json:"cause,omitempty"`
@@ -99,16 +102,49 @@ func Reconcile(ctx context.Context, o ReconcileOptions) []Reconciled {
 		return nil
 	}
 
-	var out []Reconciled
+	// Предел делится не поровну. Панельное поручение стоит чтения экрана через
+	// herdr, поручение в разговор — одного файла в реестре, и делить с панелями
+	// общий предел ему незачем. С общим оно и не рассматривалось никогда:
+	// замерено на живом журнале — 169 активных поручений при пределе 3, и
+	// свежее сессионное стояло 168-м.
+	var conv, panes []Assignment
 	for _, a := range silent(recs, o.Now, o.MinAge) {
-		if len(out) >= o.Max || ctx.Err() != nil {
+		if a.Pane == "" {
+			conv = append(conv, a)
+		} else {
+			panes = append(panes, a)
+		}
+	}
+
+	var out []Reconciled
+	for _, a := range conv {
+		if ctx.Err() != nil {
 			break
 		}
-		r := reconcileOne(ctx, recs, a, o)
-		out = append(out, r)
+		out = append(out, reconcileOne(ctx, recs, a, o))
+	}
+	examined := 0
+	for _, a := range panes {
+		if examined >= o.Max || ctx.Err() != nil {
+			break
+		}
+		out = append(out, reconcileOne(ctx, recs, a, o))
+		examined++
+	}
+	// Про нерассмотренное говорится вслух. Прежде очередь обрывалась молча, и
+	// отсутствие поручения в выдаче было неотличимо от «с ним всё в порядке».
+	if left := len(panes) - examined; left > 0 {
+		out = append(out, Reconciled{
+			Cause: CauseNotExamined,
+			Reason: fmt.Sprintf("ещё %d панельных поручений не рассмотрено за этот вызов "+
+				"(предел %d); повторите вызов или поднимите предел", left, o.Max),
+		})
 	}
 	return out
 }
+
+// CauseNotExamined — до поручения не дошла очередь за этот вызов.
+const CauseNotExamined = "not_examined"
 
 // silent — поручения, у которых есть начало и нет отчёта, и с начала прошло
 // достаточно, чтобы молчание считать окончательным.
@@ -270,9 +306,11 @@ func reconcileConversation(recs []journal.Record, a Assignment, r Reconciled) Re
 			fmt.Sprintf("разговор %s больше не жив: отчёта по поручению не будет", short(id)))
 	}
 	if s.Busy() {
+		r.Session = s.ID
 		return refuse(r, CauseExecutorBusy,
 			fmt.Sprintf("разговор %s занят: работа не закончена", s.Short()))
 	}
+	r.Session = s.ID
 	return refuse(r, CauseNoScreen,
 		fmt.Sprintf("разговор %s свободен, а отчёта не дал; экрана у разговора нет, "+
 			"взять текст неоткуда — попросите его вызвать claudex done %s", s.Short(), a.Task))

@@ -606,3 +606,100 @@ func TestSilentConversationReportIsNeverInvented(t *testing.T) {
 		}
 	}
 }
+
+func TestConversationTaskIsExaminedBehindManyPaneTasks(t *testing.T) {
+	// Сам дефект приёмки. В живом журнале было 169 активных поручений при
+	// пределе сборки 3, и свежее сессионное стояло 168-м: до него очередь не
+	// доходила никогда, а выдача об этом молчала. Панельное поручение стоит
+	// чтения экрана через herdr, сессионное — одного файла в реестре, и общий
+	// предел им делить незачем.
+	claudeHome(t, workerSession)
+	j := sessionJournal(t)
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 20; i++ {
+		j.Append(journal.Record{Task: fmt.Sprintf("aaaaaa%02d", i), Event: journal.Started,
+			Pane: fmt.Sprintf("wE:p%d", i), PaneSession: "чужой-разговор", Time: old})
+	}
+	j.Append(journal.Record{Task: "50ecbca8", Event: journal.Started,
+		PaneSession: workerSession, Target: workerSession, TargetKind: KindSession, Time: old})
+
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now(), Max: 3})
+
+	var mine *Reconciled
+	for i := range got {
+		if got[i].Task == "50ecbca8" {
+			mine = &got[i]
+		}
+	}
+	if mine == nil {
+		t.Fatalf("сессионное поручение рассмотрено, несмотря на очередь панельных; получено %+v", got)
+	}
+	if mine.Synthetic {
+		t.Fatal("финал не выдуман")
+	}
+	if mine.Cause != CauseNoScreen || mine.Session != workerSession {
+		t.Fatalf("причина названа и исполнитель назван, получено %+v", *mine)
+	}
+}
+
+func TestUnexaminedPaneTasksAreAnnouncedNotSwallowed(t *testing.T) {
+	// Оборванная очередь молчала, и отсутствие поручения в выдаче было
+	// неотличимо от «с ним всё в порядке».
+	claudeHome(t)
+	j := sessionJournal(t)
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 7; i++ {
+		j.Append(journal.Record{Task: fmt.Sprintf("bbbbbb%02d", i), Event: journal.Started,
+			Pane: fmt.Sprintf("wE:p%d", i), PaneSession: "разговор", Time: old})
+	}
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now(), Max: 3})
+
+	var note *Reconciled
+	for i := range got {
+		if got[i].Cause == CauseNotExamined {
+			note = &got[i]
+		}
+	}
+	if note == nil {
+		t.Fatalf("про нерассмотренное сказано вслух, получено %+v", got)
+	}
+	if !strings.Contains(note.Reason, "4") {
+		t.Fatalf("названо, сколько осталось (7 минус предел 3), получено %q", note.Reason)
+	}
+}
+
+func TestConversationTasksAreNotCappedByThePaneBudget(t *testing.T) {
+	// Предел существует ради времени вызова, а время тратит чтение экрана
+	// через herdr. Разговор стоит одного файла в реестре, и подводить его под
+	// тот же предел значит снова прятать часть поручений.
+	ids := []string{
+		"11111111-0000-0000-0000-000000000000",
+		"22222222-0000-0000-0000-000000000000",
+		"33333333-0000-0000-0000-000000000000",
+		"44444444-0000-0000-0000-000000000000",
+		"55555555-0000-0000-0000-000000000000",
+	}
+	claudeHome(t, ids...)
+	j := sessionJournal(t)
+	old := time.Now().Add(-2 * time.Hour)
+	for i, id := range ids {
+		j.Append(journal.Record{Task: fmt.Sprintf("cccccc%02d", i), Event: journal.Started,
+			PaneSession: id, Target: id, TargetKind: KindSession, Time: old})
+	}
+
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now(), Max: 2})
+
+	seen := map[string]bool{}
+	for _, r := range got {
+		if r.Task != "" {
+			seen[r.Task] = true
+		}
+	}
+	if len(seen) != len(ids) {
+		t.Fatalf("рассмотрены все %d разговоров при пределе 2, получено %d: %+v",
+			len(ids), len(seen), got)
+	}
+}

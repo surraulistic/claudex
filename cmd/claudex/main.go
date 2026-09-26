@@ -1611,15 +1611,33 @@ func cmdReconcile(o opts) error {
 	}
 	for _, r := range got {
 		switch {
+		case r.Cause == task.CauseNotExamined:
+			fmt.Printf("  %s\n", r.Reason)
 		case r.Delivered:
-			fmt.Printf("  %s (%s): отчёт собран с экрана и доставлен\n", r.Task, r.Pane)
+			fmt.Printf("  %s (%s): отчёт собран с экрана и доставлен\n", r.Task, executorLabel(r))
 		case r.Synthetic:
-			fmt.Printf("  %s (%s): отчёт собран, но не доставлен — %s\n", r.Task, r.Pane, r.Reason)
+			fmt.Printf("  %s (%s): отчёт собран, но не доставлен — %s\n", r.Task, executorLabel(r), r.Reason)
 		default:
-			fmt.Printf("  %s (%s): не собран — %s\n", r.Task, r.Pane, r.Reason)
+			fmt.Printf("  %s (%s): не собран — %s\n", r.Task, executorLabel(r), r.Reason)
 		}
 	}
 	return nil
+}
+
+// executorLabel называет исполнителя поручения. У поручения в разговор панели
+// нет, и без этого вывод печатал пустые скобки.
+func executorLabel(r task.Reconciled) string {
+	switch {
+	case r.Session != "":
+		if len(r.Session) >= 8 {
+			return "разговор " + r.Session[:8]
+		}
+		return "разговор " + r.Session
+	case r.Pane != "":
+		return r.Pane
+	default:
+		return "исполнитель не записан"
+	}
 }
 
 // cmdSchema печатает форму выдачи и готовые запросы к ней.
