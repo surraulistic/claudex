@@ -194,73 +194,11 @@ func run() error {
 		return nil
 	}
 
-	switch args[0] {
-	case "help", "-h", "--help":
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		usage()
 		return nil
-	case "sessions":
-		return cmdSessions(o, false)
-	case "brief":
-		return cmdSessions(o, true)
-	case "find":
-		return cmdFind(o, strings.Join(args[1:], " "))
-	case "search":
-		if len(args) < 3 {
-			return exitcode.Errorf(exitcode.BadCall, "нужны цель и запрос")
-		}
-		return cmdSearch(o, args[1], strings.Join(args[2:], " "))
-	case "entry":
-		return cmdEntry(o, args[1:])
-	case "context":
-		return cmdContext(o, args[1:])
-	case "watch":
-		return cmdWatch(o, args[1:])
-	case "send":
-		if len(args) < 3 {
-			return exitcode.Errorf(exitcode.BadCall, `нужно: claudex send <цель> "<сообщение>"`)
-		}
-		return cmdSend(o, args[1], strings.Join(args[2:], " "))
-	case "task":
-		return cmdTask(o, args[1:])
-	case "hook":
-		return cmdHook(o, args[1:])
-	case "doctor":
-		return cmdDoctor(o)
-	case "supervisor":
-		return cmdSupervisor(o, args[1:])
-	case "delegate":
-		if len(args) < 3 {
-			return exitcode.Errorf(exitcode.BadCall, "нужны цель и задача")
-		}
-		return cmdDelegate(o, args[1], strings.Join(args[2:], " "))
-	case "done":
-		return cmdDone(o, args[1:])
-	case "tell":
-		return cmdTell(o, args[1:])
-	case "session", "sessions-live":
-		return cmdSession(o, args[1:])
-	case "peers":
-		return cmdPeers(o)
-	case "undelivered":
-		return cmdUndelivered(o)
-	case "schema":
-		return cmdSchema()
-	case "flush":
-		return cmdFlush(o)
-	case "reconcile":
-		return cmdReconcile(o)
-	case "digest":
-		if len(args) < 2 {
-			return exitcode.Errorf(exitcode.BadCall, "нужен идентификатор задачи")
-		}
-		return cmdTaskDigest(o, args[1])
-	case "index":
-		return cmdIndex(o)
-	case "tasks":
-		return cmdTasks(o, args[1:])
-	default:
-		return cmdDigest(o, args[0])
 	}
+	return dispatch(o, args)
 }
 
 // boolFlags — флаги без значения; у остальных следующий довод считается их
@@ -370,6 +308,9 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   --before N         context: записей до якоря (10)
   --after N          context: записей после якоря (20)
   --timeout N        watch/delegate: секунды числом либо вид 30m (1800)
+  --wait-free N      send/delegate: ждать освобождения занятой панели, секунды
+                     или 10m; 0 — отказать сразу
+  --search-timeout N find: предел ожидания cass, секунды (30)
   --once             supervisor: один проход и выход, для cron или проверки
   --interval N       supervisor: пауза между проходами, секунды или 5m (30)
   --max-per-tick N   supervisor: сколько отчётов дожимать за проход (3)
