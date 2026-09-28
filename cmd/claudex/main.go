@@ -62,6 +62,8 @@ type opts struct {
 	intervalRaw   string
 	interval      time.Duration
 	maxPerTick    int
+	silenceRaw    string
+	silence       time.Duration
 	fullReport    bool
 	notifyWaitRaw string
 	notifyWait    time.Duration
@@ -113,6 +115,8 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.BoolVar(&o.reconcile, "reconcile", false,
 		"supervisor: собирать отчёты и за молчунов (по умолчанию только дожим)")
 	fs.StringVar(&o.intervalRaw, "interval", "30", "supervisor: пауза между проходами, секунды или 5m")
+	fs.StringVar(&o.silenceRaw, "silence-grace", "300",
+		"supervisor: сколько ждать после окончания хода, прежде чем считать молчание окончательным")
 	fs.IntVar(&o.maxPerTick, "max-per-tick", 3, "supervisor: сколько отчётов дожимать за проход")
 	fs.BoolVar(&o.wait, "wait", false,
 		"send: дождаться конца работы, заняв ход (умолчание — не ждать)")
@@ -159,6 +163,9 @@ func run() error {
 	}
 	if iv, err := parseTimeout(o.intervalRaw); err == nil {
 		o.interval = iv
+	}
+	if sg, err := parseTimeout(o.silenceRaw); err == nil {
+		o.silence = sg
 	}
 	d, err := parseTimeout(o.timeoutRaw)
 	if err != nil {
@@ -366,6 +373,9 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   --once             supervisor: один проход и выход, для cron или проверки
   --interval N       supervisor: пауза между проходами, секунды или 5m (30)
   --max-per-tick N   supervisor: сколько отчётов дожимать за проход (3)
+  --silence-grace N  supervisor: сколько ждать после окончания хода, прежде чем
+                     будить за молчуна (300); задача может вызвать done и через
+                     минуту, а её собственный отчёт ценнее наблюдения
   --reconcile        supervisor: собирать отчёты и за молчунов; по умолчанию
                      только дожим — сборка читает живые экраны и трогает
                      куда больше поручений

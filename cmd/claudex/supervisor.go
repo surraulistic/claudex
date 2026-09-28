@@ -46,6 +46,7 @@ func cmdSupervisor(o opts, args []string) error {
 		Journal: journal.Open(defaultJournal()), Client: client(),
 		StatusPath: supervise.StatusPath(),
 		Interval:   o.interval, MaxPerTick: o.maxPerTick, Reconcile: o.reconcile,
+		SilenceGrace: o.silence,
 	})
 	if o.once {
 		t := s.Once(context.Background())
