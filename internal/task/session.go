@@ -65,18 +65,16 @@ func deliverSession(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		}
 	}
 
-	queued := text
-	if o.Compose != nil {
-		queued = o.Compose(text)
-	}
+	queued, mode := payload(text, o, KindSession)
 	if err := claudesess.Send(ctx, s, queued); err != nil {
 		return fail(CauseSendFailed, err.Error())
 	}
 
 	d.OK = true
+	d.Mode = mode
 	d.Waited = time.Since(started)
 	d.Seconds = int(d.Waited.Seconds())
-	record(j, id, target, KindSession, o.Stage, d)
+	recordWith(j, id, target, KindSession, o.Stage, mode, d)
 	return d
 }
 

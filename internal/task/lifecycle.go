@@ -55,6 +55,10 @@ type Lifecycle struct {
 	// или панель herdr. Наблюдателю он безразличен: будит он одинаково, а
 	// разница живёт в доставке.
 	CallerKind string `json:"caller_kind,omitempty"`
+	// Delivery — чем затеявшего будили в последний раз и чем разбудят: событием
+	// или отчётом целиком. Видно, чтобы «почему мне прилетела сводка» имело
+	// ответ.
+	Delivery string `json:"delivery,omitempty"`
 }
 
 // StateOf выводит состояние поручения из журнала.
@@ -88,12 +92,21 @@ func StateOf(recs []journal.Record, id string) Lifecycle {
 			l.Reason = r.Reason
 		case journal.Notified:
 			sawNotify = true
+			if r.Delivery != "" {
+				l.Delivery = r.Delivery
+			}
 			if r.Stage == StageReported && r.Outcome == WokeUp {
 				delivered = true
 			}
 		}
 	}
 
+	if l.Delivery == "" && l.CallerKind != "" {
+		l.Delivery = DeliveryFull
+		if WakeCapable(l.CallerKind) {
+			l.Delivery = DeliveryEvent
+		}
+	}
 	switch {
 	case reported:
 		// Отчёт есть. Дошёл ли он — отдельный вопрос, и ответ на него важнее

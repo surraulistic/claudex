@@ -140,3 +140,13 @@ func TestSessionListIsTheRecommendedDiscovery(t *testing.T) {
 		t.Error("в справке не описано распознавание адресата")
 	}
 }
+
+func TestEventWakeIsDocumentedAsTheNormalPath(t *testing.T) {
+	// Если справка молчит, «почему мне прилетела сводка» останется без ответа.
+	if !strings.Contains(helpText, "--full-report") {
+		t.Fatal("флага возврата к прежнему поведению нет в справке")
+	}
+	if !strings.Contains(helpText, "событием") {
+		t.Error("в справке не сказано, что обычный путь — событие")
+	}
+}

@@ -41,6 +41,8 @@ type FlushOptions struct {
 	Client  *herdr.Client
 	Max     int
 	Budget  time.Duration
+	// FullReport — слать отчёт целиком даже тем, кого можно разбудить событием.
+	FullReport bool
 	// Skip — поручения, которые на этот раз трогать не надо. Наблюдатель
 	// держит здесь адреса, только что отказавшие: повторять попытку каждый
 	// тик — шум, а не настойчивость.
@@ -123,7 +125,10 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 		d := Deliver(ctx, o.Client, o.Journal, l.Task, l.Target,
 			flushText(l),
 			DeliverOptions{Stage: l.Stage, Kind: st.kind, WantSession: l.Target,
-				Compose: compose, HumanTold: true,
+				Compose: compose, HumanTold: true, FullReport: o.FullReport,
+				Event: &Event{Task: l.Task, Stage: l.Stage, Executor: st.pane,
+					State:  StateOf(recs, l.Task).State,
+					Reason: "отчёт был готов, но сразу не доставился (" + l.Reason + ")"},
 				Deadline: flushDeadline, Poll: 200 * time.Millisecond})
 
 		out = append(out, Flushed{

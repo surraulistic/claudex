@@ -211,6 +211,8 @@ type ReportOptions struct {
 	Compose func(summary, task string, from, to time.Time, pane string) string
 	// Pane — панель, из которой отчитываются. Пусто читается как $HERDR_PANE_ID.
 	Pane string
+	// FullReport — слать отчёт целиком даже тому, кто может прочитать сам.
+	FullReport bool
 	// Deadline — сколько ждать освобождения ведущего. Здесь он короткий, в
 	// отличие от наблюдателя: done выполняется внутри хода самой задачи, и
 	// держать её минутами нельзя. Не дождались — говорим человеку сразу.
@@ -333,6 +335,9 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
 		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
 			Compose: compose, HumanTold: st.toldHuman[StageReported],
+			FullReport: o.FullReport,
+			Event: &Event{Task: id, Stage: StageReported, Executor: pane,
+				State: stateOfOutcome(outcome), Reason: reason},
 			Deadline: o.Deadline, Poll: o.Poll})
 	res.Delivered = &d
 	return res, nil
@@ -594,6 +599,8 @@ type Delivery struct {
 	// Refused — почему herdr отказался показывать. Пусто при удачном показе.
 	Refused string `json:"refused,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	// Mode — чем будили: событием или отчётом целиком.
+	Mode string `json:"mode,omitempty"`
 }
 
 // Исходы доставки, как они пишутся в журнал. Признак «не доставлено» может
@@ -706,6 +713,11 @@ type DeliverOptions struct {
 	// Stage — что именно доставляется. Дедупликация ведётся по паре
 	// задача+стадия: повторный done не должен будить ведущего второй раз.
 	Stage string
+	// Event — минимальное пробуждение вместо отчёта. Уходит адресату, который
+	// умеет прочитать поручение сам; остальным идёт отчёт целиком.
+	Event *Event
+	// FullReport требует отчёт целиком даже там, где событие возможно.
+	FullReport bool
 	// Deadline — сколько ждать, пока ведущий освободится. Ожидание живёт в уже
 	// запущенном наблюдателе и стоит только опроса herdr: токенов оно не тратит,
 	// поэтому пятнадцати секунд здесь было мало на порядок.
@@ -846,17 +858,15 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		return d
 	}
 
-	queued := text
-	if o.Compose != nil {
-		queued = o.Compose(text)
-	}
+	queued, mode := payload(text, o, KindThread)
 	err := codex.Send(ctx, thread, queued,
 		codex.SendOptions{Attempts: o.QueueAttempts, Gap: o.QueueGap})
 	d.Waited = time.Since(started)
 	d.Seconds = int(d.Waited.Seconds())
 	if err == nil {
 		d.OK = true
-		record(j, id, thread, KindThread, o.Stage, d)
+		d.Mode = mode
+		recordWith(j, id, thread, KindThread, o.Stage, mode, d)
 		return d
 	}
 
@@ -1012,6 +1022,10 @@ func short(id string) string {
 }
 
 func record(j *journal.Journal, id, target, kind, stage string, d Delivery) {
+	recordWith(j, id, target, kind, stage, "", d)
+}
+
+func recordWith(j *journal.Journal, id, target, kind, stage, mode string, d Delivery) {
 	if j == nil {
 		return
 	}
@@ -1028,6 +1042,7 @@ func record(j *journal.Journal, id, target, kind, stage string, d Delivery) {
 	}
 	j.Append(journal.Record{
 		Task: id, Event: journal.Notified, Target: target, TargetKind: kind, Stage: stage,
-		Cause: d.Cause, Outcome: outcome, Reason: d.Reason,
+		Delivery: mode,
+		Cause:    d.Cause, Outcome: outcome, Reason: d.Reason,
 	})
 }

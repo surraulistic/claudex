@@ -226,7 +226,11 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 		fmt.Sprintf("Поручение %s закончено, но отчёта задача не дала — ClauDex собрал его с живого экрана панели %s:\n\n%s",
 			a.Task, a.Pane, text),
 		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
-			Compose: compose, Deadline: 15 * time.Second, Poll: time.Second})
+			Compose: compose,
+			Event: &Event{Task: a.Task, Stage: StageReported, Executor: a.Pane,
+				State:  StateLost,
+				Reason: "задача закончила и не отчиталась; ClauDex собрал итог с экрана"},
+			Deadline: 15 * time.Second, Poll: time.Second})
 	r.Delivered, r.Cause, r.Reason = d.OK, d.Cause, d.Reason
 	return r
 }

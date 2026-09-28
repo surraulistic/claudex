@@ -63,11 +63,25 @@ func TestReopenedThreadGetsTheWholeReportOnTheNextTouch(t *testing.T) {
 	if len(*sent) != 1 || (*sent)[0].thread != otherThread {
 		t.Fatalf("ушло именно в свой разговор, получено %+v", *sent)
 	}
-	if !strings.Contains((*sent)[0].message, "полный текст отчёта") {
-		t.Fatalf("отчёт уехал целиком, получено %q", (*sent)[0].message)
+	// В разговор уходит событие, а не отчёт: технической переписке инструмента
+	// там не место. Неизменным остаётся другое — разбудили и сказали, где
+	// читать, а сам текст цел в журнале.
+	msg := (*sent)[0].message
+	if strings.Contains(msg, "полный текст отчёта") {
+		t.Fatalf("отчёт в диалог не кладётся, получено %q", msg)
 	}
-	if !strings.Contains((*sent)[0].message, "Отложенный отчёт") {
-		t.Fatal("сказано, что это досылка, а не свежий отчёт")
+	if !strings.Contains(msg, "465a77fc") || !strings.Contains(msg, "claudex task log") {
+		t.Fatalf("сказано, что случилось и где читать, получено %q", msg)
+	}
+	recs2, _ := j.Read()
+	var kept bool
+	for _, r := range recs2 {
+		if r.Event == journal.Reported && strings.Contains(r.Reason, "полный текст отчёта") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("текст отчёта цел в журнале")
 	}
 	recs, _ := j.Read()
 	if l := LostReports(recs); len(l) != 0 {

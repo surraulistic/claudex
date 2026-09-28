@@ -186,7 +186,11 @@ func cmdTaskOne(o opts, id string) error {
 		fmt.Printf("  исполнитель: %s\n", l.Executor)
 	}
 	if l.Caller != "" {
-		fmt.Printf("  вернуть: %s (%s)\n", l.Caller, l.CallerKind)
+		how := "событием, читает сам"
+		if l.Delivery == task.DeliveryFull {
+			how = "отчётом целиком"
+		}
+		fmt.Printf("  вернуть: %s (%s, %s)\n", l.Caller, l.CallerKind, how)
 	}
 	if l.Reason != "" {
 		fmt.Printf("  %s\n", l.Reason)
@@ -233,6 +237,14 @@ func cmdDoctor(o opts) error {
 		add("панель-затейник", true, "%s — отчёт вернётся сюда", p)
 	} else {
 		add("кому возвращать", false, "ни треда, ни разговора, ни панели: отчёт будет некому отдать")
+	}
+
+	if task.WakeCapable(callerKind()) {
+		add("способ пробуждения", true,
+			"событие: затеявший читает поручение сам (claudex task / task log)")
+	} else {
+		add("способ пробуждения", true,
+			"отчёт целиком: этот адресат читать сам не умеет — так и задумано")
 	}
 
 	if st, alive := supervise.Read(supervise.StatusPath()); alive {
@@ -297,4 +309,16 @@ func cmdSession(o opts, args []string) error {
 			"%q — не подкоманда (list)", args[0])
 	}
 	return cmdPeers(o)
+}
+
+// callerKind — чем является тот, кто нас позвал. Для doctor: способ
+// пробуждения зависит именно от этого.
+func callerKind() string {
+	if codex.ThreadID() != "" {
+		return task.KindThread
+	}
+	if strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")) != "" {
+		return task.KindSession
+	}
+	return task.KindPane
 }

@@ -62,6 +62,7 @@ type opts struct {
 	intervalRaw   string
 	interval      time.Duration
 	maxPerTick    int
+	fullReport    bool
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -105,6 +106,8 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.BoolVar(&o.fullReport, "full-report", false,
+		"слать отчёт целиком даже тому, кого можно разбудить событием (прежнее поведение)")
 	fs.BoolVar(&o.once, "once", false,
 		"supervisor: один проход и выход (для cron или проверки)")
 	fs.BoolVar(&o.reconcile, "reconcile", false,
@@ -256,7 +259,7 @@ func run() error {
 var boolFlags = map[string]bool{
 	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
-	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true,
+	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true, "full-report": true,
 }
 
 func splitArgs(argv []string) (flags, rest []string) {
@@ -373,6 +376,9 @@ digest = task log. Новых вызовов на них лучше не зав�
   --reconcile        supervisor: собирать отчёты и за молчунов; по умолчанию
                      только дожим — сборка читает живые экраны и трогает
                      куда больше поручений
+  --full-report      будить отчётом целиком, а не событием; событием будятся
+                     те, кто умеет прочитать поручение сам — тред Codex и
+                     разговор Claude Code
   --wait             send: дождаться конца работы, заняв ход; умолчание send —
                      не ждать, отчёт придёт сообщением
   --no-wait          delegate: отправить и выйти (у send это умолчание)
@@ -1941,7 +1947,7 @@ func cmdDone(o opts, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	res, err := task.Report(ctx, id, outcome, reason, task.ReportOptions{
-		Client: client(), Journal: journal.Open(defaultJournal()),
+		Client: client(), Journal: journal.Open(defaultJournal()), FullReport: o.fullReport,
 		// Ведущему уходит не только строка исхода: по одной строке продолжать
 		// планирование нельзя, а перечитывать транскрипт руками он не обязан.
 		//

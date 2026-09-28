@@ -114,6 +114,32 @@ claudex supervisor --once           # single pass, for cron
 nohup claudex supervisor >>~/.claudex/supervisor.log 2>&1 &
 ```
 
+What arrives in your conversation is an **event, not a report**:
+
+```
+claudex: поручение 43bc6e11 — готово (исполнитель wE:p13)
+миграции применены на dev и stage
+
+Это событие, а не отчёт. Подробности читай сам:
+  claudex task 43bc6e11
+  claudex task log 43bc6e11
+```
+
+That is deliberate. A full report pasted into the conversation is the tool
+talking where a colleague should be, and it hands the coordinator a ready
+retelling to repeat in its own words. An event says what changed and where the
+source is; the coordinator reads `claudex task log` and answers from the
+original.
+
+Only a caller that can run commands gets an event — a Codex thread or a Claude
+Code conversation. A herdr pane notification is read by a person, and telling a
+person to go read it themselves just moves the tool's work onto them, so panes
+still receive the whole report. `--full-report` forces the old behaviour
+anywhere.
+
+`claudex task <id>` shows which of the two applies, and `claudex doctor` shows
+it for your own session.
+
 It is a plain process, not a language model, and **it never writes a report of
 its own**. Retelling work you did not do is invention delivered in a confident
 voice. It notices a state change and wakes the caller; the caller then reads

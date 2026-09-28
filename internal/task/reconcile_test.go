@@ -78,8 +78,17 @@ func TestFinalWithoutDoneIsCollectedAndDelivered(t *testing.T) {
 	if !got[0].Synthetic || !got[0].Delivered {
 		t.Fatalf("отчёт собран и доставлен, получено %+v", got[0])
 	}
-	if len(*sent) != 1 || !strings.Contains((*sent)[0].message, "payment") {
-		t.Fatalf("в разговор уехал сам финал, получено %+v", *sent)
+	// Ведущего будят событием; собранный финал лежит в журнале и читается
+	// через `claudex task log`. Класть его в диалог значит подменять ответ
+	// координатора служебной сводкой.
+	if len(*sent) != 1 {
+		t.Fatalf("ведущего разбудили ровно раз, получено %+v", *sent)
+	}
+	if strings.Contains((*sent)[0].message, "payment") {
+		t.Fatalf("сам финал в диалог не уезжает, получено %q", (*sent)[0].message)
+	}
+	if !strings.Contains((*sent)[0].message, silentTask) {
+		t.Fatalf("в событии назван идентификатор, получено %q", (*sent)[0].message)
 	}
 
 	// Отчёт лёг в журнал как обычный и помечен собранным.
