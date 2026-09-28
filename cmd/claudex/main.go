@@ -67,6 +67,8 @@ type opts struct {
 	fullReport    bool
 	dryRun        bool
 	jsonOut       bool
+	archiveRaw    string
+	archiveAfter  time.Duration
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -110,6 +112,8 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.StringVar(&o.archiveRaw, "archive-after", "0",
+		"supervisor: раз в сутки уносить в архив поручения старше этого срока; 0 — не уносить")
 	fs.BoolVar(&o.dryRun, "dry-run", false,
 		"archive: посчитать и ничего не трогать")
 	fs.BoolVar(&o.jsonOut, "json", false,
@@ -172,6 +176,9 @@ func run() error {
 	}
 	if sg, err := parseTimeout(o.silenceRaw); err == nil {
 		o.silence = sg
+	}
+	if aa, err := parseTimeout(o.archiveRaw); err == nil {
+		o.archiveAfter = aa
 	}
 	d, err := parseTimeout(o.timeoutRaw)
 	if err != nil {
@@ -358,6 +365,9 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   --json             sessions/brief: полный JSON вместо строки на панель —
                      он в двадцать раз дороже по контексту
   --dry-run          archive: посчитать и ничего не трогать
+  --archive-after N  supervisor: раз в сутки уносить в архив поручения старше
+                     срока (0 — не уносить). Журнал — единственная память об
+                     этой работе, поэтому по умолчанию выключено
   --pretty           JSON с отступами
 
 Прежние имена работают и останутся: delegate = send, tasks = task list,

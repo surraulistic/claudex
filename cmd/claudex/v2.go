@@ -267,6 +267,11 @@ func cmdDoctor(o opts) error {
 	}
 
 	jp := defaultJournal()
+	if fi, err := os.Stat(jp); err == nil && fi.Size() > 4<<20 {
+		add("размер журнала", false,
+			"%.1f МБ и растёт: архивация включается флагом наблюдателя --archive-after 30",
+			float64(fi.Size())/(1<<20))
+	}
 	recs, err := journal.Open(jp).Read()
 	if err != nil {
 		add("журнал", false, "%s: %v", jp, err)

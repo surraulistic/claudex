@@ -47,6 +47,7 @@ func cmdSupervisor(o opts, args []string) error {
 		StatusPath: supervise.StatusPath(),
 		Interval:   o.interval, MaxPerTick: o.maxPerTick, Reconcile: o.reconcile,
 		SilenceGrace: o.silence,
+		ArchiveAfter: o.archiveAfter, JournalPath: defaultJournal(),
 	})
 	if o.once {
 		t := s.Once(context.Background())
@@ -84,6 +85,9 @@ func supervisorStatus(o opts) error {
 	fmt.Printf("  доставлено %d, отказов %d, ждут %d, отложено %d\n",
 		st.Delivered, st.Failed, st.Pending, st.Deferred)
 	fmt.Printf("  последний тик: %s назад\n", time.Since(st.LastTick).Round(time.Second))
+	if st.ArchiveNote != "" {
+		fmt.Printf("  архив: %s\n", st.ArchiveNote)
+	}
 	return nil
 }
 

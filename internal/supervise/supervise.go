@@ -20,6 +20,7 @@ package supervise
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -60,6 +61,13 @@ type Options struct {
 	// SilenceGrace — сколько ждать после окончания хода, прежде чем считать
 	// молчание окончательным.
 	SilenceGrace time.Duration
+	// ArchiveAfter — с какой давности уносить поручения в архив. Ноль значит
+	// «не уносить»: журнал — единственная память об этой работе, и решать за
+	// человека, когда её перекладывать, инструмент не должен. Включается
+	// флагом, и тогда наблюдатель делает это раз в сутки.
+	ArchiveAfter time.Duration
+	// JournalPath нужен архивации: она работает с файлом, а не с записями.
+	JournalPath string
 
 	Now func() time.Time
 	// Flush подменяется в тестах. Настоящий — task.Flush.
@@ -77,6 +85,8 @@ type Status struct {
 	Pending     int       `json:"pending"`
 	Deferred    int       `json:"deferred"`
 	Woken       int       `json:"woken"`
+	Archived    int       `json:"archived"`
+	ArchiveNote string    `json:"archive_note,omitempty"`
 	Interval    string    `json:"interval"`
 	Reconciling bool      `json:"reconciling"`
 }
@@ -94,10 +104,11 @@ type Tick struct {
 // Supervisor хранит то, чего нет в журнале: когда следующий раз трогать адрес,
 // который отказал.
 type Supervisor struct {
-	o    Options
-	next map[string]time.Time
-	wait map[string]time.Duration
-	stat Status
+	o           Options
+	next        map[string]time.Time
+	wait        map[string]time.Duration
+	stat        Status
+	lastArchive time.Time
 }
 
 func New(o Options) *Supervisor {
@@ -151,17 +162,26 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 			t.Deferred++
 		}
 	}
-	if t.Deferred == len(lost) {
-		// Всё отложено — тик пустой, и это нормальный исход, а не сбой.
-		s.record(now, t)
-		return t
+	// Ранний выход отсюда убран намеренно. Дважды он отрезал то, что стояло
+	// ниже: сперва пробуждение за молчунов, потом уборку журнала. Выход
+	// посреди функции — не невнимательность, а форма, которая к этому
+	// располагает; поэтому дожим отделён, а обязательное идёт после него
+	// безусловно.
+	if t.Deferred < len(lost) {
+		s.flushPending(ctx, &t, skip, now)
 	}
+	s.archiveOnce(now)
+	s.record(now, t)
+	return t
+}
 
-	got := s.o.Flush(ctx, task.FlushOptions{
+// flushPending досылает то, что не дошло. Всё, что «всё отложено» — обычный
+// исход, а не сбой.
+func (s *Supervisor) flushPending(ctx context.Context, t *Tick, skip map[string]bool, now time.Time) {
+	for _, f := range s.o.Flush(ctx, task.FlushOptions{
 		Journal: s.o.Journal, Client: s.o.Client,
 		Max: s.o.MaxPerTick, Budget: s.o.Budget, Skip: skip,
-	})
-	for _, f := range got {
+	}) {
 		if f.Ok {
 			t.Delivered = append(t.Delivered, f.Task)
 			delete(s.next, f.Task)
@@ -171,8 +191,31 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 		t.Failed = append(t.Failed, f.Task)
 		s.defer_(f.Task, now)
 	}
-	s.record(now, t)
-	return t
+}
+
+// archiveOnce уносит давнее в архив не чаще раза в сутки.
+//
+// Реже, чем тик, намеренно: журнал переписывается целиком, и делать это каждую
+// минуту — тратить работу впустую и держать окно, в котором сбой застанет
+// перезапись.
+func (s *Supervisor) archiveOnce(now time.Time) {
+	if s.o.ArchiveAfter <= 0 || s.o.JournalPath == "" {
+		return
+	}
+	if !s.lastArchive.IsZero() && now.Sub(s.lastArchive) < 24*time.Hour {
+		return
+	}
+	s.lastArchive = now
+	res, err := journal.Archive(s.o.JournalPath, s.o.ArchiveAfter, false)
+	if err != nil {
+		s.stat.ArchiveNote = "архивация не прошла: " + err.Error()
+		return
+	}
+	s.stat.Archived += res.Moved
+	if res.Moved > 0 {
+		s.stat.ArchiveNote = fmt.Sprintf("перенесено %d записей по %d поручениям в %s",
+			res.Moved, res.Tasks, filepath.Base(res.Path))
+	}
 }
 
 // wakeSilent будит затеявшего за тех, кто закончил ход и замолчал.

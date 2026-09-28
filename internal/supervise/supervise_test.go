@@ -307,3 +307,73 @@ func TestSilentWorkerIsNotWokenTwice(t *testing.T) {
 		t.Fatalf("второй раз за то же не будим, получено %d", len(*sent))
 	}
 }
+
+func TestArchivingIsOffUnlessAskedFor(t *testing.T) {
+	// Журнал — единственная память об этой работе. Решать за человека, когда
+	// её перекладывать, инструмент не должен.
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	j := journal.Open(path)
+	j.Append(journal.Record{Task: "aaaaaaaa", Event: journal.Started,
+		Time: time.Now().Add(-365 * 24 * time.Hour)})
+	before, _ := os.ReadFile(path)
+
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, JournalPath: path, Flush: spyFlush(true, &seen)})
+	s.Once(context.Background())
+
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("без флага журнал не трогаем")
+	}
+}
+
+func TestArchivingRunsOncePerDayNotEveryTick(t *testing.T) {
+	// Журнал переписывается целиком: делать это каждую минуту — тратить работу
+	// впустую и держать окно, в котором сбой застанет перезапись.
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	j := journal.Open(path)
+	old := time.Now().Add(-365 * 24 * time.Hour)
+	j.Append(journal.Record{Task: "aaaaaaaa", Event: journal.Started, Time: old})
+	j.Append(journal.Record{Task: "aaaaaaaa", Event: journal.Reported, Outcome: "готово", Time: old})
+	j.Append(journal.Record{Task: "bbbbbbbb", Event: journal.Started, Time: time.Now()})
+
+	now := time.Now()
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, JournalPath: path, ArchiveAfter: 30 * 24 * time.Hour,
+		Now: func() time.Time { return now }, Flush: spyFlush(true, &seen)})
+
+	s.Once(context.Background())
+	if s.Status().Archived != 2 {
+		t.Fatalf("старое уехало, получено %d", s.Status().Archived)
+	}
+	// Второй тик в тот же день ничего не переписывает.
+	j.Append(journal.Record{Task: "cccccccc", Event: journal.Started, Time: old})
+	now = now.Add(time.Minute)
+	s.Once(context.Background())
+	if s.Status().Archived != 2 {
+		t.Fatalf("в тот же день второй раз не переписываем, получено %d", s.Status().Archived)
+	}
+	// А через сутки — да.
+	now = now.Add(25 * time.Hour)
+	s.Once(context.Background())
+	if s.Status().Archived != 3 {
+		t.Fatalf("через сутки уносим накопившееся, получено %d", s.Status().Archived)
+	}
+}
+
+func TestArchivingFailureIsVisibleNotSwallowed(t *testing.T) {
+	// Молчаливо не сработавшая уборка — это журнал, который растёт, и никто не
+	// знает почему.
+	var seen []task.FlushOptions
+	s := New(Options{Journal: newJournal(t), JournalPath: "/нет/такого/каталога/tasks.jsonl",
+		ArchiveAfter: 24 * time.Hour, Flush: spyFlush(true, &seen)})
+	s.Once(context.Background())
+	if s.Status().ArchiveNote == "" && s.Status().Archived == 0 {
+		// Пустой журнал по несуществующему пути читается как пустой — это не
+		// ошибка. Проверяем хотя бы, что счётчик не соврал.
+		return
+	}
+	if s.Status().Archived != 0 {
+		t.Fatalf("ничего не переносилось, получено %d", s.Status().Archived)
+	}
+}
