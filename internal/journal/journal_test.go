@@ -142,3 +142,65 @@ func mustRead(t *testing.T, p string) []byte {
 	}
 	return b
 }
+
+func parseCount() int {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	return parses
+}
+
+func TestJournalIsParsedOncePerChange(t *testing.T) {
+	// Одна команда claudex читала журнал до девяти раз подряд — девять
+	// разборов двух мегабайт ради одних и тех же данных.
+	j := Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	if err := j.Append(Record{Task: "aaaaaaaa", Event: Started}); err != nil {
+		t.Fatal(err)
+	}
+	before := parseCount()
+	for i := 0; i < 5; i++ {
+		if _, err := j.Read(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := parseCount() - before; got > 1 {
+		t.Fatalf("пять чтений — один разбор, получено %d", got)
+	}
+}
+
+func TestOutsideAppendIsNoticed(t *testing.T) {
+	// Журнал дописывают и другие процессы: наблюдатель, соседний claudex, хук
+	// из чужой сессии. Отдать им вчерашнюю копию значит потерять их работу.
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	j := Open(path)
+	j.Append(Record{Task: "aaaaaaaa", Event: Started})
+	if recs, _ := j.Read(); len(recs) != 1 {
+		t.Fatalf("одна запись, получено %d", len(recs))
+	}
+
+	// Пишем в обход — так это делает другой процесс.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"task":"bbbbbbbb","event":"started","time":"2026-09-28T00:00:00Z"}` + "\n")
+	f.Close()
+
+	recs, err := j.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("чужую запись увидели, получено %d", len(recs))
+	}
+}
+
+func TestOwnAppendIsVisibleImmediately(t *testing.T) {
+	j := Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	j.Append(Record{Task: "aaaaaaaa", Event: Started})
+	j.Read()
+	j.Append(Record{Task: "aaaaaaaa", Event: Reported, Outcome: "готово"})
+	recs, _ := j.Read()
+	if len(recs) != 2 {
+		t.Fatalf("своя запись видна сразу, получено %d", len(recs))
+	}
+}

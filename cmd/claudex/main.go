@@ -65,6 +65,8 @@ type opts struct {
 	silenceRaw    string
 	silence       time.Duration
 	fullReport    bool
+	dryRun        bool
+	jsonOut       bool
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -108,6 +110,10 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.BoolVar(&o.dryRun, "dry-run", false,
+		"archive: посчитать и ничего не трогать")
+	fs.BoolVar(&o.jsonOut, "json", false,
+		"sessions/brief: полный JSON вместо строки на панель (вдвадцатеро дороже по контексту)")
 	fs.BoolVar(&o.fullReport, "full-report", false,
 		"слать отчёт целиком даже тому, кого можно разбудить событием (прежнее поведение)")
 	fs.BoolVar(&o.once, "once", false,
@@ -206,7 +212,7 @@ func run() error {
 var boolFlags = map[string]bool{
 	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
-	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true, "full-report": true,
+	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true, "full-report": true, "dry-run": true, "json": true,
 }
 
 func splitArgs(argv []string) (flags, rest []string) {
@@ -238,7 +244,9 @@ func splitArgs(argv []string) (flags, rest []string) {
 const helpText = `claudex — сводка по сессиям Claude Code (cass + herdr)
 
   claudex sessions                       какие панели живы и что у них с историей
-  claudex brief                          все панели разом: хвост, сигналы, история
+  claudex brief                          все панели разом: строка на панель.
+                                         --json отдаёт полный JSON — он в
+                                         двадцать раз дороже по контексту
   claudex <цель>                         полный дайджест одной панели
   claudex search <цель> "<запрос>"       поиск внутри одной сессии
   claudex find "<запрос>"                поиск по всем транскриптам, включая закрытые
@@ -262,7 +270,9 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
                                          --panel — прежний транспорт через herdr
                                          --session — снять двусмысленность в
                                          скриптах; в обиходе не нужен
-  claudex task list                      какие поручения ещё ждут
+  claudex task list                      какие поручения ещё ждут; брошенные
+                                         (без движения дольше трёх суток)
+                                         прячутся — их покажет --all
   claudex task <id>                      состояние одного поручения
   claudex task log <id>                  подробный ход работы: команды, реплики,
                                          свежесть (task digest — прежнее имя)
@@ -343,8 +353,11 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   --notify-timeout N delegate: сколько ждать освобождения ведущего (1800);
                      не дождались — факт уходит человеку уведомлением herdr
   --raw              запрос уходит в FTS5 как есть, без экранирования
-    --compact          sessions/brief: строка на панель вместо JSON. Вдесятеро
-                       дешевле по контексту: brief 17 КБ → 0.4 КБ
+  --compact          sessions/brief: строка на панель. Теперь это умолчание,
+                     флаг оставлен для совместимости
+  --json             sessions/brief: полный JSON вместо строки на панель —
+                     он в двадцать раз дороже по контексту
+  --dry-run          archive: посчитать и ничего не трогать
   --pretty           JSON с отступами
 
 Прежние имена работают и останутся: delegate = send, tasks = task list,
@@ -354,6 +367,8 @@ digest = task log. Новых вызовов на них лучше не зав�
   claudex tell <разговор> "<текст>"      сырое сообщение без учёта. Если ждёте
                                          результат или продолжаете работу —
                                          это send, а не tell
+  claudex archive [дней]                 унести в архив поручения, по которым
+                                         давно ничего не происходит (30)
   claudex flush                          починка вручную: дослать зависшие
                                          отчёты (это же делает наблюдатель сам)
   claudex reconcile                      починка вручную: собрать отчёт за
@@ -639,7 +654,7 @@ func cmdSessions(o opts, withTail bool) error {
 		for i, s := range seen {
 			views[i] = s.view
 		}
-		if o.compact {
+		if !o.jsonOut {
 			return printLines(compactPanes(views))
 		}
 		return emit(o, map[string]any{"panes": views})
@@ -648,7 +663,7 @@ func cmdSessions(o opts, withTail bool) error {
 	for i, s := range seen {
 		briefs[i] = toBrief(s.view, s.raw, textual.CleanTail(s.raw, lines), s.entries)
 	}
-	if o.compact {
+	if !o.jsonOut {
 		return printLines(compactBriefs(briefs))
 	}
 	return emit(o, map[string]any{

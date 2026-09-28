@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,6 +155,9 @@ func cmdTaskList(o opts) error {
 		return err
 	}
 	open := task.Open(recs)
+	if o.all {
+		open = task.OpenAll(recs)
+	}
 	if o.pretty {
 		return emit(o, map[string]any{"open": open, "count": len(open)})
 	}
@@ -165,7 +169,12 @@ func cmdTaskList(o opts) error {
 		fmt.Printf("  %s  %-12s %-26s %s\n", l.Task, l.State,
 			cutTo(l.Executor, 26), cutTo(oneLine(l.Reason), 44))
 	}
-	fmt.Printf("\nподробнее: claudex task <id> · claudex task log <id>\n")
+	if !o.all {
+		if n := len(task.OpenAll(recs)) - len(open); n > 0 {
+			fmt.Printf("\nещё %d брошенных (без движения дольше трёх суток): claudex task list --all\n", n)
+		}
+	}
+	fmt.Printf("подробнее: claudex task <id> · claudex task log <id>\n")
 	return nil
 }
 
@@ -329,4 +338,40 @@ func callerKind() string {
 		return task.KindSession
 	}
 	return task.KindPane
+}
+
+// cmdArchive уносит из журнала поручения, по которым давно ничего не
+// происходит. Старое не удаляется, а переезжает: разбор инцидента
+// полугодовой давности — обычное дело.
+func cmdArchive(o opts, args []string) error {
+	days := 30
+	if len(args) > 0 {
+		n, err := strconv.Atoi(args[0])
+		if err != nil || n < 1 {
+			return exitcode.Errorf(exitcode.BadCall,
+				"нужно число дней: claudex archive [дней] [--dry-run]")
+		}
+		days = n
+	}
+	res, err := journal.Archive(defaultJournal(), time.Duration(days)*24*time.Hour, o.dryRun)
+	if err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+	if o.pretty {
+		return emit(o, res)
+	}
+	if res.Moved == 0 {
+		fmt.Printf("переносить нечего: всё, что в журнале, свежее %s\n", res.SinceDay)
+		return nil
+	}
+	what := "перенесено"
+	if res.DryRun {
+		what = "перенеслось бы"
+	}
+	fmt.Printf("%s %d записей по %d поручениям (старше %s), останется %d\n",
+		what, res.Moved, res.Tasks, res.SinceDay, res.Kept)
+	if res.Path != "" {
+		fmt.Printf("архив: %s\n", res.Path)
+	}
+	return nil
 }

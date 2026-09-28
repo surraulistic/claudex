@@ -111,3 +111,87 @@ func TestOpenListsOnlyWhatIsStillAwaited(t *testing.T) {
 		t.Fatalf("состояния названы верно, получено %+v", states)
 	}
 }
+
+func TestLongSilenceStopsCountingAsAwaited(t *testing.T) {
+	// Из 293 «ожидающих» 228 были старше недели и давали 85% веса task list.
+	// На вопрос «что сейчас» такой список не отвечает.
+	now := time.Now()
+	recs := lc(journal.Record{Task: "aaaaaaaa", Event: journal.Started,
+		Pane: "wE:p13", Time: now.Add(-8 * 24 * time.Hour)})
+	if got := StateAt(recs, "aaaaaaaa", now).State; got != StateAbandoned {
+		t.Fatalf("давно не двигалось — брошено, получено %s", got)
+	}
+	if n := len(open(recs, now, false)); n != 0 {
+		t.Fatalf("в ожидающих его нет, получено %d", n)
+	}
+	if n := len(open(recs, now, true)); n != 1 {
+		t.Fatalf("но по запросу видно, получено %d", n)
+	}
+}
+
+func TestRecentAssignmentIsStillAwaited(t *testing.T) {
+	now := time.Now()
+	recs := lc(journal.Record{Task: "bbbbbbbb", Event: journal.Started,
+		Pane: "wE:p13", Time: now.Add(-time.Hour)})
+	if got := StateAt(recs, "bbbbbbbb", now).State; got != StateSent {
+		t.Fatalf("свежее ждут, получено %s", got)
+	}
+}
+
+func TestAnyMovementResetsTheClock(t *testing.T) {
+	// Давность считается по последней записи, а не по заведению: поручение
+	// недельной давности, по которому вчера был ход, живое.
+	now := time.Now()
+	recs := lc(
+		journal.Record{Task: "cccccccc", Event: journal.Started, Pane: "wE:p13",
+			Time: now.Add(-8 * 24 * time.Hour)},
+		journal.Record{Task: "cccccccc", Event: journal.Idle, Reason: "ещё работаю",
+			Time: now.Add(-2 * time.Hour)},
+	)
+	if got := StateAt(recs, "cccccccc", now).State; got != StateSent {
+		t.Fatalf("движение вчера — не брошено, получено %s", got)
+	}
+}
+
+func TestAbandonedIsNotHiddenFromItsOwnLookup(t *testing.T) {
+	// Брошенное — не то же, что несуществующее: спросили прямо — ответили.
+	now := time.Now()
+	recs := lc(journal.Record{Task: "dddddddd", Event: journal.Started,
+		Pane: "wE:p13", Target: "тред", TargetKind: KindThread,
+		Time: now.Add(-30 * 24 * time.Hour)})
+	l := StateAt(recs, "dddddddd", now)
+	if l.State != StateAbandoned || l.Executor != "wE:p13" {
+		t.Fatalf("состояние и исполнитель названы, получено %+v", l)
+	}
+}
+
+func TestStaleUndeliveredLeavesTheLiveList(t *testing.T) {
+	// Сперва я сделал недоставленное нестареющим — «текст цел, дослать можно
+	// когда угодно». Это верно про текст и неверно про список: 63 сентябрьских
+	// отчёта занимали ответ на вопрос «что происходит сейчас». Дожим и --all
+	// видят их по-прежнему.
+	now := time.Now()
+	recs := lc(
+		journal.Record{Task: "eeeeeeee", Event: journal.Started, Pane: "wE:p13",
+			Time: now.Add(-30 * 24 * time.Hour)},
+		journal.Record{Task: "eeeeeeee", Event: journal.Reported, Outcome: "готово",
+			Time: now.Add(-30 * 24 * time.Hour)},
+		journal.Record{Task: "eeeeeeee", Event: journal.Notified, Stage: StageReported,
+			Outcome: ToldHuman, Time: now.Add(-30 * 24 * time.Hour)},
+	)
+	if got := StateAt(recs, "eeeeeeee", now).State; got != StateAbandoned {
+		t.Fatalf("давно недоставленное уходит из живого списка, получено %s", got)
+	}
+	// А свежее — остаётся.
+	fresh := lc(
+		journal.Record{Task: "ffff0000", Event: journal.Started, Pane: "wE:p13",
+			Time: now.Add(-time.Hour)},
+		journal.Record{Task: "ffff0000", Event: journal.Reported, Outcome: "готово",
+			Time: now.Add(-time.Hour)},
+		journal.Record{Task: "ffff0000", Event: journal.Notified, Stage: StageReported,
+			Outcome: ToldHuman, Time: now.Add(-time.Hour)},
+	)
+	if got := StateAt(fresh, "ffff0000", now).State; got != StateUndelivered {
+		t.Fatalf("свежее недоставленное видно, получено %s", got)
+	}
+}

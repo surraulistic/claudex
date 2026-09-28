@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -114,7 +115,57 @@ func (j *Journal) Append(r Record) error {
 	return err
 }
 
+// Разобранный журнал держится в памяти процесса.
+//
+// Затем, что одна команда claudex читала его до девяти раз: пять мест в разборе
+// доводов, три в командах и одно в хуке. На двух мегабайтах и полутора тысячах
+// записей это девять разборов подряд ради одних и тех же данных.
+//
+// Кэш проверяется по времени правки и размеру файла, а не по флагу: журнал
+// дописывают и другие процессы — наблюдатель, соседний claudex, хук из чужой
+// сессии, — и отдать им вчерашнюю копию значит потерять их работу. Проверка
+// стоит одного stat вместо разбора двух мегабайт.
+var (
+	cacheMu sync.Mutex
+	cache   = map[string]*cachedFile{}
+	// parses считает разборы. Нужен тестам: без него «кэш работает» —
+	// утверждение, а не измерение.
+	parses int
+)
+
+type cachedFile struct {
+	mod  time.Time
+	size int64
+	recs []Record
+}
+
 func (j *Journal) Read() ([]Record, error) {
+	fi, statErr := os.Stat(j.Path)
+	if statErr == nil {
+		cacheMu.Lock()
+		c, ok := cache[j.Path]
+		if ok && c.mod.Equal(fi.ModTime()) && c.size == fi.Size() {
+			recs := c.recs
+			cacheMu.Unlock()
+			return recs, nil
+		}
+		cacheMu.Unlock()
+	}
+
+	recs, err := j.parse()
+	if err != nil || statErr != nil {
+		return recs, err
+	}
+	cacheMu.Lock()
+	cache[j.Path] = &cachedFile{mod: fi.ModTime(), size: fi.Size(), recs: recs}
+	cacheMu.Unlock()
+	return recs, nil
+}
+
+func (j *Journal) parse() ([]Record, error) {
+	cacheMu.Lock()
+	parses++
+	cacheMu.Unlock()
 	f, err := os.Open(j.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

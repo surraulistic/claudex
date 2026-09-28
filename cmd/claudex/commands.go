@@ -55,6 +55,7 @@ func commands() []command {
 		{Name: "schema", Run: func(opts, []string) error { return cmdSchema() }},
 
 		{Name: "hook", Internal: true, Run: cmdHook},
+		{Name: "archive", Internal: true, Run: cmdArchive},
 		{Name: "tell", Internal: true, Run: cmdTell},
 		{Name: "flush", Internal: true, Run: func(o opts, _ []string) error { return cmdFlush(o) }},
 		{Name: "reconcile", Internal: true, Run: func(o opts, _ []string) error { return cmdReconcile(o) }},
