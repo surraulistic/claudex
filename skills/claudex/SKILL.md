@@ -23,28 +23,55 @@ Search is plain SQLite FTS5 over that index, so it matches any language.
 ## Start here
 
 ```bash
-claudex schema            # output shape + ready-made jq queries (pay only when asked)
-claudex brief --compact   # one line per pane: name, state, what it is doing
-claudex brief             # same, in full JSON — ~40x the context cost
-claudex index             # catch the index up; --full rebuilds from scratch
-claudex tasks             # recent journal tail; --all for the whole thing (30k tokens)
-claudex digest <task-id>  # what actually happened during one delegated task
-claudex undelivered       # what never reached the leader — and what was never sent
-claudex flush             # push those into conversations that have since reopened
-claudex reconcile         # collect a report for a task that finished without `done`
+claudex send <target> "<message>"   # give work. Tracked, does not hold your turn,
+                                    # result comes back to whoever sent it
+claudex task list                   # what is still awaited
+claudex task <id>                   # state of one assignment
+claudex task digest <id>            # what actually happened during it
+claudex doctor                      # is the plumbing intact
+claudex peers                       # which conversations are live
+claudex brief --compact             # one line per pane
+claudex find "<query>"              # search every transcript, including closed
 ```
 
-The index is incremental: a catch-up costs seconds, a full rebuild about half a
-minute. If a digest reports a session missing, run `claudex index` before
-concluding the session is empty.
+`send` is tracked, asynchronous, and returns to its caller by default. The
+caller is whoever ran it — a Codex thread, a Claude Code conversation, or a
+herdr pane — resolved from the environment in that order. There is no
+per-caller flag: returning the result is a property of the assignment, not a
+Codex feature.
 
-One `brief` answers "what is everyone doing" in a single process. Reaching for
-`claudex <target>` per pane costs about five times as much for the same picture.
+Waiting is explicit (`--wait`) because it costs a turn, and you rarely need it:
+the report arrives as a message either way.
 
-```bash
-claudex sessions          # lighter: which panes exist, which have history
-claudex <target>          # full digest of one pane, with history entries
-```
+An assignment moves through named states, and `claudex task <id>` reports the
+one it is in:
+
+| state | meaning |
+|---|---|
+| `created` | text kept, the executor refused the send |
+| `sent` | delivered to the executor, no report yet |
+| `needs_input` | the task says it is blocked on a question |
+| `done` / `failed` | the task reported, and the report reached its caller |
+| `undelivered` | the report exists but never reached the caller — `claudex flush` |
+| `lost` | the executor finished and said nothing — `claudex reconcile` |
+| `working` / `progress` | written by the supervisor; not inferred without one |
+
+`undelivered` is the state worth knowing about: to the caller it is
+indistinguishable from silence, which is why it is named rather than folded
+into `done`.
+
+### Older names, and what not to reach for
+
+`delegate` is `send`, `tasks` is `task list`, `digest` is `task digest`. They
+keep working; new call sites should use the new names.
+
+`tell` posts raw text into a conversation and tracks nothing. If you expect a
+result, or you are continuing work you handed over, that is `send` — a `tell`
+leaves no assignment, so nothing can report on it and nothing can be recovered
+when it goes missing.
+
+`flush`, `reconcile` and `undelivered` are repair, not workflow. They exist for
+when delivery failed, and `claudex doctor` will tell you when that happened.
 
 ## Targets
 

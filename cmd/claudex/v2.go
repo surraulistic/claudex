@@ -1,0 +1,218 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/surraulistic/claudex/internal/claudesess"
+	"github.com/surraulistic/claudex/internal/codex"
+	"github.com/surraulistic/claudex/internal/exitcode"
+	"github.com/surraulistic/claudex/internal/journal"
+	"github.com/surraulistic/claudex/internal/task"
+)
+
+// Публичная поверхность ClauDex.
+//
+// Интерфейс рос кусками: delegate, tell, tasks, digest, flush, reconcile — и
+// по именам уже не читается, что из этого рабочий обиход, а что починка.
+// Здесь он сводится к одной модели: `send` отправляет работу, `task` отвечает
+// на «ну что там», `doctor` проверяет, цела ли обвязка.
+//
+// Старые имена остаются и работают: у них есть вызывающие, которых мы не
+// видим, и ломать их ради стройности нечестно.
+//
+// Кто затеял поручение, `send` не спрашивает. Возврат результата тому, кто
+// затеял, — свойство самого поручения, а не особенность Codex: адрес
+// выбирается из окружения по убыванию точности (тред Codex, разговор Claude
+// Code, панель herdr), и отдельного флага под каждого вызывающего нет.
+
+// cmdSend — отправить работу.
+//
+// От delegate отличается умолчанием: send не занимает ход ожиданием. Ждать
+// приходится редко, а занятый ход стоит дорого — поэтому ожидание стало
+// явным (--wait), а не поведением по умолчанию.
+func cmdSend(o opts, tgt, prompt string) error {
+	if o.headless {
+		return headlessNotReady(tgt, prompt)
+	}
+	if o.newSession {
+		return exitcode.Wrap(exitcode.BadCall, errors.New(
+			"--new пока не реализован: он заведёт нового работника вместо отправки существующему; "+
+				"сейчас назовите цель явно или воспользуйтесь --headless, когда он появится"))
+	}
+	// Ожидание — явное. Всё остальное send берёт у delegate как есть: журнал,
+	// адрес возврата, дедупликация и дожим у них общие.
+	o.noWait = !o.wait
+	return cmdDelegate(o, tgt, prompt)
+}
+
+// headlessNotReady — почему --headless пока отказывает.
+//
+// Заглушка намеренно многословна: рабочие headless-сессии уже запускают мимо
+// ClauDex напрямую через `claude --bg`, и такая работа не попадает ни в
+// журнал, ни в сборку молчаливых отчётов — она просто теряется. Отказ должен
+// называть это, а не молчать.
+func headlessNotReady(tgt, prompt string) error {
+	_ = tgt
+	_ = prompt
+	return exitcode.Wrap(exitcode.BadCall, errors.New(
+		"--headless пока не реализован.\n"+
+			"Замысел: claudex заводит фоновую сессию Claude Code (claude --bg), "+
+			"записывает её разговор в журнал как исполнителя и дальше ведёт поручение "+
+			"обычным путём — отчёт, сборка молчаливых, дожим.\n"+
+			"Почему это нужно: `claude --bg` в обход claudex не оставляет следа — "+
+			"ни состояния, ни отчёта, ни возврата затеявшему.\n"+
+			"Пока пользуйтесь `claudex send <цель>` к живой сессии."))
+}
+
+// cmdTask — «ну что там».
+//
+//	claudex task list          какие поручения ещё ждут
+//	claudex task <id>          состояние одного
+//	claudex task digest <id>   что по нему происходило
+func cmdTask(o opts, args []string) error {
+	if len(args) == 0 {
+		return cmdTaskList(o)
+	}
+	switch args[0] {
+	case "list", "ls":
+		return cmdTaskList(o)
+	case "digest":
+		if len(args) < 2 {
+			return exitcode.Wrap(exitcode.BadCall, errors.New("нужен идентификатор: claudex task digest <id>"))
+		}
+		return cmdTaskDigest(o, args[1])
+	}
+	if !task.IsTaskID(args[0]) {
+		return exitcode.Errorf(exitcode.BadCall,
+			"%q не похоже на идентификатор поручения и не является подкомандой (list, digest)", args[0])
+	}
+	return cmdTaskOne(o, args[0])
+}
+
+// cmdTaskList показывает только то, чего ещё ждут. Весь журнал целиком
+// остаётся за `claudex tasks --all`: на вопрос «что происходит сейчас» он не
+// отвечает, а контекст занимает.
+func cmdTaskList(o opts) error {
+	recs, err := journal.Open(defaultJournal()).Read()
+	if err != nil {
+		return err
+	}
+	open := task.Open(recs)
+	if o.pretty {
+		return emit(o, map[string]any{"open": open, "count": len(open)})
+	}
+	if len(open) == 0 {
+		fmt.Println("ожидающих поручений нет")
+		return nil
+	}
+	for _, l := range open {
+		fmt.Printf("  %s  %-12s %-26s %s\n", l.Task, l.State,
+			cutTo(l.Executor, 26), cutTo(oneLine(l.Reason), 44))
+	}
+	fmt.Printf("\nподробнее: claudex task <id> · claudex task digest <id>\n")
+	return nil
+}
+
+func cmdTaskOne(o opts, id string) error {
+	recs, err := journal.Open(defaultJournal()).Read()
+	if err != nil {
+		return err
+	}
+	l := task.StateOf(recs, id)
+	if o.pretty {
+		return emit(o, l)
+	}
+	fmt.Printf("%s  %s\n", l.Task, l.State)
+	if !l.Since.IsZero() {
+		fmt.Printf("  с %s\n", l.Since.Format("02.01 15:04:05"))
+	}
+	if l.Executor != "" {
+		fmt.Printf("  исполнитель: %s\n", l.Executor)
+	}
+	if l.Caller != "" {
+		fmt.Printf("  вернуть: %s (%s)\n", l.Caller, l.CallerKind)
+	}
+	if l.Reason != "" {
+		fmt.Printf("  %s\n", l.Reason)
+	}
+	switch l.State {
+	case task.StateUndelivered:
+		fmt.Println("  отчёт цел, но затеявшего не достиг: claudex flush")
+	case task.StateSent:
+		fmt.Println("  отчёта ещё не было: claudex task digest " + id)
+	}
+	return nil
+}
+
+// cmdDoctor — цела ли обвязка.
+//
+// Нужен потому, что отказы ClauDex почти всегда упираются во внешнее: herdr не
+// отвечает, реестр разговоров пуст, индекс отстал. Разбираться в этом по
+// одному отказу за раз дорого.
+func cmdDoctor(o opts) error {
+	type check struct {
+		Name string `json:"name"`
+		OK   bool   `json:"ok"`
+		Note string `json:"note"`
+	}
+	var out []check
+	add := func(n string, ok bool, f string, a ...any) {
+		out = append(out, check{Name: n, OK: ok, Note: fmt.Sprintf(f, a...)})
+	}
+
+	if agents, err := client().Agents(); err != nil {
+		add("herdr", false, "не отвечает: %v — панельная адресация недоступна", err)
+	} else {
+		add("herdr", true, "%d панелей", len(agents))
+	}
+
+	live := claudesess.List(claudesess.Home())
+	add("разговоры Claude Code", len(live) > 0, "%d живых в %s", len(live), claudesess.Home())
+
+	if t := codex.ThreadID(); t != "" {
+		add("тред Codex", true, "%s — отчёт вернётся сюда", t[:8])
+	} else if s := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")); s != "" {
+		add("разговор-затейник", true, "%s — отчёт вернётся сюда", s[:8])
+	} else if p := os.Getenv("HERDR_PANE_ID"); p != "" {
+		add("панель-затейник", true, "%s — отчёт вернётся сюда", p)
+	} else {
+		add("кому возвращать", false, "ни треда, ни разговора, ни панели: отчёт будет некому отдать")
+	}
+
+	jp := defaultJournal()
+	recs, err := journal.Open(jp).Read()
+	if err != nil {
+		add("журнал", false, "%s: %v", jp, err)
+	} else {
+		add("журнал", true, "%d записей, ожидающих поручений %d", len(recs), len(task.Open(recs)))
+		if lost := task.LostReports(recs); len(lost) > 0 {
+			add("недоставленные отчёты", false, "%d — лечится claudex flush", len(lost))
+		} else {
+			add("недоставленные отчёты", true, "нет")
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".claudex")); err != nil {
+		add("каталог состояния", false, "~/.claudex: %v", err)
+	}
+
+	if o.pretty {
+		return emit(o, map[string]any{"checks": out})
+	}
+	bad := 0
+	for _, c := range out {
+		mark := "  ок  "
+		if !c.OK {
+			mark, bad = "  ⚠   ", bad+1
+		}
+		fmt.Printf("%s%-24s %s\n", mark, c.Name, c.Note)
+	}
+	if bad > 0 {
+		return exitcode.Errorf(exitcode.Fail, "проверок с замечаниями: %d", bad)
+	}
+	return nil
+}

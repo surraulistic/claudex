@@ -55,6 +55,7 @@ func TestValueFlagStillTakesItsArgument(t *testing.T) {
 func TestTransportFlagsAreDocumented(t *testing.T) {
 	for _, f := range []string{
 		"--session", "--panel", "--notify-session", "--notify-thread", "--no-wait",
+		"--wait", "--headless", "--new",
 	} {
 		if !strings.Contains(helpText, "\n  "+f+" ") && !strings.Contains(helpText, "\n  "+f+"\n") {
 			t.Errorf("флаг %s не описан в списке флагов справки", f)

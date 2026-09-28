@@ -54,6 +54,9 @@ type opts struct {
 	notifySession string
 	session       bool
 	panel         bool
+	wait          bool
+	headless      bool
+	newSession    bool
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -97,6 +100,12 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.BoolVar(&o.wait, "wait", false,
+		"send: дождаться конца работы, заняв ход (умолчание — не ждать)")
+	fs.BoolVar(&o.headless, "headless", false,
+		"send: завести фоновую сессию Claude Code вместо отправки существующей (пока не реализован)")
+	fs.BoolVar(&o.newSession, "new", false,
+		"send: завести нового работника (зарезервирован)")
 	fs.BoolVar(&o.panel, "panel", false,
 		"delegate: прежний транспорт — писать в панель herdr, а не в разговор Claude Code")
 	fs.BoolVar(&o.session, "session", false,
@@ -182,6 +191,15 @@ func run() error {
 		return cmdContext(o, args[1:])
 	case "watch":
 		return cmdWatch(o, args[1:])
+	case "send":
+		if len(args) < 3 {
+			return exitcode.Errorf(exitcode.BadCall, `нужно: claudex send <цель> "<сообщение>"`)
+		}
+		return cmdSend(o, args[1], strings.Join(args[2:], " "))
+	case "task":
+		return cmdTask(o, args[1:])
+	case "doctor":
+		return cmdDoctor(o)
 	case "delegate":
 		if len(args) < 3 {
 			return exitcode.Errorf(exitcode.BadCall, "нужны цель и задача")
@@ -220,7 +238,7 @@ func run() error {
 var boolFlags = map[string]bool{
 	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
-	"session": true, "compact": true, "panel": true,
+	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true,
 }
 
 func splitArgs(argv []string) (flags, rest []string) {
@@ -261,17 +279,20 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   claudex context <id>                   разговор вокруг записи
   claudex watch <цель>                   дождаться, пока панель освободится
                                          (только фоном: ход держит до срока)
-  claudex tell <разговор> "<текст>"      сказать живому разговору Claude Code
+  claudex send <цель> "<сообщение>"      отправить работу. Всегда учитывается в
+                                         журнале, ход не занимает, результат
+                                         возвращается тому, кто отправил —
+                                         треду Codex, разговору Claude Code или
+                                         панели, смотря откуда позвали.
+                                         --wait — дождаться, заняв ход
+                                         --session <id|имя> — адресовать разговор
+                                         --panel — прежний транспорт через herdr
+  claudex task list                      какие поручения ещё ждут
+  claudex task <id>                      состояние одного поручения
+  claudex task digest <id>               что по нему происходило
+  claudex doctor                         цела ли обвязка: herdr, разговоры,
+                                         адрес возврата, журнал
   claudex peers                          какие разговоры живы и чем заняты
-  claudex delegate <цель> "<задача>"     поручить: цель называет панель, а
-                                         поручение уезжает разговору, который
-                                         она ведёт сейчас
-  claudex delegate --session <разговор> "<задача>"
-                                         адресовать разговор напрямую
-  claudex delegate --panel <цель> "<задача>"
-                                         прежний транспорт: писать в панель herdr
-                                         с --no-wait --notify-thread —
-                                         не занимая ход, отчёт придёт сообщением
   claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
                                          сам сверит его с активным поручением
   claudex digest <id>                    ход работы по поручению: что делалось
@@ -288,6 +309,17 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
 
 Флаги:
   --db-path <путь>   индекс (умолчание: $CLAUDEX_INDEX или ~/.claudex/index.db)
+Прежние имена работают и останутся: delegate = send, tasks = task list,
+digest = task digest. Новых вызовов на них лучше не заводить.
+
+Не для обихода:
+  claudex tell <разговор> "<текст>"      сырое сообщение без учёта. Если ждёте
+                                         результат или продолжаете работу —
+                                         это send, а не tell
+  claudex flush                          починка: дослать зависшие отчёты
+  claudex reconcile                      починка: собрать отчёт за молчуна
+  claudex undelivered                    что не дошло
+
   --limit N          записей истории (8) или результатов поиска
   --chars N          символов на запись (400)
   --tail-lines N     строк живого хвоста (12, brief 8)
@@ -296,9 +328,14 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   --before N         context: записей до якоря (10)
   --after N          context: записей после якоря (20)
   --timeout N        watch/delegate: секунды числом либо вид 30m (1800)
-  --no-wait          delegate: отправить и выйти
-  --session          delegate: цель — разговор Claude Code (id или имя), а не
-                     панель herdr
+  --wait             send: дождаться конца работы, заняв ход; умолчание send —
+                     не ждать, отчёт придёт сообщением
+  --no-wait          delegate: отправить и выйти (у send это умолчание)
+  --headless         send: завести фоновую сессию Claude Code вместо отправки
+                     существующей (пока отказывает и объясняет замысел)
+  --new              send: завести нового работника (зарезервирован)
+  --session          send/delegate: цель — разговор Claude Code (id или имя), а
+                     не панель herdr
   --panel            delegate: прежний транспорт — писать в панель herdr; нужен
                      панели с не-Claude агентом или с закрытым разговором
   --detach           delegate: отдать ожидание отдельному процессу
