@@ -27,12 +27,37 @@ claudex send <target> "<message>"   # give work. Tracked, does not hold your tur
                                     # result comes back to whoever sent it
 claudex task list                   # what is still awaited
 claudex task <id>                   # state of one assignment
-claudex task digest <id>            # what actually happened during it
+claudex task log <id>               # the detailed record: commands, replies,
+                                    # freshness (digest is the old name)
 claudex doctor                      # is the plumbing intact
-claudex peers                       # which conversations are live
+claudex session list                # who you can send to, with their ids
 claudex brief --compact             # one line per pane
 claudex find "<query>"              # search every transcript, including closed
 ```
+
+Address a worker by **conversation id**, not by pane name:
+
+```bash
+claudex session list                     # ids live here
+claudex send 7e403273 "…"                # exact, survives an agent swap
+claudex send cc669134 "…"                # a known task id continues that work
+claudex send license "…"                 # a pane name: convenient, but it is
+                                         # only a lookup — the pane outlives
+                                         # the conversation running in it
+```
+
+Herdr names and labels are human sugar and a first resolve. The working path is
+the id: `claudex send license` asks herdr which conversation that pane runs
+*now* and delivers there, which is right until the pane changes hands between
+your reading the name and the send. The first argument is classified for you, by decreasing precision: a
+conversation id addresses that conversation, a known task id continues that
+work, anything else is a herdr pane name. When one string matches both a
+conversation and a task, claudex refuses and shows both readings rather than
+picking one — the two go to different places. `--session` exists to remove that
+ambiguity in scripts; you do not need it by hand.
+
+`session list` and `task list` answer different questions — who can take work,
+versus what you already handed out. `peers` is the old name for `session list`.
 
 `send` is tracked, asynchronous, and returns to its caller by default. The
 caller is whoever ran it — a Codex thread, a Claude Code conversation, or a
@@ -70,8 +95,40 @@ result, or you are continuing work you handed over, that is `send` — a `tell`
 leaves no assignment, so nothing can report on it and nothing can be recovered
 when it goes missing.
 
-`flush`, `reconcile` and `undelivered` are repair, not workflow. They exist for
-when delivery failed, and `claudex doctor` will tell you when that happened.
+`flush`, `reconcile` and `undelivered` are manual repair. The supervisor does
+the flushing part on its own, and `claudex doctor` says whether it is running.
+
+### The supervisor
+
+A report can be written and never arrive: the caller's conversation closed
+while the work was in flight. The text survives in the pull channel, but it
+only moves when someone runs claudex for an unrelated reason — so a report can
+wait for days, and to the caller that is indistinguishable from silence. On the
+live journal there were 132 of them.
+
+```bash
+claudex supervisor                  # run it; background it yourself
+claudex supervisor status           # is it running, what has it done
+claudex supervisor stop
+claudex supervisor --once           # single pass, for cron
+nohup claudex supervisor >>~/.claudex/supervisor.log 2>&1 &
+```
+
+It is a plain process, not a language model, and **it never writes a report of
+its own**. Retelling work you did not do is invention delivered in a confident
+voice. It notices a state change and wakes the caller; the caller then reads
+`claudex task <id>` and `claudex task log <id>` itself. That is the whole
+contract, and it is what keeps a supervisor from becoming a bot that talks in
+your conversation instead of the coordinator.
+
+It stays quiet by design: at most 3 reports per pass, a bounded budget per
+pass, and an address that just refused is deferred — doubling each time up to
+half an hour — instead of being retried every tick. Delivery is deduplicated
+through the journal, so a report that landed is never sent twice.
+
+Collecting reports for silent workers (`reconcile`) is behind `--reconcile` and
+off by default: it reads live screens and touches far more assignments than
+flushing does, so it should run under supervision before it runs unattended.
 
 ## Targets
 

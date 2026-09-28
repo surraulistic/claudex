@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/claudesess"
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -40,6 +41,10 @@ type FlushOptions struct {
 	Client  *herdr.Client
 	Max     int
 	Budget  time.Duration
+	// Skip — поручения, которые на этот раз трогать не надо. Наблюдатель
+	// держит здесь адреса, только что отказавшие: повторять попытку каждый
+	// тик — шум, а не настойчивость.
+	Skip    map[string]bool
 	Compose func(summary, task string, from, to time.Time, pane string) string
 }
 
@@ -85,13 +90,26 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 		if len(out) >= o.Max || ctx.Err() != nil {
 			break
 		}
-		st := stateOf(recs, l.Task)
-		if st.kind != KindThread {
-			// Панель дожимать нельзя: за час она успевает сменить разговор, и
-			// проверять это надо в момент доставки, а не по журналу.
+		if o.Skip[l.Task] {
+			// Наблюдатель просит переждать: этот адрес только что отказал, и
+			// долбиться в него каждый тик — шум без пользы.
 			continue
 		}
-		if codex.State(home, l.Target) != codex.Live {
+		st := stateOf(recs, l.Task)
+		switch st.kind {
+		case KindThread:
+			if codex.State(home, l.Target) != codex.Live {
+				continue
+			}
+		case KindSession:
+			// Живость разговора — файл в реестре. Дожимать его можно тем же
+			// правом, что и тред: адрес есть сам разговор, промахнуться нельзя.
+			if _, err := claudesess.Lookup(claudesess.Home(), l.Target); err != nil {
+				continue
+			}
+		default:
+			// Панель дожимать нельзя: за час она успевает сменить разговор, и
+			// проверять это надо в момент доставки, а не по журналу.
 			continue
 		}
 
@@ -104,7 +122,7 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 		}
 		d := Deliver(ctx, o.Client, o.Journal, l.Task, l.Target,
 			flushText(l),
-			DeliverOptions{Stage: l.Stage, Kind: KindThread, WantSession: l.Target,
+			DeliverOptions{Stage: l.Stage, Kind: st.kind, WantSession: l.Target,
 				Compose: compose, HumanTold: true,
 				Deadline: flushDeadline, Poll: 200 * time.Millisecond})
 

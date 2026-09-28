@@ -57,6 +57,11 @@ type opts struct {
 	wait          bool
 	headless      bool
 	newSession    bool
+	once          bool
+	reconcile     bool
+	intervalRaw   string
+	interval      time.Duration
+	maxPerTick    int
 	notifyWaitRaw string
 	notifyWait    time.Duration
 	detach        bool
@@ -100,6 +105,12 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.StringVar(&o.notify, "notify", "", "delegate: разбудить эту панель по завершении")
 	fs.StringVar(&o.notifyThread, "notify-thread", "",
 		"delegate: вернуть результат в этот тред Codex (умолчание — $CODEX_THREAD_ID)")
+	fs.BoolVar(&o.once, "once", false,
+		"supervisor: один проход и выход (для cron или проверки)")
+	fs.BoolVar(&o.reconcile, "reconcile", false,
+		"supervisor: собирать отчёты и за молчунов (по умолчанию только дожим)")
+	fs.StringVar(&o.intervalRaw, "interval", "30", "supervisor: пауза между проходами, секунды или 5m")
+	fs.IntVar(&o.maxPerTick, "max-per-tick", 3, "supervisor: сколько отчётов дожимать за проход")
 	fs.BoolVar(&o.wait, "wait", false,
 		"send: дождаться конца работы, заняв ход (умолчание — не ждать)")
 	fs.BoolVar(&o.headless, "headless", false,
@@ -142,6 +153,9 @@ func run() error {
 	flags, rest := splitArgs(os.Args[1:])
 	if err := fs.Parse(flags); err != nil {
 		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	if iv, err := parseTimeout(o.intervalRaw); err == nil {
+		o.interval = iv
 	}
 	d, err := parseTimeout(o.timeoutRaw)
 	if err != nil {
@@ -200,6 +214,8 @@ func run() error {
 		return cmdTask(o, args[1:])
 	case "doctor":
 		return cmdDoctor(o)
+	case "supervisor":
+		return cmdSupervisor(o, args[1:])
 	case "delegate":
 		if len(args) < 3 {
 			return exitcode.Errorf(exitcode.BadCall, "нужны цель и задача")
@@ -209,6 +225,8 @@ func run() error {
 		return cmdDone(o, args[1:])
 	case "tell":
 		return cmdTell(o, args[1:])
+	case "session", "sessions-live":
+		return cmdSession(o, args[1:])
 	case "peers":
 		return cmdPeers(o)
 	case "undelivered":
@@ -238,7 +256,7 @@ func run() error {
 var boolFlags = map[string]bool{
 	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
-	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true,
+	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true,
 }
 
 func splitArgs(argv []string) (flags, rest []string) {
@@ -279,23 +297,42 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   claudex context <id>                   разговор вокруг записи
   claudex watch <цель>                   дождаться, пока панель освободится
                                          (только фоном: ход держит до срока)
-  claudex send <цель> "<сообщение>"      отправить работу. Всегда учитывается в
+  claudex send <адресат> "<сообщение>"   отправить работу. Всегда учитывается в
                                          журнале, ход не занимает, результат
                                          возвращается тому, кто отправил —
                                          треду Codex, разговору Claude Code или
                                          панели, смотря откуда позвали.
+                                         Адресат распознаётся сам, по убыванию
+                                         точности: идентификатор разговора →
+                                         отправка ему; идентификатор поручения →
+                                         продолжение начатого; иначе имя или
+                                         метка панели herdr. Подходит и то и
+                                         другое — отказ, а не догадка.
                                          --wait — дождаться, заняв ход
-                                         --session <id|имя> — адресовать разговор
                                          --panel — прежний транспорт через herdr
+                                         --session — снять двусмысленность в
+                                         скриптах; в обиходе не нужен
   claudex task list                      какие поручения ещё ждут
   claudex task <id>                      состояние одного поручения
-  claudex task digest <id>               что по нему происходило
+  claudex task log <id>                  подробный ход работы: команды, реплики,
+                                         свежесть (task digest — прежнее имя)
   claudex doctor                         цела ли обвязка: herdr, разговоры,
-                                         адрес возврата, журнал
-  claudex peers                          какие разговоры живы и чем заняты
+                                         адрес возврата, журнал, наблюдатель
+  claudex supervisor                     фоновый наблюдатель: сам досылает
+                                         отчёты, которые до вас не дошли.
+                                         Не языковая модель и ничего не
+                                         сочиняет — только доставляет то, что
+                                         написала сама задача
+                                         status — работает ли · stop — остановить
+                                         --once — один проход, для cron
+  claudex session list                   кому можно отправлять: живые разговоры
+                                         и их идентификаторы. Идентификатор —
+                                         рабочий адрес: имя панели переживает
+                                         смену агента, идентификатор нет
+                                         (claudex peers — прежнее имя той же)
   claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
                                          сам сверит его с активным поручением
-  claudex digest <id>                    ход работы по поручению: что делалось
+  claudex digest <id>                    прежнее имя claudex task log
   claudex undelivered                    что не дошло: отчёты и неотправленные
                                          поручения; --all добавляет тексты
   claudex flush                          дослать зависшее в открывшиеся разговоры
@@ -310,14 +347,16 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
 Флаги:
   --db-path <путь>   индекс (умолчание: $CLAUDEX_INDEX или ~/.claudex/index.db)
 Прежние имена работают и останутся: delegate = send, tasks = task list,
-digest = task digest. Новых вызовов на них лучше не заводить.
+digest = task log. Новых вызовов на них лучше не заводить.
 
 Не для обихода:
   claudex tell <разговор> "<текст>"      сырое сообщение без учёта. Если ждёте
                                          результат или продолжаете работу —
                                          это send, а не tell
-  claudex flush                          починка: дослать зависшие отчёты
-  claudex reconcile                      починка: собрать отчёт за молчуна
+  claudex flush                          починка вручную: дослать зависшие
+                                         отчёты (это же делает наблюдатель сам)
+  claudex reconcile                      починка вручную: собрать отчёт за
+                                         молчуна
   claudex undelivered                    что не дошло
 
   --limit N          записей истории (8) или результатов поиска
@@ -328,6 +367,12 @@ digest = task digest. Новых вызовов на них лучше не за
   --before N         context: записей до якоря (10)
   --after N          context: записей после якоря (20)
   --timeout N        watch/delegate: секунды числом либо вид 30m (1800)
+  --once             supervisor: один проход и выход, для cron или проверки
+  --interval N       supervisor: пауза между проходами, секунды или 5m (30)
+  --max-per-tick N   supervisor: сколько отчётов дожимать за проход (3)
+  --reconcile        supervisor: собирать отчёты и за молчунов; по умолчанию
+                     только дожим — сборка читает живые экраны и трогает
+                     куда больше поручений
   --wait             send: дождаться конца работы, заняв ход; умолчание send —
                      не ждать, отчёт придёт сообщением
   --no-wait          delegate: отправить и выйти (у send это умолчание)

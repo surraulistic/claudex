@@ -69,7 +69,7 @@ func TestPublicSurfaceIsDocumented(t *testing.T) {
 	// Команда, которой нет в справке, не существует для человека.
 	for _, c := range []string{
 		"claudex send", "claudex task list", "claudex task <id>",
-		"claudex task digest", "claudex doctor",
+		"claudex task log", "claudex doctor",
 	} {
 		if !strings.Contains(helpText, c) {
 			t.Errorf("в справке нет %q", c)
@@ -95,5 +95,48 @@ func TestLifecycleStatesAreNamedInOnePlace(t *testing.T) {
 		if s == "" {
 			t.Fatal("состояние без имени")
 		}
+	}
+}
+
+func TestSupervisorSubcommandDoesNotGuess(t *testing.T) {
+	err := cmdSupervisor(opts{}, []string{"старт"})
+	if err == nil || !strings.Contains(err.Error(), "не подкоманда") {
+		t.Fatalf("опечатка названа опечаткой, получено %v", err)
+	}
+}
+
+func TestSupervisorIsDocumentedAsNonAuthoring(t *testing.T) {
+	// Главное свойство наблюдателя — он ничего не сочиняет. Если справка об
+	// этом молчит, его примут за бота, пишущего в диалог вместо координатора.
+	if !strings.Contains(helpText, "claudex supervisor") {
+		t.Fatal("наблюдателя нет в справке")
+	}
+	for _, want := range []string{"ничего не\n                                         сочиняет", "status", "stop"} {
+		if !strings.Contains(helpText, want) {
+			t.Errorf("в справке не сказано про %q", want)
+		}
+	}
+}
+
+func TestRepairCommandsAreMarkedAsManual(t *testing.T) {
+	// flush и reconcile остаются, но обиходом не являются: их теперь делает
+	// наблюдатель сам.
+	if !strings.Contains(helpText, "починка вручную") {
+		t.Error("flush/reconcile не помечены как ручная починка")
+	}
+}
+
+func TestSessionListIsTheRecommendedDiscovery(t *testing.T) {
+	// «Кому можно дать работу» и «что я уже поручил» — разные вопросы, и
+	// путать их дорого.
+	if !strings.Contains(helpText, "claudex session list") {
+		t.Fatal("session list нет в справке")
+	}
+	if !strings.Contains(helpText, "claudex peers") {
+		t.Error("прежнее имя не названо совместимым")
+	}
+	// Инвариант: рабочий адрес — идентификатор, а не имя панели.
+	if !strings.Contains(helpText, "идентификатор разговора →") {
+		t.Error("в справке не описано распознавание адресата")
 	}
 }
