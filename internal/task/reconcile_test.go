@@ -75,8 +75,14 @@ func TestFinalWithoutDoneIsCollectedAndDelivered(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("одно поручение, получено %+v", got)
 	}
-	if !got[0].Synthetic || !got[0].Delivered {
-		t.Fatalf("отчёт собран и доставлен, получено %+v", got[0])
+	// Отчёта отсюда не появляется: экран — свидетельство чего-то, но не
+	// доказательство, что задача закончила именно этим. Появляется
+	// пробуждение, и в нём видно, что было на экране.
+	if got[0].Synthetic {
+		t.Fatalf("экран отчётом не становится, получено %+v", got[0])
+	}
+	if !got[0].Delivered {
+		t.Fatalf("затеявший разбужен, получено %+v", got[0])
 	}
 	// Ведущего будят событием; собранный финал лежит в журнале и читается
 	// через `claudex task log`. Класть его в диалог значит подменять ответ
@@ -91,19 +97,19 @@ func TestFinalWithoutDoneIsCollectedAndDelivered(t *testing.T) {
 		t.Fatalf("в событии назван идентификатор, получено %q", (*sent)[0].message)
 	}
 
-	// Отчёт лёг в журнал как обычный и помечен собранным.
+	// Ложного отчёта в журнале не появилось: экран не выдаётся за слова
+	// задачи. За всё время такие «отчёты» дважды оказывались мусором —
+	// обрывком таблицы и перепиской человека с соседней сессией.
 	recs, _ := j.Read()
-	var rep journal.Record
 	for _, r := range recs {
 		if r.Event == journal.Reported {
-			rep = r
+			t.Fatalf("отчёта задача не давала — и в журнале его нет; получено %+v", r)
 		}
 	}
-	if rep.Task != silentTask || !rep.Synthetic {
-		t.Fatalf("запись об отчёте помечена собранной, получено %+v", rep)
-	}
-	if !strings.Contains(rep.Reason, "payment") {
-		t.Fatalf("текст финала сохранён, получено %q", rep.Reason)
+	// Зато увиденное на экране ушло затеявшему доказательством — началом
+	// строки: событие остаётся событием, целиком текст читается через log.
+	if !strings.Contains((*sent)[0].message, "конфигурация лицензий выровнена") {
+		t.Fatalf("в событии видно, что было на экране, получено %q", (*sent)[0].message)
 	}
 }
 
@@ -154,8 +160,8 @@ func TestOnlyTheLiveScreenIsUsedAsTheFinal(t *testing.T) {
 			t.Fatalf("в отчёт попал живой экран без подмены, получено %q", r.Reason)
 		}
 	}
-	if !got[0].Synthetic {
-		t.Fatal("отчёт собран")
+	if !got[0].Delivered {
+		t.Fatal("затеявший разбужен тем, что на живом экране")
 	}
 }
 
@@ -278,8 +284,8 @@ func TestCollectedReportGoesThroughTheSameAddressCheck(t *testing.T) {
 		Time: when, Outcome: "отправлено без ожидания"})
 
 	got := Reconcile(context.Background(), reconcileOpts(j, c, finalText))
-	if !got[0].Synthetic || got[0].Delivered {
-		t.Fatalf("собран, но не доставлен, получено %+v", got[0])
+	if got[0].Delivered {
+		t.Fatalf("в закрытый разговор не доставляем, получено %+v", got[0])
 	}
 	if got[0].Cause != CauseThreadNotLive {
 		t.Fatalf("причина та же, что у обычного отчёта, получено %q", got[0].Cause)

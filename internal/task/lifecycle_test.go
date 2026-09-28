@@ -195,3 +195,33 @@ func TestStaleUndeliveredLeavesTheLiveList(t *testing.T) {
 		t.Fatalf("свежее недоставленное видно, получено %s", got)
 	}
 }
+
+func TestScrapedTextIsNeverCalledDone(t *testing.T) {
+	// Сборка с экрана записала переписку человека с соседней сессией и
+	// пометила поручение «готово». Экран — свидетельство чего-то, но не
+	// доказательство, что задача закончила именно этим.
+	recs := lc(
+		journal.Record{Task: "8063a44b", Event: journal.Started, Pane: "wE:p13"},
+		journal.Record{Task: "8063a44b", Event: journal.Reported,
+			Outcome: OutcomeUnreported, Reason: "что-то с экрана", Synthetic: true},
+	)
+	if got := StateOf(recs, "8063a44b").State; got != StateLost {
+		t.Fatalf("собранное не объявляем готовым, получено %s", got)
+	}
+}
+
+func TestTaskOwnWordStillDecides(t *testing.T) {
+	// Сама задача по-прежнему называет исход — это её право и её оценка.
+	for _, c := range []struct{ outcome, want string }{
+		{"готово", StateDone}, {"провал", StateFailed},
+		{"заблокировано", StateNeedsInput}, {OutcomeUnreported, StateLost},
+	} {
+		recs := lc(
+			journal.Record{Task: "aaaaaaaa", Event: journal.Started, Pane: "p"},
+			journal.Record{Task: "aaaaaaaa", Event: journal.Reported, Outcome: c.outcome},
+		)
+		if got := StateOf(recs, "aaaaaaaa").State; got != c.want {
+			t.Errorf("%q → %s, получено %s", c.outcome, c.want, got)
+		}
+	}
+}

@@ -172,8 +172,20 @@ const CauseNotExamined = "not_examined"
 // silent — поручения, у которых есть начало и нет отчёта, и с начала прошло
 // достаточно, чтобы молчание считать окончательным.
 func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assignment {
+	// Разбуженных не трогаем. Отчёта здесь не появляется — появляется
+	// пробуждение, и без этой проверки поручение осталось бы активным
+	// навсегда и будило бы затеявшего при каждом проходе.
+	woken := map[string]bool{}
+	for _, r := range recs {
+		if r.Event == journal.Notified && r.Stage == StageReported && r.Outcome == WokeUp {
+			woken[r.Task] = true
+		}
+	}
 	var out []Assignment
 	for _, a := range ActiveFor(recs, "") {
+		if woken[a.Task] {
+			continue
+		}
 		if now.Sub(a.Started) < minAge {
 			continue
 		}
@@ -227,14 +239,17 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 			"на живом экране панели нечего взять: финала нет")
 	}
 
-	// Отчёт кладётся в журнал так же, как обычный, и помечается собранным:
-	// доверие к нему другое, и это должно быть видно.
-	o.Journal.Append(journal.Record{
-		Task: a.Task, Event: journal.Reported, Pane: a.Pane,
-		Outcome: "готово", Reason: text, Synthetic: true,
-		Correction: "отчёт собран ClauDex с живого экрана панели: задача не вызвала claudex done",
-	})
-	r.Synthetic = true
+	// Отчёт отсюда не пишется.
+	//
+	// Экран панели — свидетельство чего-то, но не доказательство, что задача
+	// закончила именно этим. Замерено за всё время работы: собранных с экрана
+	// отчётов два, и оба мусор, помеченный как «готово», — обрывок таблицы и
+	// переписка человека с соседней сессией. Ноль верных из двух.
+	//
+	// Поэтому экран уходит доказательством в событие, а отчётом не
+	// становится: затеявший узнаёт, что работа кончилась и что видно на
+	// экране, и решает сам. Настоящий текст даёт хук Stop — тогда, когда может
+	// отнести его к одному поручению.
 
 	// Дальше — общий путь: та же проверка адреса, тот же inbox, та же
 	// дедупликация. Собранный отчёт не получает поблажек.
@@ -252,15 +267,20 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 		}
 	}
 	d := Deliver(ctx, o.Client, o.Journal, a.Task, w.Target,
-		fmt.Sprintf("Поручение %s закончено, но отчёта задача не дала — ClauDex собрал его с живого экрана панели %s:\n\n%s",
+		fmt.Sprintf("Поручение %s: панель %s освободилась, отчёта задача не дала. "+
+			"На экране было (это не отчёт, а то, что там видно):\n\n%s",
 			a.Task, a.Pane, text),
 		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
 			Compose: compose,
 			Event: &Event{Task: a.Task, Stage: StageReported, Executor: a.Pane,
 				State:  StateLost,
-				Reason: "задача закончила и не отчиталась; ClauDex собрал итог с экрана"},
+				Reason: "закончила и не отчиталась; на экране: " + oneLineCut(text, EventChars)},
 			Deadline: 15 * time.Second, Poll: time.Second})
 	r.Delivered, r.Cause, r.Reason = d.OK, d.Cause, d.Reason
+	if d.OK && r.Cause == "" {
+		// Отчёта не появилось — появилось пробуждение. Называется честно.
+		r.Cause, r.Reason = CauseNoScreen, "затеявший разбужен наблюдением, отчёта задачи нет"
+	}
 	return r
 }
 

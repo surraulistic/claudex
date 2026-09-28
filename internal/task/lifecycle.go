@@ -164,12 +164,23 @@ func settle(l Lifecycle, started, reported, refused, notified, delivered bool,
 }
 
 // stateOfOutcome — как сама задача назвала исход.
+// OutcomeUnreported — исход, которым помечается собранное не самой задачей.
+//
+// Отдельным словом потому, что всё остальное читается как успех: любой
+// незнакомый исход прежде становился done. Сборка с экрана панели записала так
+// переписку человека с соседней сессией — и поручение стало «готово» с чужим
+// текстом вместо отчёта.
+const OutcomeUnreported = "без отчёта"
+
 func stateOfOutcome(outcome string) string {
 	switch first(outcome) {
 	case "провал":
 		return StateFailed
 	case "заблокировано":
 		return StateNeedsInput
+	case "без":
+		// «без отчёта»: работа кончилась, а чем — неизвестно.
+		return StateLost
 	default:
 		return StateDone
 	}
