@@ -177,9 +177,11 @@ func run() error {
 	if sg, err := parseTimeout(o.silenceRaw); err == nil {
 		o.silence = sg
 	}
-	if aa, err := parseTimeout(o.archiveRaw); err == nil {
-		o.archiveAfter = aa
+	aa, err := parseDays(o.archiveRaw)
+	if err != nil {
+		return exitcode.Wrap(exitcode.BadCall, err)
 	}
+	o.archiveAfter = aa
 	d, err := parseTimeout(o.timeoutRaw)
 	if err != nil {
 		return exitcode.Wrap(exitcode.BadCall, err)
@@ -371,8 +373,10 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
                      он в двадцать раз дороже по контексту
   --dry-run          archive: посчитать и ничего не трогать
   --archive-after N  supervisor: раз в сутки уносить в архив поручения старше
-                     срока (0 — не уносить). Журнал — единственная память об
-                     этой работе, поэтому по умолчанию выключено
+                     N дней (0 — не уносить). Именно дней: срок меньше суток
+                     отвергается, потому что значит перепутанные единицы.
+                     Журнал — единственная память об этой работе, поэтому по
+                     умолчанию выключено
   --pretty           JSON с отступами
 
 Прежние имена работают и останутся: delegate = send, tasks = task list,
@@ -413,6 +417,26 @@ func parseTimeout(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("непонятный срок %q: нужны секунды числом или вид 30m", s)
 	}
 	return d, nil
+}
+
+// parseDays разбирает срок архивации.
+//
+// Отдельно от parseTimeout намеренно: тот считает голое число секундами, и
+// `--archive-after 30` означало «старше тридцати секунд». Журнал уехал в архив
+// целиком. Здесь голое число — дни, а срок в секундах или минутах отвергается:
+// архивация ими не меряется, и такой довод значит перепутанные единицы.
+func parseDays(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	if n, err := strconv.Atoi(strings.TrimSuffix(s, "d")); err == nil {
+		if n < 0 {
+			return 0, fmt.Errorf("срок архивации отрицательный: %q", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return 0, fmt.Errorf("срок архивации меряется днями: нужно число или вид 30d, получено %q", s)
 }
 
 func defaultIndex() string {

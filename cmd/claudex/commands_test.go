@@ -4,6 +4,7 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Списков было два — разбор и справка, — и они расходились дважды:
@@ -136,5 +137,27 @@ func TestEveryDeclaredFlagIsDocumentedAndClassified(t *testing.T) {
 	if len(unclassified) > 0 {
 		t.Errorf("булевы флаги не объявлены булевыми (съедят следующий довод): %s",
 			strings.Join(unclassified, ", "))
+	}
+}
+
+func TestArchiveAgeIsMeasuredInDays(t *testing.T) {
+	// parseTimeout считает голое число секундами, и `--archive-after 30`
+	// означало «старше тридцати секунд»: журнал уехал в архив целиком.
+	for _, c := range []struct {
+		in   string
+		days int
+	}{{"30", 30}, {"30d", 30}, {"0", 0}, {"", 0}} {
+		got, err := parseDays(c.in)
+		if err != nil {
+			t.Fatalf("%q: %v", c.in, err)
+		}
+		if want := time.Duration(c.days) * 24 * time.Hour; got != want {
+			t.Errorf("%q → %s, получено %s", c.in, want, got)
+		}
+	}
+	for _, bad := range []string{"30s", "30m", "5h", "неделя"} {
+		if _, err := parseDays(bad); err == nil {
+			t.Errorf("%q: срок не в днях должен отвергаться", bad)
+		}
 	}
 }

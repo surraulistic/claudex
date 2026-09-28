@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,8 +36,27 @@ type ArchiveResult struct {
 // Переезжает поручение целиком или не переезжает вовсе: половина записей в
 // журнале, половина в архиве — это разорванная история, по которой уже не
 // разобрать, что было.
+// MinArchiveAge — ниже этого срока архивация отказывает.
+//
+// Не придирчивость, а защита от единиц. Срок архивации задавался в двух местах
+// разными единицами: команда понимала дни, флаг наблюдателя — секунды, и
+// `--archive-after 30` означало «старше тридцати секунд». Журнал уехал в архив
+// целиком: 1457 записей, 461 поручение. Ничего не пропало — порядок «сперва
+// архив, потом урезание» сработал, — но рабочий журнал опустел.
+//
+// Осмысленной архивации на сроке меньше суток не бывает: такой срок значит, что
+// единицы перепутаны.
+const MinArchiveAge = 24 * time.Hour
+
+// ErrArchiveTooSoon — срок так мал, что почти наверняка перепутаны единицы.
+var ErrArchiveTooSoon = errors.New("срок архивации меньше суток")
+
 func Archive(path string, older time.Duration, dry bool) (ArchiveResult, error) {
 	res := ArchiveResult{DryRun: dry, SinceDay: time.Now().Add(-older).Format("2006-01-02")}
+	if older < MinArchiveAge {
+		return res, fmt.Errorf("%w (%s): архивация меряется днями — похоже, единицы перепутаны",
+			ErrArchiveTooSoon, older)
+	}
 	j := Open(path)
 	recs, err := j.Read()
 	if err != nil {

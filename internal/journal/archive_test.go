@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,5 +100,31 @@ func TestArchiveIsWrittenBeforeTheJournalIsCut(t *testing.T) {
 	}
 	if res.Moved != len(moved) || res.Kept != len(kept) {
 		t.Fatalf("отчёт сходится с делом, получено %+v", res)
+	}
+}
+
+func TestTooSmallAgeIsRefusedNotObeyed(t *testing.T) {
+	// Срок архивации задавался в двух местах разными единицами: команда
+	// понимала дни, флаг наблюдателя — секунды. `--archive-after 30` означало
+	// «старше тридцати секунд», и журнал уехал в архив целиком: 1457 записей,
+	// 461 поручение. Осмысленной архивации на сроке меньше суток не бывает.
+	path := withTasks(t, map[string]time.Duration{"aaaaaaaa": 60 * 24 * time.Hour})
+	before, _ := os.ReadFile(path)
+
+	_, err := Archive(path, 30*time.Second, false)
+	if !errors.Is(err, ErrArchiveTooSoon) {
+		t.Fatalf("срок меньше суток — отказ, получено %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("и журнал не тронут")
+	}
+}
+
+func TestADayIsStillAllowed(t *testing.T) {
+	// Граница проходима: сутки — законный срок.
+	path := withTasks(t, map[string]time.Duration{"aaaaaaaa": 60 * 24 * time.Hour})
+	if _, err := Archive(path, MinArchiveAge, true); err != nil {
+		t.Fatalf("сутки принимаются, получено %v", err)
 	}
 }
