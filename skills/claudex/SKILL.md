@@ -98,6 +98,32 @@ when it goes missing.
 `flush`, `reconcile` and `undelivered` are manual repair. The supervisor does
 the flushing part on its own, and `claudex doctor` says whether it is running.
 
+### When the worker forgets to report
+
+`claudex done` is how a task states its own outcome — done, failed, partial,
+blocked. That is a judgement, and only whoever did the work can make it.
+
+It is also something a model has to remember, and measurement says it remembers
+six times out of ten: of 424 assignments, 168 ended in silence.
+
+So completion no longer depends on remembering. Claude Code fires a `Stop` hook
+at the end of every turn and hands it `last_assistant_message` — its own schema
+says this "avoids the need to read and parse the transcript file". `claudex hook
+stop` records that; the supervisor waits out the silence and wakes the caller
+with what it observed:
+
+```
+claudex: поручение 43bc6e11 — закончило молча (исполнитель wE:p13)
+закончил молча; последняя реплика: ветка запушена, тесты флакают
+```
+
+Note what it does not say: not "done", not "failed". We saw that the work
+ended; what it ended in, we do not know. Calling it done would be inventing the
+one thing the report exists to carry. A task that calls `done` gives a
+judgement; one that does not still gives facts.
+
+Install the hook with `claudex hook install`.
+
 ### The supervisor
 
 A report can be written and never arrive: the caller's conversation closed

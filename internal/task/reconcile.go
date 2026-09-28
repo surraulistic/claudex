@@ -108,13 +108,26 @@ func Reconcile(ctx context.Context, o ReconcileOptions) []Reconciled {
 	// замерено на живом журнале — 169 активных поручений при пределе 3, и
 	// свежее сессионное стояло 168-м.
 	var conv, panes []Assignment
+	var hopeless int
 	for _, a := range silent(recs, o.Now, o.MinAge) {
+		// Безнадёжные не занимают предел. У поручений, заведённых до записи
+		// разговора панели, привязку доказать нечем и уже не будет чем: они
+		// отказывают всегда. Пока они стояли в голове очереди, до остальных
+		// дело не доходило вовсе — за 424 поручения сборка не собрала ни
+		// одного отчёта.
+		if a.Pane != "" && paneSessionOf(recs, a.Task) == "" {
+			hopeless++
+			continue
+		}
 		if a.Pane == "" {
 			conv = append(conv, a)
 		} else {
 			panes = append(panes, a)
 		}
 	}
+	// Свежие первыми: человек ждёт вчерашнее поручение, а не сентябрьское.
+	reverse(panes)
+	reverse(conv)
 
 	var out []Reconciled
 	for _, a := range conv {
@@ -133,6 +146,16 @@ func Reconcile(ctx context.Context, o ReconcileOptions) []Reconciled {
 	}
 	// Про нерассмотренное говорится вслух. Прежде очередь обрывалась молча, и
 	// отсутствие поручения в выдаче было неотличимо от «с ним всё в порядке».
+	// Безнадёжные названы разом. Молчать о них нельзя — это те самые
+	// поручения, чей отчёт уже не будет собран никогда; но и место в очереди
+	// им отдавать незачем: они отказывают всегда и держат её голову.
+	if hopeless > 0 {
+		out = append(out, Reconciled{
+			Cause: CauseExecutorUnknown,
+			Reason: fmt.Sprintf("%d поручений без записанного разговора-исполнителя: "+
+				"привязку доказать нечем, отчёт по ним собран не будет", hopeless),
+		})
+	}
 	if left := len(panes) - examined; left > 0 {
 		out = append(out, Reconciled{
 			Cause: CauseNotExamined,
@@ -192,7 +215,13 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 				short(now), short(bound)))
 	}
 
-	text := finalOf(o, a.Pane)
+	// Отметка хука точнее экрана: платформа отдаёт текст реплики как есть, без
+	// рамок и без прокрутки. Экран остаётся запасным путём — для панелей, где
+	// хук не установлен.
+	text := lastSaid(recs, a.Task)
+	if text == "" {
+		text = finalOf(o, a.Pane)
+	}
 	if text == "" {
 		return refuse(r, CauseNoFinalOutput,
 			"на живом экране панели нечего взять: финала нет")
@@ -318,4 +347,21 @@ func reconcileConversation(recs []journal.Record, a Assignment, r Reconciled) Re
 	return refuse(r, CauseNoScreen,
 		fmt.Sprintf("разговор %s свободен, а отчёта не дал; экрана у разговора нет, "+
 			"взять текст неоткуда — попросите его вызвать claudex done %s", s.Short(), a.Task))
+}
+
+// lastSaid — последняя реплика исполнителя, записанная хуком Stop.
+func lastSaid(recs []journal.Record, id string) string {
+	var out string
+	for _, r := range recs {
+		if r.Task == id && r.Event == journal.Idle && strings.TrimSpace(r.Reason) != "" {
+			out = strings.TrimSpace(r.Reason)
+		}
+	}
+	return out
+}
+
+func reverse(a []Assignment) {
+	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
+		a[i], a[j] = a[j], a[i]
+	}
 }

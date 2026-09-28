@@ -57,6 +57,9 @@ type Options struct {
 	// сборка читает живые экраны и трогает куда больше поручений, чем дожим,
 	// поэтому сперва она должна пожить под присмотром.
 	Reconcile bool
+	// SilenceGrace — сколько ждать после окончания хода, прежде чем считать
+	// молчание окончательным.
+	SilenceGrace time.Duration
 
 	Now func() time.Time
 	// Flush подменяется в тестах. Настоящий — task.Flush.
@@ -73,6 +76,7 @@ type Status struct {
 	Failed      int       `json:"failed"`
 	Pending     int       `json:"pending"`
 	Deferred    int       `json:"deferred"`
+	Woken       int       `json:"woken"`
 	Interval    string    `json:"interval"`
 	Reconciling bool      `json:"reconciling"`
 }
@@ -83,6 +87,8 @@ type Tick struct {
 	Failed    []string `json:"failed,omitempty"`
 	Pending   int      `json:"pending"`
 	Deferred  int      `json:"deferred"`
+	// Silent — за кого разбудили по молчанию, без отчёта от самой задачи.
+	Silent []string `json:"silent,omitempty"`
 }
 
 // Supervisor хранит то, чего нет в журнале: когда следующий раз трогать адрес,
@@ -126,6 +132,13 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	if err != nil {
 		return t
 	}
+	// Молчуны проверяются первыми и независимо от зависших отчётов: если
+	// исполнитель доработал и не отчитался, затеявший не узнает вообще ничего,
+	// а недоставленный отчёт хотя бы существует. Прежде эта проверка стояла
+	// после раннего выхода «дожимать нечего» и при пустом списке не
+	// выполнялась вовсе — поймано тестом.
+	t.Silent = s.wakeSilent(ctx, recs, now)
+
 	lost := task.LostReports(recs)
 	t.Pending = len(lost)
 
@@ -162,6 +175,39 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	return t
 }
 
+// wakeSilent будит затеявшего за тех, кто закончил ход и замолчал.
+//
+// Событие говорит ровно то, что видно: работа кончилась, вот последняя
+// реплика. Исхода оно не называет — исход даёт только сама задача.
+func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now time.Time) []string {
+	var out []string
+	for _, sl := range task.SilentTasks(recs, now, s.o.SilenceGrace) {
+		if len(out) >= s.o.MaxPerTick || ctx.Err() != nil {
+			break
+		}
+		if until, ok := s.next["тишина:"+sl.Task]; ok && now.Before(until) {
+			continue
+		}
+		st := task.StateOf(recs, sl.Task)
+		w := task.WakeOf(st.CallerKind, st.Caller, st.Caller)
+		if w.Target == "" {
+			continue
+		}
+		d := task.Deliver(ctx, s.o.Client, s.o.Journal, sl.Task, w.Target,
+			"", task.DeliverOptions{
+				Stage: task.StageReported, Kind: w.Kind, WantSession: w.Session,
+				HumanTold: true, Event: task.SilenceEvent(sl, st.Executor),
+				Deadline: 5 * time.Second, Poll: time.Second,
+			})
+		if d.OK {
+			out = append(out, sl.Task)
+			continue
+		}
+		s.defer_("тишина:"+sl.Task, now)
+	}
+	return out
+}
+
 // defer_ откладывает адрес вдвое дальше прошлого раза, но не дальше предела.
 func (s *Supervisor) defer_(id string, now time.Time) {
 	w := s.wait[id]
@@ -183,6 +229,7 @@ func (s *Supervisor) record(now time.Time, t Tick) {
 	s.stat.Delivered += len(t.Delivered)
 	s.stat.Failed += len(t.Failed)
 	s.stat.Pending, s.stat.Deferred = t.Pending, t.Deferred
+	s.stat.Woken += len(t.Silent)
 	s.writeStatus()
 }
 

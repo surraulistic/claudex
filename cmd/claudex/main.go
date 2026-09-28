@@ -215,6 +215,8 @@ func run() error {
 		return cmdSend(o, args[1], strings.Join(args[2:], " "))
 	case "task":
 		return cmdTask(o, args[1:])
+	case "hook":
+		return cmdHook(o, args[1:])
 	case "doctor":
 		return cmdDoctor(o)
 	case "supervisor":
@@ -333,8 +335,16 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
                                          рабочий адрес: имя панели переживает
                                          смену агента, идентификатор нет
                                          (claudex peers — прежнее имя той же)
-  claudex done [<id>] "<что вышло>"      отчитаться; id необязателен — ClauDex
-                                         сам сверит его с активным поручением
+  claudex done [<id>] "<что вышло>"      отчитаться самому: назвать исход —
+                                         готово, провал, частично,
+                                         заблокировано. Это оценка, и дать её
+                                         может только тот, кто работал.
+                                         Забыли — наблюдатель всё равно
+                                         разбудит затеявшего, но уже
+                                         наблюдением, а не оценкой
+  claudex hook stop                      служебное: вызывается хуком Stop самого
+                                         Claude Code и записывает, что ход
+                                         кончился. Установка: claudex hook install
   claudex digest <id>                    прежнее имя claudex task log
   claudex schema                         форма выдачи и готовые запросы jq
   claudex index [--full]                 пересобрать индекс из базы cass

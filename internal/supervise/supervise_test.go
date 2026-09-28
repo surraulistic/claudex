@@ -1,7 +1,10 @@
 package supervise
 
 import (
+	"strings"
+
 	"context"
+	"github.com/surraulistic/claudex/internal/codex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -218,5 +221,89 @@ func TestStoppingClearsTheStatus(t *testing.T) {
 	<-done
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("файл состояния убран, получено %v", err)
+	}
+}
+
+// silentAssignment — исполнитель доработал ход, отметка от хука есть, отчёта
+// нет: ровно 168 из 424 поручений выглядели так.
+func silentAssignment(t *testing.T, j *journal.Journal, id, thread string, idleAgo time.Duration) {
+	t.Helper()
+	now := time.Now()
+	for _, r := range []journal.Record{
+		{Task: id, Event: journal.Started, Pane: "wE:p37", PaneSession: "разговор",
+			Target: thread, TargetSession: thread, TargetKind: task.KindThread,
+			Time: now.Add(-time.Hour)},
+		{Task: id, Event: journal.Finished, Outcome: task.SentNoWait, Time: now.Add(-time.Hour)},
+		{Task: id, Event: journal.Idle, PaneSession: "разговор",
+			Reason: "ветка запушена, тесты зелёные", Time: now.Add(-idleAgo)},
+	} {
+		if err := j.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// codexHomeFor поднимает поддельный дом Codex с живым тредом и перехватывает
+// очередь: наблюдателю нужен адресат, который примет пробуждение.
+type queued struct{ thread, message string }
+
+func codexHomeFor(t *testing.T, live string) *[]queued {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "thread-writer-locks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "thread-writer-locks", live+".lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "session_index.jsonl"), []byte(`{"id":"`+live+`"}`+"\n"), 0o644)
+	t.Setenv("CODEX_HOME", dir)
+
+	var sent []queued
+	prev := codex.Queue
+	codex.Queue = func(_ context.Context, id, msg string) error {
+		sent = append(sent, queued{thread: id, message: msg})
+		return nil
+	}
+	t.Cleanup(func() { codex.Queue = prev })
+	return &sent
+}
+
+func TestSupervisorWakesForSilentWorkers(t *testing.T) {
+	// Главное, ради чего затевался хук: задача не вызвала done, а затеявший
+	// всё равно узнаёт.
+	sent := codexHomeFor(t, "01a0a268-ca14-7441-844b-8fcd24cd2e45")
+	j := newJournal(t)
+	silentAssignment(t, j, "43bc6e11", "01a0a268-ca14-7441-844b-8fcd24cd2e45", 10*time.Minute)
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Flush: spyFlush(true, &seen)})
+
+	got := s.Once(context.Background())
+	if len(got.Silent) != 1 || got.Silent[0] != "43bc6e11" {
+		t.Fatalf("за молчуна разбудили, получено %+v", got)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("ровно одно пробуждение, получено %+v", *sent)
+	}
+	msg := (*sent)[0].message
+	if strings.Contains(msg, "готово") {
+		t.Errorf("исхода не называем — его знает только задача, получено %q", msg)
+	}
+	if !strings.Contains(msg, "ветка запушена") {
+		t.Errorf("последняя реплика передана как доказательство, получено %q", msg)
+	}
+}
+
+func TestSilentWorkerIsNotWokenTwice(t *testing.T) {
+	sent := codexHomeFor(t, "01a0a268-ca14-7441-844b-8fcd24cd2e45")
+	j := newJournal(t)
+	silentAssignment(t, j, "43bc6e11", "01a0a268-ca14-7441-844b-8fcd24cd2e45", 10*time.Minute)
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Flush: spyFlush(true, &seen)})
+
+	s.Once(context.Background())
+	s.Once(context.Background())
+	if len(*sent) != 1 {
+		t.Fatalf("второй раз за то же не будим, получено %d", len(*sent))
 	}
 }

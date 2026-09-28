@@ -264,9 +264,17 @@ func cmdDoctor(o opts) error {
 	} else {
 		add("журнал", true, "%d записей, ожидающих поручений %d", len(recs), len(task.Open(recs)))
 		if lost := task.LostReports(recs); len(lost) > 0 {
-			add("недоставленные отчёты", false, "%d — лечится claudex flush", len(lost))
+			add("недоставленные отчёты", false, "%d — досылает наблюдатель", len(lost))
 		} else {
 			add("недоставленные отчёты", true, "нет")
+		}
+		// Отказы в отправке видно только здесь: поручения они не заводят, и
+		// task list про них не знает — он идёт по заведённым.
+		if ref := task.RefusedTasks(recs); len(ref) > 0 {
+			add("не отправлено вовсе", false,
+				"%d текстов сохранено, но никуда не ушло: claudex undelivered", len(ref))
+		} else {
+			add("не отправлено вовсе", true, "нет")
 		}
 	}
 

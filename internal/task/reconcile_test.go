@@ -214,9 +214,21 @@ func TestUnprovenExecutorBindingIsRefused(t *testing.T) {
 		Pane: silentPane, Time: time.Now().Add(-2 * time.Hour),
 		Target: leaderThread, TargetKind: KindThread})
 
+	// Отказ теперь общий: такие поручения не занимают очередь, но и не
+	// исчезают — иначе сборка вечно упиралась бы в них головой, что и
+	// случилось: ноль собранных отчётов за 424 поручения.
 	got := Reconcile(context.Background(), reconcileOpts(j, c, finalText))
-	if got[0].Synthetic || got[0].Cause != CauseExecutorUnknown {
-		t.Fatalf("без доказанной привязки не собираем, получено %+v", got[0])
+	var named bool
+	for _, r := range got {
+		if r.Synthetic {
+			t.Fatalf("без доказанной привязки не собираем, получено %+v", r)
+		}
+		if r.Cause == CauseExecutorUnknown {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("о недоказанной привязке сказано, получено %+v", got)
 	}
 }
 

@@ -703,3 +703,68 @@ func TestConversationTasksAreNotCappedByThePaneBudget(t *testing.T) {
 			len(ids), len(seen), got)
 	}
 }
+
+func TestHopelessAssignmentsDoNotBlockTheQueue(t *testing.T) {
+	// У поручений, заведённых до записи разговора панели, привязку доказать
+	// нечем и уже не будет чем. Пока они стояли в голове очереди, сборка не
+	// собрала ни одного отчёта за 424 поручения.
+	claudeHome(t)
+	j := sessionJournal(t)
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 5; i++ {
+		j.Append(journal.Record{Task: fmt.Sprintf("dead0%03d", i), Event: journal.Started,
+			Pane: "wE:p1T", Time: old}) // без PaneSession — доказывать нечем
+	}
+	j.Append(journal.Record{Task: "fresh001", Event: journal.Started,
+		Pane: "wE:p13", PaneSession: "разговор", Time: old})
+
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, MinAge: time.Minute, Now: time.Now(), Max: 2})
+
+	for _, r := range got {
+		if strings.HasPrefix(r.Task, "dead0") {
+			t.Fatalf("безнадёжные в очередь не берутся, получено %+v", r)
+		}
+	}
+	var seen bool
+	for _, r := range got {
+		if r.Task == "fresh001" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatalf("до живого дошла очередь, получено %+v", got)
+	}
+}
+
+func TestHookTextIsPreferredOverTheScreen(t *testing.T) {
+	// Платформа отдаёт реплику как есть; экран приходит с рамками и прокруткой.
+	inbox := claudeHome(t, workerSession)
+	_ = inbox
+	j := sessionJournal(t)
+	old := time.Now().Add(-2 * time.Hour)
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Started,
+		Pane: "wE:p13", PaneSession: execSession, Target: leaderThread,
+		TargetKind: KindThread, Time: old})
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Finished,
+		Outcome: SentNoWait, Time: old})
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Idle,
+		Reason: "текст из хука: миграции применены", Time: old})
+
+	codexHome(t, leaderThread)
+	f, _, c := executor(t, "idle", execSession)
+	_ = f
+	got := Reconcile(context.Background(), ReconcileOptions{
+		Journal: j, Client: c, MinAge: time.Minute, Now: time.Now(),
+		Read: func(string, int) (string, error) { return "экран с рамками и мусором", nil },
+	})
+	recs, _ := j.Read()
+	for _, r := range recs {
+		if r.Event == journal.Reported && !strings.Contains(r.Reason, "из хука") {
+			t.Fatalf("в отчёт пошёл текст хука, получено %q", r.Reason)
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("поручение рассмотрено")
+	}
+}
