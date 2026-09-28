@@ -124,3 +124,40 @@ func ExecutorOfTask(recs []journal.Record, id string) (string, bool) {
 	}
 	return "", false
 }
+
+// OpenFor — открытые поручения этого исполнителя, от свежих к старым.
+//
+// Нужно `send`: отправить работнику, у которого работа уже идёт, — это чаще
+// всего продолжение, а не второе поручение. Прежде каждая отправка заводила
+// отдельное, и на живом журнале у одного исполнителя их накопилось 62, ни
+// одно не закрыто.
+func OpenFor(recs []journal.Record, who string) []Assignment {
+	a := ActiveFor(recs, who)
+	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
+		a[i], a[j] = a[j], a[i]
+	}
+	return a
+}
+
+// TooManyOpen — у работника несколько незакрытых поручений, и какое из них
+// продолжают, знает только человек.
+type TooManyOpen struct {
+	Who  string
+	Open []Assignment
+}
+
+func (e *TooManyOpen) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "у %s незакрытых поручений %d — какое продолжаем, не угадать:",
+		short(e.Who), len(e.Open))
+	for i, a := range e.Open {
+		if i == 5 {
+			fmt.Fprintf(&b, "\n  … и ещё %d", len(e.Open)-5)
+			break
+		}
+		fmt.Fprintf(&b, "\n  %s  %s", a.Task, a.Started.Format("02.01 15:04"))
+	}
+	b.WriteString("\n  продолжить названное: claudex send <id поручения> \"…\"" +
+		"\n  завести отдельное:    claudex send <разговор> --new \"…\"")
+	return b.String()
+}

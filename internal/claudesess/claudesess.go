@@ -163,6 +163,37 @@ func List(home string) []Session {
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
+	return newest(out)
+}
+
+// newest оставляет по одной записи на разговор.
+//
+// Один разговор бывает записан дважды: сокет переживает свой процесс, и файл
+// ушедшей сессии остаётся выглядеть живым. Замерено: из двадцати живых записей
+// девятнадцать разговоров, а `send` по имени панели отказывал «подходит 2
+// разговора», перечисляя один и тот же дважды — отказ, в котором нечего
+// выбрать.
+//
+// Оставляется свежая по времени отметки: у осиротевшей она не двигается, и
+// писать в её сокет некому.
+func newest(in []Session) []Session {
+	best := map[string]Session{}
+	for _, s := range in {
+		if s.ID == "" {
+			continue
+		}
+		if b, ok := best[s.ID]; ok && b.StatusAt.After(s.StatusAt) {
+			continue
+		}
+		best[s.ID] = s
+	}
+	out := make([]Session, 0, len(best))
+	for _, s := range in {
+		if b, ok := best[s.ID]; ok && b.PID == s.PID {
+			out = append(out, b)
+			delete(best, s.ID)
+		}
+	}
 	return out
 }
 

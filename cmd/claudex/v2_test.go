@@ -57,11 +57,30 @@ func TestTaskSubcommandNeverGuessesWhatItWasGiven(t *testing.T) {
 	}
 }
 
-func TestNewWorkerFlagIsReservedNotSilentlyIgnored(t *testing.T) {
-	// Нереализованный флаг, который молча ничего не делает, хуже отсутствующего.
-	err := cmdSend(opts{newSession: true}, "цель", "текст")
-	if err == nil || !strings.Contains(err.Error(), "--new") {
-		t.Fatalf("зарезервированный флаг отказывает явно, получено %v", err)
+func TestNewFlagMeansASeparateAssignment(t *testing.T) {
+	// Флаг получил смысл: отправка работнику, у которого работа уже идёт,
+	// по умолчанию её продолжает, а --new заводит отдельное поручение.
+	if !strings.Contains(helpText, "--new") {
+		t.Fatal("флага нет в справке")
+	}
+	if !strings.Contains(helpText, "отдельное поручение") {
+		t.Error("в справке не сказано, что именно он делает")
+	}
+	if !strings.Contains(helpText, "продолжает её") {
+		t.Error("в справке не сказано, каково умолчание")
+	}
+}
+
+func TestSeveralOpenAssignmentsAreRefusedWithBothWaysOut(t *testing.T) {
+	// Какое из шести десятков продолжают, знает только человек. Отказ должен
+	// называть оба выхода, а не просто отказывать.
+	e := &task.TooManyOpen{Who: "7e403273-2034-4296-a833-d176bd30e03d",
+		Open: []task.Assignment{{Task: "aaaaaaaa"}, {Task: "bbbbbbbb"}}}
+	msg := e.Error()
+	for _, want := range []string{"aaaaaaaa", "bbbbbbbb", "--new", "send <id поручения>"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("в отказе есть %q, получено:\n%s", want, msg)
+		}
 	}
 }
 
@@ -136,7 +155,7 @@ func TestSessionListIsTheRecommendedDiscovery(t *testing.T) {
 		t.Error("прежнее имя не названо совместимым")
 	}
 	// Инвариант: рабочий адрес — идентификатор, а не имя панели.
-	if !strings.Contains(helpText, "идентификатор разговора →") {
+	if !strings.Contains(helpText, "Адресат распознаётся сам") {
 		t.Error("в справке не описано распознавание адресата")
 	}
 }

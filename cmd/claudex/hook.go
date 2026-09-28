@@ -83,19 +83,47 @@ func hookStop(o opts) error {
 	if err != nil {
 		return nil
 	}
-	// Отметка нужна только там, где её кто-то ждёт: без открытого поручения
-	// запись про каждый ход превратила бы журнал в лог ходов.
-	open := task.ActiveFor(recs, p.SessionID)
-	if len(open) == 0 {
+	id, ok := idleMark(recs, p.SessionID, strings.TrimSpace(p.Last))
+	if !ok {
 		return nil
 	}
-	for _, a := range open {
-		j.Append(journal.Record{
-			Task: a.Task, Event: journal.Idle, PaneSession: p.SessionID,
-			Reason: strings.TrimSpace(p.Last),
-		})
-	}
+	j.Append(journal.Record{
+		Task: id, Event: journal.Idle, PaneSession: p.SessionID,
+		Reason: strings.TrimSpace(p.Last),
+	})
 	return nil
+}
+
+// idleMark — какое поручение пометить по окончании хода и стоит ли вообще.
+//
+// Отдельной функцией, потому что правило здесь одно, а проверять его надо
+// именно то, которым пользуется хук. Повторить его в тесте своими словами —
+// значит проверять пересказ: так и вышло с первой версией, и мутация настоящего
+// хука тест не роняла.
+func idleMark(recs []journal.Record, session, last string) (string, bool) {
+	open := task.ActiveFor(recs, session)
+	if len(open) != 1 {
+		// Ноль — отмечать нечего. Несколько — конец хода не говорит, какое из
+		// них закончилось, и пометить все значит записать догадку. На живом
+		// журнале у одного исполнителя их было 62: один конец хода разбудил бы
+		// затеявшего по каждому.
+		return "", false
+	}
+	id := open[0].Task
+	// Ход кончается много раз подряд, а отметка нужна последняя. Повтор того
+	// же текста журналу ничего не добавляет: за час их набралось семь по
+	// одному поручению.
+	var prev string
+	var seen bool
+	for _, r := range recs {
+		if r.Task == id && r.Event == journal.Idle {
+			prev, seen = strings.TrimSpace(r.Reason), true
+		}
+	}
+	if seen && prev == last {
+		return "", false
+	}
+	return id, true
 }
 
 func hookInstallHint() error {

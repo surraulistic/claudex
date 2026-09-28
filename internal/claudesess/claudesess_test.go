@@ -452,3 +452,34 @@ func TestLookupStillRefusesTheUnknownAndTheAmbiguous(t *testing.T) {
 		t.Fatalf("неоднозначный отклонён, получено %v", err)
 	}
 }
+
+func TestOneConversationIsListedOnce(t *testing.T) {
+	// Сокет переживает свой процесс, и файл ушедшей сессии остаётся выглядеть
+	// живым. Из двадцати живых записей разговоров было девятнадцать, а `send`
+	// отказывал «подходит 2 разговора», перечисляя один и тот же дважды —
+	// отказ, в котором нечего выбрать.
+	const id = "7e403273-2034-4296-a833-d176bd30e03d"
+	home, sock := t.TempDir(), socketDir(t)
+	for i, ago := range []time.Duration{55 * time.Hour, 29 * time.Minute} {
+		pid := 100 + i
+		p := filepath.Join(sock, fmt.Sprintf("%d.sock", pid))
+		listen(t, p)
+		rec, _ := json.Marshal(map[string]any{
+			"pid": pid, "sessionId": id, "name": "license", "status": "idle",
+			"messagingSocketPath": p,
+			"statusUpdatedAt":     time.Now().Add(-ago).UnixMilli(),
+		})
+		os.WriteFile(filepath.Join(home, fmt.Sprintf("%d.json", pid)), rec, 0o600)
+	}
+
+	got := List(home)
+	if len(got) != 1 {
+		t.Fatalf("один разговор — одна запись, получено %d", len(got))
+	}
+	if got[0].PID != 101 {
+		t.Fatalf("оставлена свежая: у осиротевшей отметка не двигается, получено pid %d", got[0].PID)
+	}
+	if _, err := Lookup(home, id); err != nil {
+		t.Fatalf("и находится без отказа, получено %v", err)
+	}
+}

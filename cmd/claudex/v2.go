@@ -42,11 +42,7 @@ func cmdSend(o opts, tgt, prompt string) error {
 	if o.headless {
 		return headlessNotReady(tgt, prompt)
 	}
-	if o.newSession {
-		return exitcode.Wrap(exitcode.BadCall, errors.New(
-			"--new пока не реализован: он заведёт нового работника вместо отправки существующему; "+
-				"сейчас назовите цель явно или воспользуйтесь --headless, когда он появится"))
-	}
+
 	// Ожидание — явное. Всё остальное send берёт у delegate как есть: журнал,
 	// адрес возврата, дедупликация и дожим у них общие.
 	o.noWait = !o.wait
@@ -66,6 +62,16 @@ func cmdSend(o opts, tgt, prompt string) error {
 	}
 	switch a.Kind {
 	case task.AddrSession:
+		// Отправить работнику, у которого работа уже идёт, — это чаще всего
+		// продолжение, а не второе поручение. Прежде каждая отправка заводила
+		// отдельное, и у одного исполнителя их накопилось 62.
+		id, err := continueOrStart(recs, a.Session.ID, o.newSession)
+		if err != nil {
+			return exitcode.Wrap(exitcode.BadCall, err)
+		}
+		if id != "" {
+			return sendContinuation(o, id, recs, prompt)
+		}
 		return delegateToConversation(o, a.Session, "", prompt)
 	case task.AddrTask:
 		return sendContinuation(o, a.Task, recs, prompt)
@@ -379,4 +385,24 @@ func cmdArchive(o opts, args []string) error {
 		fmt.Printf("архив: %s\n", res.Path)
 	}
 	return nil
+}
+
+// continueOrStart решает, продолжать ли уже идущую работу.
+//
+// Пустой идентификатор значит «завести новое». Отправить работнику, у которого
+// работа идёт, — это чаще всего продолжение: прежде каждая отправка заводила
+// отдельное поручение, и у одного исполнителя их накопилось 62, ни одно не
+// закрыто. Несколько незакрытых — отказ: какое продолжают, знает только человек.
+func continueOrStart(recs []journal.Record, session string, forceNew bool) (string, error) {
+	if forceNew {
+		return "", nil
+	}
+	switch open := task.OpenFor(recs, session); len(open) {
+	case 0:
+		return "", nil
+	case 1:
+		return open[0].Task, nil
+	default:
+		return "", &task.TooManyOpen{Who: session, Open: open}
+	}
 }
