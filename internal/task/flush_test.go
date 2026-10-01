@@ -208,3 +208,34 @@ func TestClosedThreadIsFlushedNotPostponedForever(t *testing.T) {
 		t.Fatalf("ушло в его очередь, получено %+v", *sent)
 	}
 }
+
+func TestFlushLeavesHopelessReportsAlone(t *testing.T) {
+	// Предел за проход — ресурс: пока его занимают адреса, молчащие неделю,
+	// свежий отчёт ждёт своей очереди. На живом журнале 34 таких пережили
+	// четыре тысячи проходов и не сдвинулись.
+	sent := codexHome(t, otherThread) // адресат жив — отказа по адресу не будет
+	_, j, c := threadDelivery(t)
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	for _, r := range []journal.Record{
+		{Task: "aaaaaaaa", Event: journal.Started, Pane: "wE:p37", Time: old,
+			Target: otherThread, TargetSession: otherThread, TargetKind: KindThread},
+		{Task: "aaaaaaaa", Event: journal.Reported, Outcome: "готово", Reason: "старое", Time: old},
+		{Task: "aaaaaaaa", Event: journal.Notified, Target: otherThread, TargetKind: KindThread,
+			Stage: StageReported, Cause: CauseThreadUnknown, Outcome: ToldHuman, Time: old},
+	} {
+		j.Append(r)
+	}
+
+	got := Flush(context.Background(), FlushOptions{Journal: j, Client: c})
+	if len(got) != 0 {
+		t.Fatalf("брошенное дожимом не трогаем, получено %+v", got)
+	}
+	if len(*sent) != 0 {
+		t.Fatalf("и в очередь ничего не клали, получено %+v", *sent)
+	}
+	// Но из виду оно не пропало.
+	recs, _ := j.Read()
+	if len(LostReports(recs)) != 1 {
+		t.Fatal("отчёт по-прежнему виден в недоставленном")
+	}
+}

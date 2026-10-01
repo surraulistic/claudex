@@ -194,3 +194,49 @@ func TestAClosedThreadIsNeverSwappedForAnotherLiveOne(t *testing.T) {
 		t.Fatal("в чужой живой разговор не писали")
 	}
 }
+
+func TestHopelessReportsStopConsumingAttempts(t *testing.T) {
+	// Адрес, молчавший неделю, не ответит и сегодня. Наблюдатель при этом
+	// пробовал снова и снова: на живом журнале 34 таких отчёта пережили
+	// четыре тысячи проходов и не сдвинулись ни разу.
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "aaaaaaaa", Event: journal.Reported, Outcome: "готово", Reason: "старое"},
+		{Task: "aaaaaaaa", Event: journal.Notified, Stage: StageReported,
+			Target: otherThread, Outcome: ToldHuman, Cause: CauseThreadUnknown,
+			Time: now.Add(-8 * 24 * time.Hour)},
+		{Task: "bbbbbbbb", Event: journal.Reported, Outcome: "готово", Reason: "свежее"},
+		{Task: "bbbbbbbb", Event: journal.Notified, Stage: StageReported,
+			Target: otherThread, Outcome: ToldHuman, Cause: CauseThreadUnknown,
+			Time: now.Add(-time.Hour)},
+	}
+	all := LostReports(recs)
+	if len(all) != 2 {
+		t.Fatalf("видно оба: текст цел, ничего не прячем; получено %d", len(all))
+	}
+	live := LivePending(recs, now)
+	if len(live) != 1 || live[0].Task != "bbbbbbbb" {
+		t.Fatalf("дожимаем только свежее, получено %+v", live)
+	}
+}
+
+func TestFreshFailureIsNeverCalledHopeless(t *testing.T) {
+	// Граница не должна съедать то, что ещё может доехать.
+	now := time.Now()
+	l := Lost{Task: "aaaaaaaa", At: now.Add(-AbandonAfter + time.Minute).Format(time.RFC3339)}
+	if l.Stale(now) {
+		t.Fatal("младше срока — ещё пробуем")
+	}
+	old := Lost{Task: "bbbbbbbb", At: now.Add(-AbandonAfter - time.Minute).Format(time.RFC3339)}
+	if !old.Stale(now) {
+		t.Fatal("старше срока — прекращаем")
+	}
+}
+
+func TestUnparsableTimeIsNotTreatedAsHopeless(t *testing.T) {
+	// Сломанная отметка времени — не повод бросать отчёт: лучше лишняя
+	// попытка, чем молча прекращённая доставка.
+	if (Lost{At: "не дата"}).Stale(time.Now()) {
+		t.Fatal("без времени считаем живым")
+	}
+}

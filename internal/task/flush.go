@@ -78,7 +78,9 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 	if err != nil {
 		return nil
 	}
-	pending := LostReports(recs)
+	// Безнадёжные сюда не попадают: адрес, молчавший неделю, не ответит и
+	// сегодня, а место в пределе за проход он занимает.
+	pending := LivePending(recs, time.Now())
 	if len(pending) == 0 {
 		return nil
 	}

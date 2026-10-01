@@ -1882,12 +1882,24 @@ func cmdUndelivered(o opts) error {
 	// Отчёты здесь лежат целиком, и их десятки: замерено около 24 КБ. Списком
 	// видно, что ждёт доставки; сам текст берут адресно.
 	if !o.all {
+		now := time.Now()
+		stale := 0
 		for _, l := range lost {
-			fmt.Printf("%-8s %-9s %-22s %s\n", l.Task, l.Stage,
-				cutTo(l.Cause, 22), cutTo(oneLine(l.Report), 60))
+			mark := " "
+			if l.Stale(now) {
+				// Попытки по нему прекращены: адрес молчит дольше трёх суток.
+				// Текст при этом цел — отметка говорит «дальше бесполезно», а
+				// не «потеряно».
+				mark, stale = "·", stale+1
+			}
+			fmt.Printf("%s %-8s %-9s %-22s %s\n", mark, l.Task, l.Stage,
+				cutTo(l.Cause, 22), cutTo(oneLine(l.Report), 58))
 		}
-		fmt.Printf("\nвсего %d · текст целиком: claudex tasks --task <id>, либо claudex undelivered --all\n",
-			len(lost))
+		fmt.Printf("\nвсего %d", len(lost))
+		if stale > 0 {
+			fmt.Printf(", из них %d брошено (·) — адрес молчит дольше трёх суток, дожим их не трогает", stale)
+		}
+		fmt.Printf("\nтекст целиком: claudex tasks --task <id>, либо claudex undelivered --all\n")
 		return nil
 	}
 	for _, l := range lost {

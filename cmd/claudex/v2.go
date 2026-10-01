@@ -283,9 +283,18 @@ func cmdDoctor(o opts) error {
 		add("журнал", false, "%s: %v", jp, err)
 	} else {
 		add("журнал", true, "%d записей, ожидающих поручений %d", len(recs), len(task.Open(recs)))
-		if lost := task.LostReports(recs); len(lost) > 0 {
-			add("недоставленные отчёты", false, "%d — досылает наблюдатель", len(lost))
-		} else {
+		lost := task.LostReports(recs)
+		live := task.LivePending(recs, time.Now())
+		switch {
+		case len(live) > 0:
+			add("недоставленные отчёты", false, "%d — досылает наблюдатель", len(live))
+		case len(lost) > 0:
+			// Попытки прекращены, но отчёты целы: это не «всё хорошо», а
+			// «дальше бесполезно».
+			add("недоставленные отчёты", true,
+				"свежих нет; %d брошено — адреса молчат дольше трёх суток, текст цел: claudex undelivered",
+				len(lost))
+		default:
 			add("недоставленные отчёты", true, "нет")
 		}
 		// Отказы в отправке видно только здесь: поручения они не заводят, и

@@ -461,6 +461,34 @@ func RefusedTasks(recs []journal.Record) []Refused {
 	return out
 }
 
+// Stale — попытки по этому отчёту пора прекратить.
+//
+// Адрес, который не принял отчёт неделю назад, не примет его и сегодня: панель
+// давно ведёт другой разговор, тред забыт, ведущий ушёл. Наблюдатель при этом
+// честно пробует снова и снова — на живом журнале 34 таких отчёта пережили
+// четыре тысячи проходов, и ни один не сдвинулся.
+//
+// Отчёт при этом никуда не девается: он виден в `claudex undelivered` и
+// `claudex task <id>`, текст цел. Прекращаются только попытки.
+func (l Lost) Stale(now time.Time) bool {
+	t, err := time.Parse(time.RFC3339, l.At)
+	if err != nil {
+		return false
+	}
+	return now.Sub(t) > AbandonAfter
+}
+
+// LivePending — то, что ещё имеет смысл дожимать.
+func LivePending(recs []journal.Record, now time.Time) []Lost {
+	var out []Lost
+	for _, l := range LostReports(recs) {
+		if !l.Stale(now) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // LostReports собирает по журналу всё, что до ведущего не дошло.
 func LostReports(recs []journal.Record) []Lost {
 	type key struct{ task, stage string }
