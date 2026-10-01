@@ -100,7 +100,11 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 		st := stateOf(recs, l.Task)
 		switch st.kind {
 		case KindThread:
-			if codex.State(home, l.Target) != codex.Live {
+			// Живость треда здесь не требуется: очередь app-server переживает
+			// закрытие и вычитывается при следующем пробуждении. Требовать её
+			// значило бы вечно откладывать отчёт тому, кто просто закрыл
+			// приложение, — ровно это и происходило с сотней отчётов.
+			if st := codex.State(home, l.Target); st != codex.Live && st != codex.Known {
 				continue
 			}
 		case KindSession:

@@ -29,16 +29,19 @@ func pending(t *testing.T, j *journal.Journal, id, thread, report string) {
 	}
 }
 
-func TestClosedThreadIsLeftAloneUntilItReopens(t *testing.T) {
-	// Пока разговор закрыт, дожимать нечего: очередь примет, а прочитать
-	// некому. Отчёт остаётся в канале вытягивания.
-	sent := codexHome(t) // ни одного живого замка
+func TestUnconfirmableAddressIsLeftAloneUntilItIsKnown(t *testing.T) {
+	// Дожимать нечего, пока адрес подтвердить нечем: про этот тред
+	// $CODEX_HOME не знает ничего. Отчёт остаётся в канале вытягивания.
+	//
+	// Прежде так же обходили и закрытый тред — ошибочно: очередь он принимает
+	// и читает при следующем пробуждении.
+	sent := codexHome(t)
 	_, j, c := threadDelivery(t)
-	pending(t, j, "465a77fc", otherThread, "полный текст отчёта")
+	pending(t, j, "465a77fc", unknownThread, "полный текст отчёта")
 
 	got := Flush(context.Background(), FlushOptions{Journal: j, Client: c})
 	if len(got) != 0 {
-		t.Fatalf("закрытый разговор не трогаем, получено %+v", got)
+		t.Fatalf("неподтверждённый адрес не трогаем, получено %+v", got)
 	}
 	if len(*sent) != 0 {
 		t.Fatalf("в очередь ничего не клали, получено %+v", *sent)
@@ -92,13 +95,16 @@ func TestReopenedThreadGetsTheWholeReportOnTheNextTouch(t *testing.T) {
 func TestFlushNeverWritesIntoANeighbouringConversation(t *testing.T) {
 	// Соседний разговор жив, наш закрыт. Отправить туда значило бы прислать
 	// ответ тому, кто вопроса не задавал.
-	sent := codexHome(t, leaderThread)
+	sent := codexHome(t, leaderThread) // жив сосед, адресат закрыт
 	_, j, c := threadDelivery(t)
 	pending(t, j, "465a77fc", otherThread, "отчёт")
 
 	got := Flush(context.Background(), FlushOptions{Journal: j, Client: c})
-	if len(got) != 0 || len(*sent) != 0 {
-		t.Fatalf("в чужой разговор не пишем, получено %+v %+v", got, *sent)
+	if len(got) != 1 || len(*sent) != 1 {
+		t.Fatalf("своему адресату дожали ровно раз, получено %+v %+v", got, *sent)
+	}
+	if (*sent)[0].thread != otherThread {
+		t.Fatalf("писали своему, а не соседу, получено %q", (*sent)[0].thread)
 	}
 }
 
@@ -183,5 +189,22 @@ func TestBindingEvidenceIsRecordedAtCreation(t *testing.T) {
 	}
 	if start.TargetSeen.IsZero() {
 		t.Fatal("записано, когда проверяли")
+	}
+}
+
+func TestClosedThreadIsFlushedNotPostponedForever(t *testing.T) {
+	// Дожим требовал живого треда и пропускал закрытый — а тот очередь
+	// принимает и читает при следующем пробуждении. Из-за этого отчёт тому,
+	// кто просто закрыл приложение, откладывался вечно.
+	sent := codexHome(t) // otherThread известен, замка нет
+	_, j, c := threadDelivery(t)
+	pending(t, j, "465a77fc", otherThread, "полный текст отчёта")
+
+	got := Flush(context.Background(), FlushOptions{Journal: j, Client: c})
+	if len(got) != 1 || !got[0].Ok {
+		t.Fatalf("закрытый тред дожимается, получено %+v", got)
+	}
+	if len(*sent) != 1 || (*sent)[0].thread != otherThread {
+		t.Fatalf("ушло в его очередь, получено %+v", *sent)
 	}
 }
