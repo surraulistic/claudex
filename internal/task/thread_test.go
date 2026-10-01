@@ -19,6 +19,10 @@ import (
 const (
 	leaderThread = "01a0a51e-20c4-7e10-8488-b524b9389489"
 	otherThread  = "01a0a508-1a8d-7ff1-b2b3-47b5e6ceb96b"
+	// unknownThread не значится в указателе сессий: подтвердить, что поручение
+	// затеял он, нечем. Закрытый тред таким адресом больше не является —
+	// очередь он принимает и вычитывает при следующем пробуждении.
+	unknownThread = "01a0bbbb-0000-7000-8000-000000000000"
 )
 
 type queued struct{ thread, message string }
@@ -116,17 +120,35 @@ func TestThreadDeliverySurvivesPaneReuse(t *testing.T) {
 	}
 }
 
-func TestThreadDeliveryRefusesAClosedThread(t *testing.T) {
-	// Закрытый тред принял бы очередь молча и не прочитал её никогда. Это
-	// отказ, а не успех: иначе отчёт исчезает, а журнал говорит «доставлено».
+func TestKnownThreadTakesTheQueueEvenWhenClosed(t *testing.T) {
+	// Главное правило доставки в Codex. Закрытый тред очередь принимает и
+	// читает — потом, когда его откроют: проверено на живом треде, и так же
+	// это видит человек, у которого при первом же сообщении доезжает всё
+	// накопившееся. Два дня здесь стоял отказ, и отчёт в закрытый тред даже не
+	// пытались положить.
+	sent := codexHome(t, leaderThread) // otherThread известен, но замка нет
+	_, j, c := threadDelivery(t)
+
+	d := Deliver(context.Background(), c, j, "11111111", otherThread, "готово", threadOpts())
+	if !d.OK {
+		t.Fatalf("известный тред — законный адрес, получено %+v", d)
+	}
+	if len(*sent) != 1 || (*sent)[0].thread != otherThread {
+		t.Fatalf("отчёт лёг в очередь именно его, получено %+v", *sent)
+	}
+}
+
+func TestUnknownThreadIsStillRefused(t *testing.T) {
+	// Послабление касается только известных тредов. Про этот $CODEX_HOME не
+	// знает ничего: подтвердить, что поручение затеял он, нечем.
 	sent := codexHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
 
-	d := Deliver(context.Background(), c, j, "11111111", otherThread, "готово", threadOpts())
+	d := Deliver(context.Background(), c, j, "11111111", unknownThread, "готово", threadOpts())
 	if d.OK {
-		t.Fatal("в закрытый тред класть нельзя")
+		t.Fatal("в неизвестный тред класть нельзя")
 	}
-	if d.Cause != CauseThreadNotLive {
+	if d.Cause != CauseThreadUnknown {
 		t.Fatalf("причина машиночитаема, получено %q", d.Cause)
 	}
 	if !d.Fallback {

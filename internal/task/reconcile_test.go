@@ -274,20 +274,20 @@ func TestCollectedReportIsNotCollectedAgain(t *testing.T) {
 func TestCollectedReportGoesThroughTheSameAddressCheck(t *testing.T) {
 	// Собранный отчёт не получает поблажек: закрытый разговор его не примет, и
 	// он ложится в канал вытягивания, как обычный.
-	sent := codexHome(t) // otherThread известен, но закрыт
+	sent := codexHome(t) // unknownThread не значится в указателе
 	_, j, c := executor(t, "idle", execSession)
 	when := time.Now().Add(-2 * time.Hour)
 	j.Append(journal.Record{Task: silentTask, Event: journal.Started, Pane: silentPane,
-		Time: when, Target: otherThread, TargetSession: otherThread,
+		Time: when, Target: unknownThread, TargetSession: unknownThread,
 		TargetKind: KindThread, PaneSession: execSession})
 	j.Append(journal.Record{Task: silentTask, Event: journal.Finished, Pane: silentPane,
 		Time: when, Outcome: "отправлено без ожидания"})
 
 	got := Reconcile(context.Background(), reconcileOpts(j, c, finalText))
 	if got[0].Delivered {
-		t.Fatalf("в закрытый разговор не доставляем, получено %+v", got[0])
+		t.Fatalf("в неподтверждённый адрес не доставляем, получено %+v", got[0])
 	}
-	if got[0].Cause != CauseThreadNotLive {
+	if got[0].Cause != CauseThreadUnknown {
 		t.Fatalf("причина та же, что у обычного отчёта, получено %q", got[0].Cause)
 	}
 	if len(*sent) != 0 {

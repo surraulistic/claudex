@@ -28,13 +28,16 @@ func seedThreadTask(t *testing.T, j *journal.Journal, id, thread string) {
 	}
 }
 
-func TestClosedThreadKeepsTheReportInThePullChannel(t *testing.T) {
-	// Закрытый тред — это не доставка. Показ человеку ею тоже не является:
-	// человек прочитает всплывашку, когда будет за машиной, а разговор так и не
-	// узнает, что поручение кончилось.
-	codexHome(t) // ни одного живого замка; otherThread известен, но закрыт
+func TestUnknownThreadKeepsTheReportInThePullChannel(t *testing.T) {
+	// Адрес, который подтвердить нечем, — это не доставка. Показ человеку ею
+	// тоже не является: человек прочитает всплывашку, когда будет за машиной, а
+	// разговор так и не узнает, что поручение кончилось.
+	//
+	// Закрытый тред сюда больше не относится: он очередь принимает и читает
+	// при следующем пробуждении.
+	codexHome(t) // unknownThread не значится в указателе сессий
 	f, j, c := threadDelivery(t)
-	seedThreadTask(t, j, "465a77fc", otherThread)
+	seedThreadTask(t, j, "465a77fc", unknownThread)
 
 	res, err := Report(context.Background(), "465a77fc", "готово", reportText,
 		ReportOptions{Client: c, Journal: j, Pane: "wE:p37",
@@ -43,9 +46,9 @@ func TestClosedThreadKeepsTheReportInThePullChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Delivered == nil || res.Delivered.OK {
-		t.Fatalf("в закрытый тред не доставляется, получено %+v", res.Delivered)
+		t.Fatalf("в неподтверждённый адрес не доставляется, получено %+v", res.Delivered)
 	}
-	if res.Delivered.Cause != CauseThreadNotLive {
+	if res.Delivered.Cause != CauseThreadUnknown {
 		t.Fatalf("причина названа, получено %q", res.Delivered.Cause)
 	}
 	if f.LastRequest("notification.show") == nil {
@@ -66,7 +69,7 @@ func TestClosedThreadKeepsTheReportInThePullChannel(t *testing.T) {
 	if !strings.Contains(found.Report, "Единый механизм") {
 		t.Fatalf("отчёт сохранён целиком, получено %q", found.Report)
 	}
-	if found.Cause != CauseThreadNotLive || found.Target != otherThread {
+	if found.Cause != CauseThreadUnknown || found.Target != unknownThread {
 		t.Fatalf("причина и адрес сохранены, получено %+v", *found)
 	}
 }
@@ -108,12 +111,16 @@ func TestLiveThreadDeliversAndLeavesNothingUndelivered(t *testing.T) {
 	}
 }
 
-func TestReopenedThreadGetsTheReportOnTheNextDone(t *testing.T) {
-	// Закрытый разговор открывается снова — и следующий done обязан попасть.
-	// Прежде повтор подавлялся: показ человеку помечал стадию доставленной.
+func TestAddressThatBecomesReachableGetsTheReportOnTheNextDone(t *testing.T) {
+	// Адрес был неподтверждаем, стал доступен — и следующий done обязан
+	// попасть. Прежде повтор подавлялся: показ человеку помечал стадию
+	// доставленной.
+	//
+	// Прежде это ставилось на закрытом треде; теперь закрытый тред принимает
+	// очередь сразу, и недоставляемым адресом остаётся лишь неизвестный.
 	codexHome(t)
 	_, j, c := threadDelivery(t)
-	seedThreadTask(t, j, "465a77fc", otherThread)
+	seedThreadTask(t, j, "465a77fc", unknownThread)
 
 	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p37",
 		Deadline: time.Second, Poll: time.Millisecond}
@@ -121,7 +128,7 @@ func TestReopenedThreadGetsTheReportOnTheNextDone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sent := codexHome(t, otherThread) // разговор вернулся
+	sent := codexHome(t, unknownThread) // тред стал известен и жив
 	res, err := Report(context.Background(), "465a77fc", "готово", reportText, o)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +149,7 @@ func TestHumanIsNotPesteredOnEveryRetry(t *testing.T) {
 	// Доставку ведущему повторяем, всплывашку человеку — нет.
 	codexHome(t)
 	f, j, c := threadDelivery(t)
-	seedThreadTask(t, j, "465a77fc", otherThread)
+	seedThreadTask(t, j, "465a77fc", unknownThread)
 	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p37",
 		Deadline: time.Second, Poll: time.Millisecond}
 
@@ -170,16 +177,20 @@ func TestAClosedThreadIsNeverSwappedForAnotherLiveOne(t *testing.T) {
 	_, j, c := threadDelivery(t)
 	seedThreadTask(t, j, "465a77fc", otherThread)
 
-	res, err := Report(context.Background(), "465a77fc", "готово", reportText,
+	if _, err := Report(context.Background(), "465a77fc", "готово", reportText,
 		ReportOptions{Client: c, Journal: j, Pane: "wE:p37",
-			Deadline: time.Second, Poll: time.Millisecond})
-	if err != nil {
+			Deadline: time.Second, Poll: time.Millisecond}); err != nil {
 		t.Fatal(err)
 	}
-	if res.Delivered.OK {
-		t.Fatal("живой сосед адресом не становится")
+	// Отчёт ушёл своему адресату — закрытому, но известному: его очередь
+	// вычитается при следующем пробуждении. Живой сосед адресом не стал.
+	if len(*sent) != 1 {
+		t.Fatalf("ровно одна отправка, получено %+v", *sent)
 	}
-	if len(*sent) != 0 {
-		t.Fatalf("в чужой разговор не писали, получено %+v", *sent)
+	if (*sent)[0].thread != otherThread {
+		t.Fatalf("писали своему адресату, а не соседу, получено %q", (*sent)[0].thread)
+	}
+	if (*sent)[0].thread == leaderThread {
+		t.Fatal("в чужой живой разговор не писали")
 	}
 }

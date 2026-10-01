@@ -113,20 +113,23 @@ func TestDeliveryModeIsRecordedInTheJournal(t *testing.T) {
 func TestFailedWakeLeavesTheTaskVisible(t *testing.T) {
 	// Главный запрет: событие не должно прятать потерю. Не разбудили — значит
 	// поручение по-прежнему видно как недоставленное, с причиной.
-	codexHome(t) // ни одного живого разговора
+	//
+	// Недоставляемым адресом здесь служит неизвестный тред: закрытый очередь
+	// принимает и вычитывает при следующем пробуждении.
+	codexHome(t)
 	_, j, c := threadDelivery(t)
 	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Started, Pane: "wE:p13",
-		Target: otherThread, TargetSession: otherThread, TargetKind: KindThread,
+		Target: unknownThread, TargetSession: unknownThread, TargetKind: KindThread,
 		Time: time.Now()})
 	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Reported, Outcome: "готово",
 		Reason: "текст отчёта"})
 
-	d := Deliver(context.Background(), c, j, "43bc6e11", otherThread, "сводка",
-		DeliverOptions{Stage: StageReported, Kind: KindThread, WantSession: otherThread,
+	d := Deliver(context.Background(), c, j, "43bc6e11", unknownThread, "сводка",
+		DeliverOptions{Stage: StageReported, Kind: KindThread, WantSession: unknownThread,
 			HumanTold: true,
 			Event:     &Event{Task: "43bc6e11", State: StateDone, Reason: "сделано"}})
 	if d.OK {
-		t.Fatal("закрытый разговор не разбудить")
+		t.Fatal("неподтверждённый адрес не разбудить")
 	}
 	recs, _ := j.Read()
 	if len(LostReports(recs)) != 1 {
