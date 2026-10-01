@@ -150,7 +150,9 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	// выполнялась вовсе — поймано тестом.
 	t.Silent = s.wakeSilent(ctx, recs, now)
 
-	lost := task.LostReports(recs)
+	// Считаем то, что дожимаем. Брошенное видно в `claudex undelivered`, а
+	// здесь оно создавало бы впечатление очереди, которая не двигается.
+	lost := task.LivePending(recs, now)
 	t.Pending = len(lost)
 
 	// Отложенные считаются и пропускаются: адрес отказал недавно, и повторять
