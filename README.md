@@ -184,14 +184,9 @@ go run ./cmd/routecheck --threads  # треды Codex
 
 ### Приём сообщений в разговор Claude Code
 
-```json
-{ "crossSessionInbound": "accept" }
-```
-
-В `~/.claude/settings.json`. Без этого ключа сообщения от claudex в разговор
-Claude Code доставляются, но держатся на ручном подтверждении в интерфейсе —
-`send --session <id>` вернёт успех, а прочитан текст не будет. Подробнее — в
-разделе «Разговоры Claude Code» выше.
+`"crossSessionInbound": "accept"` в `~/.claude/settings.json` — иначе
+`send --session <id>` вернёт успех, а прочитан разговором текст не будет. Что
+за ключ и почему — в разделе «Разговоры Claude Code» выше.
 
 ### Хук завершения в Claude Code
 
