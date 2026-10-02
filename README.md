@@ -233,32 +233,17 @@ nohup claudex supervisor --interval 60 --silence-grace 20m --archive-after 30 \
 намеренно: журнал — единственная память о прошлой работе, переносить его в
 архив без явного согласия не должно ничего.
 
-### Переменные окружения
+### Переопределения (необязательно)
 
-Платформенные — выставляет не claudex, а среда, в которой он запущен:
+Расположение по умолчанию переопределяется разово, через окружение вызова:
+`CLAUDEX_INDEX` (`~/.claudex/index.db`), `CLAUDEX_SEARCH` (`auto`),
+`CLAUDEX_CASS_BIN` / `CLAUDEX_CASS_DB` / `CLAUDEX_CODEX_BIN` (находятся в
+`PATH` сами). Задавать на постоянной основе не нужно никому — это не
+настройка, а аварийный люк на случай нестандартной машины.
 
-| переменная | кто ставит | что определяет |
-|---|---|---|
-| `CODEX_THREAD_ID` | Codex | адрес возврата, когда запущен изнутри Codex |
-| `CLAUDE_CODE_SESSION_ID` | Claude Code | адрес возврата, когда запущен изнутри Claude Code |
-| `CLAUDE_CODE_MESSAGING_SOCKET` / `_TOKEN` | Claude Code | сокет текущей сессии для доставки в разговор |
-| `CLAUDECODE` | Claude Code | отличает «я сам Claude Code» от унаследованного `CODEX_THREAD_ID` |
-| `HERDR_PANE_ID` | herdr | какая панель вызвала claudex, если не тред и не разговор |
-| `CLAUDE_CONFIG_DIR` | Claude Code | где искать реестр `~/.claude/sessions/<pid>.json` |
-| `CODEX_HOME` | Codex | где искать `thread-writer-locks` и `session_index.jsonl` |
-
-Свои, необязательные — переопределяют расположение по умолчанию:
-
-| переменная | умолчание |
-|---|---|
-| `CLAUDEX_INDEX` | `~/.claudex/index.db` |
-| `CLAUDEX_SEARCH` | `auto` (режим `find` без явного `--mode`) |
-| `CLAUDEX_CASS_BIN` | `cass` в `PATH` |
-| `CLAUDEX_CASS_DB` | путь к базе cass по умолчанию |
-| `CLAUDEX_CODEX_BIN` | `codex` в `PATH` |
-
-Задавать их на постоянной основе нет причины — все поля есть ровно затем,
-чтобы переопределить что-то разово, не трогая остальных.
+Всё остальное из окружения — `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`,
+`HERDR_PANE_ID` и подобное — ставит сама платформа, не человек; см. разделы
+«Кому возвращается результат» и «Разговоры Claude Code» выше.
 
 ## Наблюдатель
 
