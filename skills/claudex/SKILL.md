@@ -59,6 +59,20 @@ ambiguity in scripts; you do not need it by hand.
 `session list` and `task list` answer different questions — who can take work,
 versus what you already handed out. `peers` is the old name for `session list`.
 
+### Sending to someone already working continues their work
+
+If the worker has exactly one open assignment, your message **continues it**
+rather than opening a second one. It used to open a second one every time, and
+one worker accumulated 62 open assignments, none of them ever closed.
+
+```bash
+claudex send license "also check the stage config"   # continues the open work
+claudex send license --new "unrelated: audit deps"   # deliberately separate
+```
+
+Several open assignments is a refusal listing them: which one you meant is
+something only you know.
+
 `send` is tracked, asynchronous, and returns to its caller by default. The
 caller is whoever ran it — a Codex thread, a Claude Code conversation, or a
 herdr pane — resolved from the environment in that order. There is no
@@ -123,6 +137,19 @@ one thing the report exists to carry. A task that calls `done` gives a
 judgement; one that does not still gives facts.
 
 Install the hook with `claudex hook install`.
+
+### A closed Codex thread still receives
+
+Closing the Codex app, or losing Remote Control from a phone, does not strand
+the report. The app-server queue outlives the thread and is drained when it next
+wakes — which is what you see when you open the app, type anything, and
+everything that piled up arrives at once.
+
+claudex used to refuse that case, on the reasoning that "a closed thread accepts
+the queue silently and never reads it". That was an assumption written down as
+fact, and it cost a hundred reports. A thread that `$CODEX_HOME` knows is a
+valid address whether or not anyone is holding it; only an address that cannot
+be confirmed at all is refused.
 
 ### The supervisor
 
