@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -89,6 +91,46 @@ func supervisorStatus(o opts) error {
 		fmt.Printf("  архив: %s\n", st.ArchiveNote)
 	}
 	return nil
+}
+
+// ensureSupervisor starts the ordinary non-LLM observer when a headless task
+// needs its Stop-hook fallback. It is intentionally idempotent.
+func ensureSupervisor(_ opts) error {
+	if _, alive := supervise.Read(supervise.StatusPath()); alive {
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	statusPath := supervise.StatusPath()
+	if statusPath == "" {
+		return errors.New("не удалось определить путь состояния наблюдателя")
+	}
+	logPath := filepath.Join(filepath.Dir(statusPath), "supervisor.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	log, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	cmd := exec.Command(self, "supervisor")
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("запустить наблюдатель: %w", err)
+	}
+	_ = cmd.Process.Release()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, alive := supervise.Read(statusPath); alive {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("наблюдатель не подтвердил запуск; подробности в %s", logPath)
 }
 
 func supervisorStop() error {

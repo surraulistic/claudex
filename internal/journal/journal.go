@@ -34,6 +34,10 @@ const (
 	// Refused — поручение не было отправлено вовсе. Пишется вместе с текстом:
 	// иначе он исчезает совсем, а вызывающему доложено об успехе.
 	Refused = "refused"
+	// LaunchFailed records that a pre-bound worker could not be started.
+	// The Started record is deliberately written before spawning Claude to
+	// close the fast-report race; this event cancels that provisional state.
+	LaunchFailed = "launch_failed"
 )
 
 type Record struct {
@@ -80,7 +84,12 @@ type Record struct {
 	PaneSession string `json:"pane_session,omitempty"`
 	// Synthetic — отчёт собран ClauDex из живого экрана панели, а не назван
 	// самой задачей. Помечается, потому что доверие к нему другое.
-	Synthetic   bool      `json:"synthetic,omitempty"`
+	Synthetic bool `json:"synthetic,omitempty"`
+	// Headless distinguishes a Claude Code background session from a live
+	// conversation addressed through its socket. PaneSession stores its full,
+	// preassigned Claude session UUID; CWD is the directory it was launched in.
+	Headless    bool      `json:"headless,omitempty"`
+	CWD         string    `json:"cwd,omitempty"`
 	TargetState string    `json:"target_state,omitempty"`
 	TargetSeen  time.Time `json:"target_seen,omitempty"`
 	Attempt     int       `json:"attempt,omitempty"`

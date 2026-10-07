@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -37,6 +38,58 @@ func TestIdleMarkIsWrittenForTheOnlyOpenTask(t *testing.T) {
 func TestNothingOpenMeansNothingToMark(t *testing.T) {
 	if _, ok := idleMark(nil, hookSession, "текст"); ok {
 		t.Fatal("без поручений журнал не трогаем — иначе это лог ходов")
+	}
+}
+
+func TestHeadlessResumeBindsHookSessionToTask(t *testing.T) {
+	path := t.TempDir() + "/journal.jsonl"
+	j := journal.Open(path)
+	initial := journal.Record{Task: "abc12345", Event: journal.Started,
+		Headless: true, PaneSession: hookSession, CWD: t.TempDir()}
+	if err := j.Append(initial); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := j.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDEX_TASK_ID", "abc12345")
+	resumedID := "6e68e968-4fc0-411f-a41c-d25eb6b6586e"
+	if err := bindHeadlessSession(j, recs, resumedID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := j.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, ok := task.HeadlessExecutor(updated, "abc12345"); !ok || got != resumedID {
+		t.Fatalf("Stop-hook адресует возобновлённый разговор: %q %v", got, ok)
+	}
+}
+
+func TestHeadlessBindingIgnoresUnrelatedSession(t *testing.T) {
+	path := t.TempDir() + "/journal.jsonl"
+	j := journal.Open(path)
+	if err := j.Append(journal.Record{Task: "abc12345", Event: journal.Started,
+		Headless: true, PaneSession: hookSession}); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := j.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Getenv("CLAUDEX_TASK_ID")
+	t.Setenv("CLAUDEX_TASK_ID", "other-task")
+	t.Cleanup(func() { _ = os.Setenv("CLAUDEX_TASK_ID", old) })
+	if err := bindHeadlessSession(j, recs, "6e68e968-4fc0-411f-a41c-d25eb6b6586e"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := j.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 1 {
+		t.Fatalf("чужой hook не меняет привязку: %d записей", len(updated))
 	}
 }
 

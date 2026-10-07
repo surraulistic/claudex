@@ -78,6 +78,25 @@ func TestRefusedSendStaysCreated(t *testing.T) {
 	}
 }
 
+func TestHeadlessLaunchFailureCancelsProvisionalStartedRecord(t *testing.T) {
+	// The task is pre-bound before spawning Claude so a fast completion cannot
+	// race journal creation. If spawning fails, the explicit terminal event must
+	// override that provisional Started record.
+	recs := lc(
+		journal.Record{Task: "fa11ed00", Event: journal.Started, Headless: true,
+			PaneSession: "2b2c3d4e-1111-4111-8111-123456789abc"},
+		journal.Record{Task: "fa11ed00", Event: journal.LaunchFailed,
+			Outcome: "headless запуск не удался", Reason: "claude missing"},
+	)
+	l := StateOf(recs, "fa11ed00")
+	if l.State != StateCreated || l.Reason != "claude missing" {
+		t.Fatalf("неудачный запуск не должен выглядеть отправленным: %+v", l)
+	}
+	if got := len(Open(recs)); got != 0 {
+		t.Fatalf("неудачный запуск не остаётся в ожидании: %d", got)
+	}
+}
+
 func TestWorkingIsNeverInventedWithoutASupervisor(t *testing.T) {
 	// Занятость исполнителя про наше поручение не доказывает ничего, и
 	// выдавать её за «работает над этим» нельзя. Эти состояния появятся только

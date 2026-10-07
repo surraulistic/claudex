@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/surraulistic/claudex/internal/exitcode"
 	"github.com/surraulistic/claudex/internal/task"
 )
 
@@ -26,21 +25,35 @@ func TestSendDoesNotOccupyTheTurnByDefault(t *testing.T) {
 	}
 }
 
-func TestHeadlessRefusesLoudlyAndSaysWhy(t *testing.T) {
-	// Отказ намеренно многословен: рабочие headless уже запускают мимо
-	// claudex, и такая работа не оставляет следа. Молчаливый отказ этого не
-	// объяснит.
-	err := headlessNotReady("цель", "текст")
-	if err == nil {
-		t.Fatal("пока отказ")
-	}
-	for _, want := range []string{"claude --bg", "журнал", "send"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("в отказе сказано про %q, получено %q", want, err)
+func TestHeadlessIsDocumentedAsTrackedDefaultForNewWork(t *testing.T) {
+	for _, want := range []string{
+		`claudex --headless "<задача>"`, "нативную фоновую сессию Claude",
+		"результат возвращается сюда", "обычные права Claude Code сохраняются",
+	} {
+		if !strings.Contains(helpText, want) {
+			t.Errorf("help не описывает headless-контракт %q", want)
 		}
 	}
-	if exitcode.Of(err) != exitcode.BadCall {
-		t.Fatalf("код вызова, получено %d", exitcode.Of(err))
+}
+
+func TestHeadlessPromptMayStartWithACommandWord(t *testing.T) {
+	target, prompt, err := parseHeadlessArgs([]string{"send", "a", "follow-up"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "" || prompt != "send a follow-up" {
+		t.Fatalf("все слова остаются частью запроса: target=%q prompt=%q", target, prompt)
+	}
+}
+
+func TestHeadlessCanSelectProjectDirectory(t *testing.T) {
+	project := t.TempDir()
+	target, prompt, err := parseHeadlessArgs([]string{project, "review", "auth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != project || prompt != "review auth" {
+		t.Fatalf("папка и задача разделены: target=%q prompt=%q", target, prompt)
 	}
 }
 

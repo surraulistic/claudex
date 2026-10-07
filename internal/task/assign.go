@@ -63,17 +63,26 @@ func ActiveFor(recs []journal.Record, pane string) []Assignment {
 			reported[r.Task] = true
 		}
 	}
+	latest := map[string]journal.Record{}
+	order := make([]string, 0)
 	seen := map[string]bool{}
-	var out []Assignment
 	for _, r := range recs {
-		if r.Event != journal.Started || seen[r.Task] {
+		if r.Event != journal.Started {
 			continue
 		}
+		if !seen[r.Task] {
+			seen[r.Task] = true
+			order = append(order, r.Task)
+		}
+		latest[r.Task] = r
+	}
+	var out []Assignment
+	for _, id := range order {
+		r := latest[id]
 		if !executedBy(r, pane) {
 			continue
 		}
-		seen[r.Task] = true
-		if reported[r.Task] {
+		if reported[id] {
 			continue
 		}
 		out = append(out, Assignment{

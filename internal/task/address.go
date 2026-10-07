@@ -117,12 +117,24 @@ func knowsTask(recs []journal.Record, id string) bool {
 // ExecutorOfTask — кому поручение было отдано. Нужен продолжению: дописывать
 // работу надо тому же исполнителю, а не заводить её заново.
 func ExecutorOfTask(recs []journal.Record, id string) (string, bool) {
+	var out string
 	for _, r := range recs {
-		if r.Task == id && r.Event == journal.Started && r.PaneSession != "" {
-			return r.PaneSession, true
+		if r.Task == id && r.Event == journal.Started {
+			out = r.PaneSession
 		}
 	}
-	return "", false
+	return out, out != ""
+}
+
+// HeadlessExecutor returns the persisted identity and launch directory of a
+// native Claude Code background session assigned to a task.
+func HeadlessExecutor(recs []journal.Record, id string) (sessionID, cwd string, ok bool) {
+	for _, r := range recs {
+		if r.Task == id && r.Event == journal.Started && r.Headless {
+			sessionID, cwd = r.PaneSession, r.CWD
+		}
+	}
+	return sessionID, cwd, sessionID != ""
 }
 
 // OpenFor — открытые поручения этого исполнителя, от свежих к старым.

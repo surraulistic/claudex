@@ -263,12 +263,13 @@ func startedBy(recs []journal.Record, who, claimed string) bool {
 	if who == "" || !IsTaskID(claimed) {
 		return false
 	}
+	var last journal.Record
 	for _, r := range recs {
 		if r.Task == claimed && r.Event == journal.Started {
-			return executedBy(r, who)
+			last = r
 		}
 	}
-	return false
+	return last.Event == journal.Started && executedBy(last, who)
 }
 
 func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (ReportResult, error) {

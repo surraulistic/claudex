@@ -13,6 +13,7 @@ import (
 	"github.com/surraulistic/claudex/internal/claudesess"
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/exitcode"
+	"github.com/surraulistic/claudex/internal/headless"
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/supervise"
 	"github.com/surraulistic/claudex/internal/task"
@@ -40,7 +41,11 @@ import (
 // явным (--wait), а не поведением по умолчанию.
 func cmdSend(o opts, tgt, prompt string) error {
 	if o.headless {
-		return headlessNotReady(tgt, prompt)
+		if o.wait {
+			return exitcode.Errorf(exitcode.BadCall,
+				"--headless всегда возвращает управление сразу; результат придёт отдельным событием")
+		}
+		return cmdHeadless(o, tgt, prompt)
 	}
 
 	// Ожидание — явное. Всё остальное send берёт у delegate как есть: журнал,
@@ -91,6 +96,29 @@ func sendContinuation(o opts, id string, recs []journal.Record, prompt string) e
 		return exitcode.Errorf(exitcode.NotFound,
 			"у поручения %s не записан разговор-исполнитель: продолжать некому", id)
 	}
+	if sessionID, cwd, headlessWorker := task.HeadlessExecutor(recs, id); headlessWorker {
+		session, err := headless.Resume(context.Background(), cwd, id, sessionID,
+			task.WithReport(prompt, "", id))
+		if err != nil {
+			return exitcode.Wrap(exitcode.Fail, err)
+		}
+		if session.SessionID != sessionID {
+			var binding journal.Record
+			for _, r := range recs {
+				if r.Task == id && r.Event == journal.Started && r.Headless {
+					binding = r
+				}
+			}
+			binding.Time = time.Time{}
+			binding.PaneSession = session.SessionID
+			if err := journal.Open(defaultJournal()).Append(binding); err != nil {
+				return exitcode.Wrap(exitcode.Fail, err)
+			}
+		}
+		fmt.Printf("продолжение поручения %s ушло в headless Claude %s; отчётность остаётся за исходным поручением\n",
+			id, session.ID)
+		return nil
+	}
 	s, err := claudesess.Lookup(claudesess.Home(), who)
 	if err != nil {
 		return exitcode.Errorf(exitcode.NotFound,
@@ -107,23 +135,143 @@ func sendContinuation(o opts, id string, recs []journal.Record, prompt string) e
 	return nil
 }
 
-// headlessNotReady — почему --headless пока отказывает.
-//
-// Заглушка намеренно многословна: рабочие headless-сессии уже запускают мимо
-// ClauDex напрямую через `claude --bg`, и такая работа не попадает ни в
-// журнал, ни в сборку молчаливых отчётов — она просто теряется. Отказ должен
-// называть это, а не молчать.
-func headlessNotReady(tgt, prompt string) error {
-	_ = tgt
-	_ = prompt
-	return exitcode.Wrap(exitcode.BadCall, errors.New(
-		"--headless пока не реализован.\n"+
-			"Замысел: claudex заводит фоновую сессию Claude Code (claude --bg), "+
-			"записывает её разговор в журнал как исполнителя и дальше ведёт поручение "+
-			"обычным путём — отчёт, сборка молчаливых, дожим.\n"+
-			"Почему это нужно: `claude --bg` в обход claudex не оставляет следа — "+
-			"ни состояния, ни отчёта, ни возврата затеявшему.\n"+
-			"Пока пользуйтесь `claudex send <цель>` к живой сессии."))
+func cmdHeadless(o opts, targetName, prompt string) error {
+	j := journal.Open(defaultJournal())
+	if err := wakeIsPossible(j, o); err != nil {
+		return err
+	}
+	wake := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)
+	if err := validateHeadlessWake(j, wake); err != nil {
+		return err
+	}
+	reconcilePending(o)
+	flushPending(o)
+
+	recs, err := j.Read()
+	if err != nil {
+		return err
+	}
+	cwd, err := headlessCWD(targetName, recs)
+	if err != nil {
+		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	if err := ensureSupervisor(o); err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+
+	id := task.NewID()
+	started := journal.Record{
+		Task: id, Event: journal.Started,
+		Headless: true, CWD: cwd, Target: wake.Target,
+		TargetSession: wake.Session, TargetKind: wake.Kind,
+		Prompt: prompt,
+	}
+	// Record task intent before launch. Claude assigns its own session UUID;
+	// after --bg returns, bind the exact ID reported by `claude agents`.
+	if err := j.Append(started); err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+
+	workerPrompt := task.WithReport(prompt, "", id)
+	session, err := headless.Start(context.Background(), cwd, id, "", workerPrompt)
+	if err != nil {
+		j.Append(journal.Record{Task: id, Event: journal.LaunchFailed,
+			Outcome: "headless запуск не удался", Reason: err.Error(), Prompt: prompt})
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+	started.Time = time.Time{}
+	started.PaneSession = session.SessionID
+	if err := j.Append(started); err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+	if err := j.Append(journal.Record{Task: id, Event: journal.Finished,
+		Outcome: task.SentNoWait}); err != nil {
+		return exitcode.Wrap(exitcode.Fail, err)
+	}
+
+	if o.pretty {
+		return emit(o, map[string]any{
+			"task": id, "executor": map[string]any{"kind": "claude-background",
+				"id": session.ID, "session_id": session.SessionID, "name": session.Name,
+				"cwd": session.CWD},
+			"state": task.StateSent, "return_to": wake,
+		})
+	}
+	fmt.Printf("поручение %s запущено в headless Claude %s (%s)\n",
+		id, session.ID, cwd)
+	fmt.Printf("результат вернётся сюда; полный ход: claudex task log %s\n", id)
+	fmt.Printf("наблюдать: claude attach %s · последние строки: claude logs %s\n",
+		session.ID, session.ID)
+	return nil
+}
+
+func validateHeadlessWake(j *journal.Journal, wake task.Wake) error {
+	if wake.Empty() {
+		return exitcode.Errorf(exitcode.BadCall,
+			"некуда вернуть результат: запустите claudex из Codex или Claude Code")
+	}
+	switch wake.Kind {
+	case task.KindThread:
+		if v := task.MayQueue(wake.Target, codex.State(codex.Home(), wake.Target)); !v.OK() {
+			return exitcode.Errorf(exitcode.BadCall, "результат будет некуда доставить: %s", v.Reason())
+		}
+	case task.KindSession:
+		if _, err := claudesess.Lookup(claudesess.Home(), wake.Target); err != nil {
+			return exitcode.Errorf(exitcode.BadCall,
+				"разговор-отправитель для результата недоступен: %v", err)
+		}
+	case task.KindPane:
+		if v := task.MayWrite(wake.Target, wake.Session, wake.Session,
+			task.SharedPane(j, wake.Target)); !v.OK() {
+			return exitcode.Errorf(exitcode.BadCall,
+				"некуда безопасно вернуть результат: %s", v.Reason())
+		}
+	default:
+		return exitcode.Errorf(exitcode.BadCall,
+			"неизвестный адрес возврата результата: %q", wake.Kind)
+	}
+	return nil
+}
+
+func headlessCWD(targetName string, recs []journal.Record) (string, error) {
+	if strings.TrimSpace(targetName) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("не удалось определить текущую папку: %w", err)
+		}
+		return cwd, nil
+	}
+	if info, err := os.Stat(targetName); err == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("%q — не папка; для headless укажите проект, разговор или панель", targetName)
+		}
+		return filepath.Abs(targetName)
+	}
+	a, err := task.Classify(targetName, claudesess.Home(), recs)
+	if err != nil {
+		return "", err
+	}
+	switch a.Kind {
+	case task.AddrSession:
+		if a.Session.CWD == "" {
+			return "", fmt.Errorf("у разговора %s нет известной рабочей папки", a.Session.Short())
+		}
+		return a.Session.CWD, nil
+	case task.AddrTask:
+		if _, cwd, ok := task.HeadlessExecutor(recs, a.Task); ok && cwd != "" {
+			return cwd, nil
+		}
+		return "", fmt.Errorf("поручение %s не содержит рабочего каталога для нового headless-сеанса", a.Task)
+	default:
+		p, err := resolve(targetName)
+		if err != nil {
+			return "", err
+		}
+		if p.CWD == "" {
+			return "", fmt.Errorf("у панели %s нет известной рабочей папки", p.ID)
+		}
+		return p.CWD, nil
+	}
 }
 
 // cmdTask — «ну что там».

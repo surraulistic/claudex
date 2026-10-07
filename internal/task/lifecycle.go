@@ -88,7 +88,7 @@ func StateOf(recs []journal.Record, id string) Lifecycle {
 // правило про давность иначе не проверить, не двигая системные часы.
 func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 	l := Lifecycle{Task: id, State: StateCreated}
-	var started, reported, refused bool
+	var started, reported, refused, launchFailed bool
 	var delivered bool
 	var sawNotify bool
 
@@ -103,6 +103,9 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 		switch r.Event {
 		case journal.Refused:
 			refused = true
+			l.Since, l.Reason = r.Time, r.Reason
+		case journal.LaunchFailed:
+			launchFailed = true
 			l.Since, l.Reason = r.Time, r.Reason
 		case journal.Started:
 			started = true
@@ -125,7 +128,10 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 		}
 	}
 
-	return settle(l, started, reported, refused, sawNotify, delivered, last, now)
+	if launchFailed {
+		started = false
+	}
+	return settle(l, started, reported, refused || launchFailed, sawNotify, delivered, last, now)
 }
 
 // settle — правила, общие для обоих путей: одиночного разбора и прохода по
@@ -196,6 +202,13 @@ func first(s string) string {
 
 // executorName — кому поручено: панель herdr либо разговор Claude Code.
 func executorName(r journal.Record) string {
+	if r.Headless {
+		id := r.PaneSession
+		if len(id) > 8 {
+			id = strings.ReplaceAll(id[:8], "-", "")
+		}
+		return "Claude headless " + id
+	}
 	if r.Pane != "" {
 		return r.Pane
 	}
@@ -244,10 +257,10 @@ func open(recs []journal.Record, now time.Time, withAbandoned bool) []Lifecycle 
 // statesAt — состояния всех поручений за один проход.
 func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 	type acc struct {
-		l                          Lifecycle
-		last                       time.Time
-		started, reported, refused bool
-		notified, delivered        bool
+		l                                        Lifecycle
+		last                                     time.Time
+		started, reported, refused, launchFailed bool
+		notified, delivered                      bool
 	}
 	all := map[string]*acc{}
 	for _, r := range recs {
@@ -262,6 +275,9 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 		switch r.Event {
 		case journal.Refused:
 			a.refused = true
+			a.l.Since, a.l.Reason = r.Time, r.Reason
+		case journal.LaunchFailed:
+			a.launchFailed = true
 			a.l.Since, a.l.Reason = r.Time, r.Reason
 		case journal.Started:
 			a.started = true
@@ -285,7 +301,10 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 	}
 	out := make(map[string]Lifecycle, len(all))
 	for id, a := range all {
-		out[id] = settle(a.l, a.started, a.reported, a.refused, a.notified, a.delivered, a.last, now)
+		if a.launchFailed {
+			a.started = false
+		}
+		out[id] = settle(a.l, a.started, a.reported, a.refused || a.launchFailed, a.notified, a.delivered, a.last, now)
 	}
 	return out
 }

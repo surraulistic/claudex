@@ -131,7 +131,7 @@ func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.BoolVar(&o.wait, "wait", false,
 		"send: дождаться конца работы, заняв ход (умолчание — не ждать)")
 	fs.BoolVar(&o.headless, "headless", false,
-		"send: завести фоновую сессию Claude Code вместо отправки существующей (пока не реализован)")
+		"запустить новую отслеживаемую фоновую сессию Claude Code")
 	fs.BoolVar(&o.newSession, "new", false,
 		"send: завести отдельное поручение, даже если у работника работа уже идёт")
 	fs.BoolVar(&o.panel, "panel", false,
@@ -205,10 +205,16 @@ func run() error {
 
 	args := rest
 	if len(args) == 0 {
+		if o.headless {
+			return exitcode.Errorf(exitcode.BadCall, `нужно: claudex --headless "<задача>"`)
+		}
 		usage()
 		return nil
 	}
 
+	if o.headless {
+		return headlessShortcut(o, args)
+	}
 	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		usage()
 		return nil
@@ -282,6 +288,10 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
                                          --panel — прежний транспорт через herdr
                                          --session — снять двусмысленность в
                                          скриптах; в обиходе не нужен
+  claudex --headless "<задача>"          новая фоновая Claude Code-сессия в
+                                         текущей папке; поручение отслеживается,
+                                         результат возвращается сюда
+  claudex --headless <папка> "<задача>"  то же, в указанном проекте
   claudex task list                      какие поручения ещё ждут; брошенные
                                          (без движения дольше трёх суток)
                                          прячутся — их покажет --all
@@ -350,9 +360,8 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
   --no-wait          delegate: отправить и выйти (у send это умолчание)
   --new              send: завести отдельное поручение, даже если у работника
                      работа уже идёт; по умолчанию сообщение продолжает её
-  --headless         send: завести фоновую сессию Claude Code вместо отправки
-                     существующей (пока отказывает и объясняет замысел)
-  --new              send: завести нового работника (зарезервирован)
+  --headless         send: запустить отдельную нативную фоновую сессию Claude
+                     Code; обычные права Claude Code сохраняются
   --session          send/delegate: цель — разговор Claude Code (id или имя), а
                      не панель herdr
   --panel            delegate: прежний транспорт — писать в панель herdr; нужен
@@ -1970,8 +1979,12 @@ func cmdDone(o opts, args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	j := journal.Open(defaultJournal())
+	if recs, readErr := j.Read(); readErr == nil {
+		_ = bindHeadlessSession(j, recs, strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")))
+	}
 	res, err := task.Report(ctx, id, outcome, reason, task.ReportOptions{
-		Client: client(), Journal: journal.Open(defaultJournal()), FullReport: o.fullReport,
+		Client: client(), Journal: j, FullReport: o.fullReport,
 		// Ведущему уходит не только строка исхода: по одной строке продолжать
 		// планирование нельзя, а перечитывать транскрипт руками он не обязан.
 		//

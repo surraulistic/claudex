@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 
 	"github.com/surraulistic/claudex/internal/exitcode"
@@ -35,8 +36,8 @@ type command struct {
 
 func commands() []command {
 	return []command{
-		{Name: "send", MinArgs: 2, Need: `нужно: claudex send <цель> "<сообщение>"`,
-			Run: func(o opts, a []string) error { return cmdSend(o, a[0], strings.Join(a[1:], " ")) }},
+		{Name: "send", MinArgs: 1, Need: `нужно: claudex send [проект] "<задача>"`,
+			Run: cmdSendArgs},
 		{Name: "task", Run: cmdTask},
 		{Name: "session", Aliases: []string{"sessions-live"}, Run: cmdSession},
 		{Name: "doctor", Run: func(o opts, _ []string) error { return cmdDoctor(o) }},
@@ -70,6 +71,43 @@ func commands() []command {
 	}
 }
 
+func cmdSendArgs(o opts, args []string) error {
+	if o.headless {
+		if len(args) == 1 {
+			return cmdSend(o, "", args[0])
+		}
+		return cmdSend(o, args[0], strings.Join(args[1:], " "))
+	}
+	if len(args) < 2 {
+		return exitcode.Errorf(exitcode.BadCall,
+			`нужно: claudex send <адресат> "<сообщение>" (для новой фоновой сессии: claudex --headless "<задача>")`)
+	}
+	return cmdSend(o, args[0], strings.Join(args[1:], " "))
+}
+
+func headlessShortcut(o opts, args []string) error {
+	target, prompt, err := parseHeadlessArgs(args)
+	if err != nil {
+		return err
+	}
+	return cmdSend(o, target, prompt)
+}
+
+func parseHeadlessArgs(args []string) (target, prompt string, err error) {
+	if len(args) == 0 {
+		return "", "", exitcode.Errorf(exitcode.BadCall,
+			`нужно: claudex --headless "<задача>"`)
+	}
+	if len(args) > 1 {
+		// Explicit project directory followed by a prompt is useful from a
+		// neutral working directory; otherwise every token is prompt text.
+		if info, statErr := os.Stat(args[0]); statErr == nil && info.IsDir() {
+			return args[0], strings.Join(args[1:], " "), nil
+		}
+	}
+	return "", strings.Join(args, " "), nil
+}
+
 // dispatch находит команду по имени. Неизвестное имя — не ошибка: исторически
 // `claudex <цель>` показывает дайджест панели, и ломать это нельзя.
 func dispatch(o opts, args []string) error {
@@ -81,6 +119,9 @@ func dispatch(o opts, args []string) error {
 			return exitcode.Errorf(exitcode.BadCall, "%s", c.Need)
 		}
 		return c.Run(o, args[1:])
+	}
+	if o.headless {
+		return headlessShortcut(o, args)
 	}
 	return cmdDigest(o, args[0])
 }

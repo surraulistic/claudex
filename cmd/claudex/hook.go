@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/surraulistic/claudex/internal/exitcode"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -83,6 +84,13 @@ func hookStop(o opts) error {
 	if err != nil {
 		return nil
 	}
+	if err := bindHeadlessSession(j, recs, p.SessionID); err != nil {
+		return nil
+	}
+	recs, err = j.Read()
+	if err != nil {
+		return nil
+	}
 	id, ok := idleMark(recs, p.SessionID, strings.TrimSpace(p.Last))
 	if !ok {
 		return nil
@@ -92,6 +100,28 @@ func hookStop(o opts) error {
 		Reason: strings.TrimSpace(p.Last),
 	})
 	return nil
+}
+
+// bindHeadlessSession updates the worker binding when Claude resumes a
+// background task under a copied session id. The per-task environment marker
+// is injected only into the launched worker's process tree.
+func bindHeadlessSession(j *journal.Journal, recs []journal.Record, sessionID string) error {
+	taskID := strings.TrimSpace(os.Getenv("CLAUDEX_TASK_ID"))
+	if taskID == "" || sessionID == "" {
+		return nil
+	}
+	var started journal.Record
+	for _, r := range recs {
+		if r.Task == taskID && r.Event == journal.Started {
+			started = r
+		}
+	}
+	if started.Event != journal.Started || !started.Headless || started.PaneSession == sessionID {
+		return nil
+	}
+	started.Time = time.Time{}
+	started.PaneSession = sessionID
+	return j.Append(started)
 }
 
 // idleMark — какое поручение пометить по окончании хода и стоит ли вообще.

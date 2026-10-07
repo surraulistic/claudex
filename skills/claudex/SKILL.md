@@ -1,6 +1,6 @@
 ---
 name: claudex
-description: Read what the other Claude Code sessions on this machine are doing and what they already decided, and hand work to one of them. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover context from earlier work — and whenever you are about to give a task to another session and need to know when it finished — `claudex delegate` sends the task and reports back on it — by default without blocking your thread — where a bare `herdr agent prompt` leaves the work untracked. Also reads a single entry or the conversation around it in full.
+description: Read what Claude Code sessions on this machine are doing and what they decided, and delegate work with tracked results. Use when asked what another session is working on, what it concluded, where a topic came up before, or to recover earlier context. For new independent work, start a native Claude Code background session with `claudex --headless`; it is tracked and returns an event to the caller without creating a Herdr pane. Use `claudex send` only to message or continue a specific existing conversation. Also reads a single entry or surrounding conversation in full.
 metadata:
   short-description: State and history of the Claude Code sessions on this machine
 ---
@@ -23,8 +23,11 @@ Search is plain SQLite FTS5 over that index, so it matches any language.
 ## Start here
 
 ```bash
-claudex send <target> "<message>"   # give work. Tracked, does not hold your turn,
-                                    # result comes back to whoever sent it
+claudex --headless "<task>"          # default for new independent work: a native
+                                    # Claude Code background session, tracked,
+                                    # result returns here without a Herdr pane
+claudex --headless <project-dir> "<task>" # same, in another checkout
+claudex send <target> "<message>"   # message/continue an existing conversation
 claudex task list                   # what is still awaited
 claudex task <id>                   # state of one assignment
 claudex task log <id>               # the detailed record: commands, replies,
@@ -58,6 +61,33 @@ ambiguity in scripts; you do not need it by hand.
 
 `session list` and `task list` answer different questions — who can take work,
 versus what you already handed out. `peers` is the old name for `session list`.
+
+### New work runs headless by default
+
+When Codex is asked to delegate a new, independent task to Claude, start it
+with `claudex --headless "<task>"`. This uses Claude Code's native `--bg`
+session, not a Herdr pane and not a separate visible panel. The current working
+directory is the default project; pass a project directory when the task
+belongs elsewhere. Keep the ordinary user/project permission configuration—do
+not add permission-bypass flags. The task is journaled before launch, the
+supervisor is ensured running, and the worker is instructed to finish with
+`claudex done`; if it forgets, the existing Stop-hook/supervisor path reports
+that it ended silently rather than inventing an outcome. The caller receives a
+small event and reads `claudex task log <id>` for the source report.
+
+After launching headless work from Codex Desktop, open one Codex terminal tab
+running `claude attach <short-session-id>` from the launch result. This gives
+the user a clickable live view of the native background session; it is not
+another Herdr pane and sends nothing to the conversation. Use the app's
+terminal session and show it in Codex. `claude logs <short-session-id>` prints
+recent output without attaching. Do not open duplicate attach tabs for the
+same task; if the user asks for quiet/no terminal, leave the worker headless
+and return only the normal task event.
+
+Use `claudex send <conversation-id> "…"` only when the user explicitly wants
+to message or continue that particular existing Claude conversation. A pane
+name is not a reliable identity. Headless is for new delegated work, not a
+reason to fork every substep into another session.
 
 ### Sending to someone already working continues their work
 
