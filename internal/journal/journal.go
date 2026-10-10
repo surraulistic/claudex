@@ -93,6 +93,15 @@ type Record struct {
 	TargetState string    `json:"target_state,omitempty"`
 	TargetSeen  time.Time `json:"target_seen,omitempty"`
 	Attempt     int       `json:"attempt,omitempty"`
+	// ThreadStage, Transport, QueueID, TurnID — доставка в тред Codex по
+	// стадиям: принято в очередь, ход начат, ход завершён.
+	ThreadStage string `json:"thread_stage,omitempty"`
+	Transport   string `json:"transport,omitempty"`
+	QueueID     string `json:"queue_id,omitempty"`
+	TurnID      string `json:"turn_id,omitempty"`
+	// ThreadClientID — clientUserMessageId записи в очереди; по нему
+	// опознаётся ход.
+	ThreadClientID string `json:"thread_client_id,omitempty"`
 }
 
 type Journal struct {

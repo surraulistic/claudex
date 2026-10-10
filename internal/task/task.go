@@ -630,6 +630,12 @@ type Delivery struct {
 	Reason  string `json:"reason,omitempty"`
 	// Mode — чем будили: событием или отчётом целиком.
 	Mode string `json:"mode,omitempty"`
+	// ThreadStage — докуда дошла доставка в тред Codex. Pending — сообщение
+	// принято, но ход ещё не начат: это не «обработано».
+	ThreadStage string `json:"thread_stage,omitempty"`
+	Transport   string `json:"transport,omitempty"`
+	TurnID      string `json:"turn_id,omitempty"`
+	Pending     bool   `json:"pending,omitempty"`
 }
 
 // Исходы доставки, как они пишутся в журнал. Признак «не доставлено» может
@@ -766,6 +772,9 @@ type DeliverOptions struct {
 	// позволить себе долгие, `done` внутри хода задачи — нет.
 	QueueAttempts int
 	QueueGap      time.Duration
+	// StartWait — сколько ждать начала хода в треде Codex. `done` идёт внутри
+	// хода задачи и ждёт мало, наблюдатель может дольше.
+	StartWait time.Duration
 }
 
 // Deliver доносит до ведущего, что поручение закончилось, и не сдаётся молча.
@@ -844,13 +853,9 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}
 }
 
-// deliverThread кладёт отчёт прямо в очередь названного разговора Codex.
-//
-// Ждать здесь нечего и вредно. Панель приходится караулить, потому что текст в
-// занятую уедет в чужой ход; очередь треда на то и очередь — сообщение примут
-// и в середине хода, а прочтут, когда ход кончится. Из-за этого отпадает и
-// самая дорогая ветка панельной доставки: полчаса опроса herdr ради ведущего,
-// который так и не освободился.
+// deliverThread кладёт событие в очередь названного разговора Codex и, когда
+// это безопасно, запускает ход через работающий app-server (см. codex.Wake).
+// Принятое в очередь не считается дошедшим: дошло — когда начался ход.
 //
 // Промахнуться разговором тут нельзя по устройству: адрес и есть разговор.
 // Проверять остаётся одно — что тот самый тред ещё открыт.
@@ -888,14 +893,31 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}
 
 	queued, mode := payload(text, o, KindThread)
-	err := codex.Send(ctx, thread, queued,
-		codex.SendOptions{Attempts: o.QueueAttempts, Gap: o.QueueGap})
+	var prev threadProgress
+	if j != nil {
+		if recs, err := j.Read(); err == nil {
+			prev = progressOf(recs, id, o.Stage)
+		}
+	}
+	r, err := wakeThread(ctx, codex.WakeRequest{
+		Thread: thread, ClientID: ThreadClientID(id, o.Stage), Task: id, Text: queued,
+		Accepted: prev.accepted(), SeenClientID: prev.clientID,
+		// Замок писателя у выгруженного в демоне треда значит, что его
+		// держит другой процесс.
+		OpenElsewhere: func() bool { return codex.State(home, thread) == codex.Live },
+		StartWait:     o.StartWait,
+	}, o)
 	d.Waited = time.Since(started)
 	d.Seconds = int(d.Waited.Seconds())
 	if err == nil {
 		d.OK = true
 		d.Mode = mode
-		recordWith(j, id, thread, KindThread, o.Stage, mode, d)
+		d.ThreadStage, d.Transport, d.TurnID = r.Stage, r.Transport, r.TurnID
+		d.Pending = !r.Started()
+		if d.Pending {
+			d.Cause, d.Reason = r.Hold, r.Reason
+		}
+		recordThread(j, id, thread, o.Stage, mode, prev, r)
 		return d
 	}
 

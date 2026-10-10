@@ -39,7 +39,12 @@ import (
 // От delegate отличается умолчанием: send не занимает ход ожиданием. Ждать
 // приходится редко, а занятый ход стоит дорого — поэтому ожидание стало
 // явным (--wait), а не поведением по умолчанию.
-func cmdSend(o opts, tgt, prompt string) error {
+func cmdSend(o opts, tgt, prompt string) (err error) {
+	defer func() {
+		if err == nil {
+			autoSupervise()
+		}
+	}()
 	if o.headless {
 		if o.wait {
 			return exitcode.Errorf(exitcode.BadCall,
@@ -358,7 +363,10 @@ func cmdTaskOne(o opts, id string) error {
 	if l.Reason != "" {
 		fmt.Printf("  %s\n", l.Reason)
 	}
+	printThreadTimeline(recs, id)
 	switch l.State {
+	case task.StateQueued:
+		fmt.Println("  событие в очереди треда Codex, ход с ним не начат — это ещё не обработка")
 	case task.StateUndelivered:
 		fmt.Println("  отчёт цел, но затеявшего не достиг: claudex flush")
 	case task.StateSent:
@@ -400,6 +408,14 @@ func cmdDoctor(o opts) error {
 		add("панель-затейник", true, "%s — отчёт вернётся сюда", p)
 	} else {
 		add("кому возвращать", false, "ни треда, ни разговора, ни панели: отчёт будет некому отдать")
+	}
+
+	if s, err := dialAppServer(); err != nil {
+		add("app-server Codex", false,
+			"недоступен (%v): отчёт в тред ляжет в очередь, но ход сам не начнётся", err)
+	} else {
+		s.Close()
+		add("app-server Codex", true, "%s — выгруженный тред будится ходом", codex.Socket())
 	}
 
 	if task.WakeCapable(callerKind()) {
@@ -488,6 +504,12 @@ func cmdDoctor(o opts) error {
 // адресата глазами. Рабочий путь — идентификатор разговора: имя панели
 // переживает смену агента, а идентификатор всегда указывает на один и тот же
 // разговор.
+func dialAppServer() (codex.AppServer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return codex.Dial(ctx)
+}
+
 func cmdSession(o opts, args []string) error {
 	if len(args) > 0 && args[0] != "list" && args[0] != "ls" {
 		return exitcode.Errorf(exitcode.BadCall,

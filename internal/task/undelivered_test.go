@@ -89,7 +89,7 @@ func TestShowingTheHumanIsNotCountedAsReachingTheLeader(t *testing.T) {
 }
 
 func TestLiveThreadDeliversAndLeavesNothingUndelivered(t *testing.T) {
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 	seedThreadTask(t, j, "465a77fc", leaderThread)
 
@@ -128,7 +128,7 @@ func TestAddressThatBecomesReachableGetsTheReportOnTheNextDone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sent := codexHome(t, unknownThread) // тред стал известен и жив
+	sent := unloadedHome(t, unknownThread) // тред стал известен
 	res, err := Report(context.Background(), "465a77fc", "готово", reportText, o)
 	if err != nil {
 		t.Fatal(err)

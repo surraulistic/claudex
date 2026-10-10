@@ -20,6 +20,7 @@ package supervise
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,6 +73,9 @@ type Options struct {
 	Now func() time.Time
 	// Flush подменяется в тестах. Настоящий — task.Flush.
 	Flush func(context.Context, task.FlushOptions) []task.Flushed
+	// Follow отмечает завершение ходов, начатых в тредах Codex. Настоящий —
+	// task.FollowTurns: только читает app-server.
+	Follow func(context.Context, *journal.Journal, int) []task.FollowedTurn
 }
 
 // Status — то, что наблюдатель оставляет о себе на диске.
@@ -85,6 +89,7 @@ type Status struct {
 	Pending     int       `json:"pending"`
 	Deferred    int       `json:"deferred"`
 	Woken       int       `json:"woken"`
+	TurnsDone   int       `json:"turns_done"`
 	Archived    int       `json:"archived"`
 	ArchiveNote string    `json:"archive_note,omitempty"`
 	Interval    string    `json:"interval"`
@@ -99,6 +104,8 @@ type Tick struct {
 	Deferred  int      `json:"deferred"`
 	// Silent — за кого разбудили по молчанию, без отчёта от самой задачи.
 	Silent []string `json:"silent,omitempty"`
+	// TurnsDone — ходы в тредах Codex, чьё завершение замечено за проход.
+	TurnsDone []task.FollowedTurn `json:"turns_done,omitempty"`
 }
 
 // Supervisor хранит то, чего нет в журнале: когда следующий раз трогать адрес,
@@ -126,6 +133,9 @@ func New(o Options) *Supervisor {
 	}
 	if o.Flush == nil {
 		o.Flush = task.Flush
+	}
+	if o.Follow == nil {
+		o.Follow = task.FollowTurns
 	}
 	return &Supervisor{
 		o: o, next: map[string]time.Time{}, wait: map[string]time.Duration{},
@@ -172,6 +182,7 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	if t.Deferred < len(lost) {
 		s.flushPending(ctx, &t, skip, now)
 	}
+	t.TurnsDone = s.o.Follow(ctx, s.o.Journal, s.o.MaxPerTick)
 	s.archiveOnce(now)
 	s.record(now, t)
 	return t
@@ -275,6 +286,7 @@ func (s *Supervisor) record(now time.Time, t Tick) {
 	s.stat.Failed += len(t.Failed)
 	s.stat.Pending, s.stat.Deferred = t.Pending, t.Deferred
 	s.stat.Woken += len(t.Silent)
+	s.stat.TurnsDone += len(t.TurnsDone)
 	s.writeStatus()
 }
 
@@ -299,6 +311,7 @@ func (s *Supervisor) writeStatus() {
 
 // Run крутит наблюдение до отмены.
 func (s *Supervisor) Run(ctx context.Context) error {
+	s.writeStatus()
 	s.Once(ctx)
 	t := time.NewTicker(s.o.Interval)
 	defer t.Stop()
@@ -354,4 +367,54 @@ func Read(path string) (Status, bool) {
 		return st, false
 	}
 	return st, true
+}
+
+// ErrRunning — замок наблюдателя уже держит другой процесс.
+var ErrRunning = errors.New("наблюдатель уже работает")
+
+// LockPath — замок единственного наблюдателя. Файл состояния для этого не
+// годится: два процесса, запущенных разом, оба видят его пустым.
+func LockPath() string {
+	p := StatusPath()
+	if p == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(p), "locks", "supervisor.lock")
+}
+
+// Acquire берёт замок на всё время жизни процесса; ОС снимает его и при
+// аварийном выходе.
+func Acquire(path string) (release func(), err error) {
+	if path == "" {
+		return nil, errors.New("путь замка наблюдателя неизвестен")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrRunning
+		}
+		return nil, err
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
+}
+
+// Held — держит ли кто-нибудь замок. Надёжнее проверки по PID из файла
+// состояния: номер процесса переиспользуется.
+func Held(path string) bool {
+	release, err := Acquire(path)
+	if err != nil {
+		return errors.Is(err, ErrRunning)
+	}
+	release()
+	return false
 }

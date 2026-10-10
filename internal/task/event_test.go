@@ -87,10 +87,11 @@ func TestComposeIsSkippedInEventMode(t *testing.T) {
 
 func TestDeliveryModeIsRecordedInTheJournal(t *testing.T) {
 	// Иначе по записи не отличить «разбудили событием» от «прислали целиком».
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 	d := Deliver(context.Background(), c, j, "43bc6e11", leaderThread, "сводка",
 		DeliverOptions{Stage: StageReported, Kind: KindThread, WantSession: leaderThread,
+			Poll:  time.Millisecond,
 			Event: &Event{Task: "43bc6e11", State: StateDone, Reason: "сделано"}})
 	if !d.OK || d.Mode != DeliveryEvent {
 		t.Fatalf("доставлено событием, получено %+v", d)

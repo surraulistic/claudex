@@ -67,7 +67,7 @@ func reconcileOpts(j *journal.Journal, c *herdr.Client, screen string) Reconcile
 func TestFinalWithoutDoneIsCollectedAndDelivered(t *testing.T) {
 	// Сам дефект. Панель закончила, разговор тот же, позже ей ничего не
 	// поручали — значит на экране наш финал, и он должен уехать ведущему.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := executor(t, "idle", execSession)
 	silentDelegation(t, j, time.Now().Add(-2*time.Hour))
 
@@ -255,7 +255,7 @@ func TestFreshSilenceIsGivenTimeToReportItself(t *testing.T) {
 func TestCollectedReportIsNotCollectedAgain(t *testing.T) {
 	// Повтор не дублирует: собранный отчёт закрывает поручение так же, как
 	// настоящий.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := executor(t, "idle", execSession)
 	silentDelegation(t, j, time.Now().Add(-2*time.Hour))
 

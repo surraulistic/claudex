@@ -43,6 +43,18 @@ func cmdSupervisor(o opts, args []string) error {
 			"наблюдатель уже работает (pid %d, тиков %d): второй будет дублировать доставку",
 			st.PID, st.Ticks)
 	}
+	// Несколько попыток: ensureSupervisor проверяет замок, на миг беря его
+	// сам, и стартующий наблюдатель может попасть ровно в этот миг.
+	release, err := supervise.Acquire(supervise.LockPath())
+	for i := 0; errors.Is(err, supervise.ErrRunning) && i < 10; i++ {
+		time.Sleep(30 * time.Millisecond)
+		release, err = supervise.Acquire(supervise.LockPath())
+	}
+	if err != nil {
+		return exitcode.Errorf(exitcode.Busy,
+			"%v: второй будет дублировать доставку", err)
+	}
+	defer release()
 
 	s := supervise.New(supervise.Options{
 		Journal: journal.Open(defaultJournal()), Client: client(),
@@ -96,7 +108,7 @@ func supervisorStatus(o opts) error {
 // ensureSupervisor starts the ordinary non-LLM observer when a headless task
 // needs its Stop-hook fallback. It is intentionally idempotent.
 func ensureSupervisor(_ opts) error {
-	if _, alive := supervise.Read(supervise.StatusPath()); alive {
+	if supervisorRunning() {
 		return nil
 	}
 	self, err := os.Executable()
@@ -125,12 +137,34 @@ func ensureSupervisor(_ opts) error {
 	_ = cmd.Process.Release()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, alive := supervise.Read(statusPath); alive {
+		if supervisorRunning() {
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	return fmt.Errorf("наблюдатель не подтвердил запуск; подробности в %s", logPath)
+}
+
+// supervisorRunning — замок или, для наблюдателя прежней сборки без замка,
+// живой процесс из файла состояния.
+func supervisorRunning() bool {
+	if supervise.Held(supervise.LockPath()) {
+		return true
+	}
+	_, alive := supervise.Read(supervise.StatusPath())
+	return alive
+}
+
+// autoSupervise поднимает наблюдателя для любого отслеживаемого send и done:
+// без него отчёт, принятый в очередь треда, так и не превратится в ход.
+// Отказ не валит команду — она своё уже сделала.
+func autoSupervise() {
+	if os.Getenv("CLAUDEX_NO_AUTOSUPERVISOR") != "" {
+		return
+	}
+	if err := ensureSupervisor(opts{}); err != nil {
+		fmt.Fprintf(os.Stderr, "claudex: наблюдатель не запущен: %v\n", err)
+	}
 }
 
 func supervisorStop() error {

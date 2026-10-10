@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/surraulistic/claudex/internal/codex"
+	"github.com/surraulistic/claudex/internal/codex/codextest"
 	"github.com/surraulistic/claudex/internal/herdr"
 	"github.com/surraulistic/claudex/internal/herdr/herdrtest"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -31,6 +32,18 @@ type queued struct{ thread, message string }
 // Настоящий вызов разбудил бы живой разговор, и правило отказа им не проверишь.
 func codexHome(t *testing.T, live ...string) *[]queued {
 	t.Helper()
+	return codexFixture(t, live, nil)
+}
+
+// unloadedHome — адресаты известны, но без замка писателя и не загружены в
+// демоне: Wake будит их через resume с claudex-work.
+func unloadedHome(t *testing.T, known ...string) *[]queued {
+	t.Helper()
+	return codexFixture(t, nil, known)
+}
+
+func codexFixture(t *testing.T, live, known []string) *[]queued {
+	t.Helper()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "thread-writer-locks"), 0o755); err != nil {
 		t.Fatal(err)
@@ -40,6 +53,9 @@ func codexHome(t *testing.T, live ...string) *[]queued {
 		if err := os.WriteFile(filepath.Join(dir, "thread-writer-locks", id+".lock"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
+		index = append(index, []byte(`{"id":"`+id+`"}`+"\n")...)
+	}
+	for _, id := range known {
 		index = append(index, []byte(`{"id":"`+id+`"}`+"\n")...)
 	}
 	// Закрытый, но известный тред нужен почти каждому тесту как контрпример.
@@ -56,7 +72,30 @@ func codexHome(t *testing.T, live ...string) *[]queued {
 		return nil
 	}
 	t.Cleanup(func() { codex.Queue = prev })
+
+	// Живые треды загружены в демоне и просыпаются после подтверждённой смены
+	// профиля; выгруженные — через resume.
+	app := codextest.Start(t)
+	app.OnAdd = func(id, msg string) { sent = append(sent, queued{id, msg}) }
+	for _, id := range live {
+		app.Add(id, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}})
+	}
+	for _, id := range known {
+		app.Add(id, &codextest.Thread{})
+	}
+	if !contains(live, otherThread) && !contains(known, otherThread) {
+		app.Add(otherThread, &codextest.Thread{})
+	}
 	return &sent
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 func threadDelivery(t *testing.T) (*herdrtest.Fake, *journal.Journal, *herdr.Client) {
@@ -76,7 +115,7 @@ func threadOpts() DeliverOptions {
 }
 
 func TestThreadDeliveryAddressesTheConversationItself(t *testing.T) {
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
 
 	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
@@ -98,7 +137,7 @@ func TestThreadDeliverySurvivesPaneReuse(t *testing.T) {
 	// Ровно тот сбой, ради которого всё затевалось. Панель ведущего за час
 	// сменила разговор; панельная доставка тут отказывает, а адресация по
 	// треду попадает туда же, куда и до смены: адрес и есть разговор.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
 	f.Reply("agent.get", agentWith("idle", "совсем-другой-разговор"))
 	// Журнал видел за этой панелью несколько разговоров — для панели это
@@ -225,6 +264,8 @@ func TestQueueFailureIsNotCalledDelivered(t *testing.T) {
 	// Ненулевой код возврата чужой команды — не доставка. Раньше такой исход
 	// лёг бы в журнал как успех, и потеря стала бы невидимой.
 	codexHome(t, leaderThread)
+	// Отказ codex queue значим только там, где app-server недоступен.
+	t.Setenv("CLAUDEX_CODEX_SOCKET", filepath.Join(t.TempDir(), "нет.sock"))
 	f, j, c := threadDelivery(t)
 	prev := codex.Queue
 	codex.Queue = func(context.Context, string, string) error {
@@ -252,16 +293,19 @@ func TestQueueFailureIsNotCalledDelivered(t *testing.T) {
 }
 
 func TestThreadDeliveryOutcomeLandsInTheJournal(t *testing.T) {
-	codexHome(t, leaderThread)
+	unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
 	Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())
 	recs, _ := j.Read()
-	if len(recs) != 1 {
-		t.Fatalf("одна запись о доставке, получено %+v", recs)
+	// Выгруженный тред разбужен resume, и ход сразу кончился: начало и
+	// конец хода — две записи, каждая со своей стадией.
+	if len(recs) != 2 || recs[0].ThreadStage != codex.StageStarted ||
+		recs[1].ThreadStage != codex.StageCompleted {
+		t.Fatalf("стадии хода записаны порознь, получено %+v", recs)
 	}
-	if recs[0].Event != journal.Notified || recs[0].Outcome != WokeUp {
-		t.Fatalf("успех записан как пробуждение, получено %+v", recs[0])
+	if recs[0].Event != journal.Notified || !ReachedLeader(recs[0].Outcome) {
+		t.Fatalf("начатый ход — это пробуждение, получено %+v", recs[0])
 	}
 	if recs[0].Target != leaderThread || recs[0].Stage != StageReported {
 		t.Fatalf("адрес и стадия записаны, получено %+v", recs[0])
@@ -277,7 +321,7 @@ func TestThreadDeliveryOutcomeLandsInTheJournal(t *testing.T) {
 func TestLateThreadReportKeepsTheBindingFromDelegationTime(t *testing.T) {
 	// Поздний отчёт приходит спустя час. Вид адреса берётся из журнала, а не
 	// из окружения: к этому времени процесс может выполняться где угодно.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	f, j, c := threadDelivery(t)
 	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread})
@@ -300,7 +344,7 @@ func TestLateThreadReportKeepsTheBindingFromDelegationTime(t *testing.T) {
 }
 
 func TestRepeatedDoneDoesNotQueueTheThreadTwice(t *testing.T) {
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread})
@@ -321,7 +365,7 @@ func TestRepeatedDoneDoesNotQueueTheThreadTwice(t *testing.T) {
 func TestFailedThreadDeliveryIsRetriedOnTheNextDone(t *testing.T) {
 	// Провалившуюся доставку повторить стоит, удавшуюся — нет. Иначе отчёт,
 	// не дошедший с первого раза, теряется навсегда.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
 		Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread})
@@ -432,7 +476,7 @@ func TestPaneDeliveryIsUnchangedWhenKindIsAbsent(t *testing.T) {
 func TestComposeEnrichesTheQueuedMessageOnly(t *testing.T) {
 	// Ведущему в тред уходит сводка вместе с дайджестом. Человеку во
 	// всплывашку herdr — только сводка: уведомление на пол-экрана бесполезно.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 	o := threadOpts()
 	o.Compose = func(s string) string { return s + " + ДАЙДЖЕСТ" }
@@ -449,7 +493,7 @@ func TestComposeEnrichesTheQueuedMessageOnly(t *testing.T) {
 func TestDirectCallbackWithoutComposeIsUnchanged(t *testing.T) {
 	// Обратная совместимость: без индекса и вне Claude-сессии дайджест собрать
 	// не из чего, и прямой callback обязан работать ровно как раньше.
-	sent := codexHome(t, leaderThread)
+	sent := unloadedHome(t, leaderThread)
 	_, j, c := threadDelivery(t)
 
 	d := Deliver(context.Background(), c, j, "11111111", leaderThread, "готово", threadOpts())

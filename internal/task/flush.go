@@ -137,9 +137,11 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 					Reason: "отчёт был готов, но сразу не доставился (" + l.Reason + ")"},
 				Deadline: flushDeadline, Poll: 200 * time.Millisecond})
 
+		// Принятое в очередь, но не начатое — ещё не дошло: наблюдатель
+		// отложит повтор, а не сочтёт доставленным.
 		out = append(out, Flushed{
 			Task: l.Task, Stage: l.Stage, Target: l.Target,
-			Ok: d.OK, Reason: d.Reason,
+			Ok: d.OK && !d.Pending, Reason: d.Reason,
 		})
 	}
 	return out

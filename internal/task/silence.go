@@ -53,7 +53,7 @@ func SilentTasks(recs []journal.Record, now time.Time, grace time.Duration) []Si
 			// Затеявшего уже разбудили по этому поручению — второй раз за то
 			// же будить незачем: дедупликация здесь та же, что у отчётов, по
 			// паре задача+стадия.
-			if r.Stage == StageReported && r.Outcome == WokeUp {
+			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
 				woken[r.Task] = true
 			}
 		case journal.Idle:

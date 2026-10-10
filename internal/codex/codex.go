@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // Состояние треда — ровно то, что можно доказать, читая $CODEX_HOME.
@@ -147,45 +146,6 @@ func binary() string {
 		return p
 	}
 	return "codex"
-}
-
-// Send — доставка с повторами. Отказ бывает преходящим: демон app-server
-// перезапускается, и следующая попытка через пару секунд проходит. Долго
-// держать нельзя — эта ветка выполняется в том числе внутри хода самой задачи.
-type SendOptions struct {
-	Attempts int
-	Gap      time.Duration
-	Each     time.Duration
-}
-
-func Send(ctx context.Context, id, message string, o SendOptions) error {
-	if o.Attempts <= 0 {
-		o.Attempts = 3
-	}
-	if o.Gap <= 0 {
-		o.Gap = 2 * time.Second
-	}
-	if o.Each <= 0 {
-		o.Each = 15 * time.Second
-	}
-	var last error
-	for i := 0; i < o.Attempts; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("%w (после %d попыток: %v)", ctx.Err(), i, last)
-			case <-time.After(o.Gap):
-			}
-		}
-		attempt, cancel := context.WithTimeout(ctx, o.Each)
-		err := Queue(attempt, id, message)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		last = err
-	}
-	return last
 }
 
 func oneLine(s string) string {

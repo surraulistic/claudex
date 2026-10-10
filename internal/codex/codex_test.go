@@ -1,12 +1,9 @@
 package codex
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 const thread = "01a0a51e-20c4-7e10-8488-b524b9389489"
@@ -126,62 +123,4 @@ func TestInheritedThreadIDIsNotAnAddress(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestSendRetriesTransientFailure(t *testing.T) {
-	// Демон app-server перезапускается, и первая попытка падает; вторая
-	// проходит. Считать первый отказ окончательным — терять отчёт на ровном
-	// месте.
-	calls := 0
-	restore := swap(func(context.Context, string, string) error {
-		calls++
-		if calls < 2 {
-			return errors.New("connection refused")
-		}
-		return nil
-	})
-	defer restore()
-
-	if err := Send(context.Background(), thread, "готово",
-		SendOptions{Gap: time.Millisecond}); err != nil {
-		t.Fatalf("вторая попытка прошла, получено %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("попыток %d, ожидалось 2", calls)
-	}
-}
-
-func TestSendGivesUpAndKeepsTheLastReason(t *testing.T) {
-	restore := swap(func(context.Context, string, string) error {
-		return errors.New("тред закрыт")
-	})
-	defer restore()
-
-	err := Send(context.Background(), thread, "готово",
-		SendOptions{Attempts: 2, Gap: time.Millisecond})
-	if err == nil {
-		t.Fatal("три отказа — это отказ, а не успех")
-	}
-	if err.Error() != "тред закрыт" {
-		t.Fatalf("причина последней попытки сохранена, получено %q", err)
-	}
-}
-
-func TestSendStopsOnContextCancel(t *testing.T) {
-	restore := swap(func(context.Context, string, string) error {
-		return errors.New("отказ")
-	})
-	defer restore()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := Send(ctx, thread, "готово", SendOptions{Gap: time.Second}); err == nil {
-		t.Fatal("отменённый контекст — не успех")
-	}
-}
-
-func swap(f func(context.Context, string, string) error) func() {
-	prev := Queue
-	Queue = f
-	return func() { Queue = prev }
 }

@@ -177,7 +177,7 @@ func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assign
 	// навсегда и будило бы затеявшего при каждом проходе.
 	woken := map[string]bool{}
 	for _, r := range recs {
-		if r.Event == journal.Notified && r.Stage == StageReported && r.Outcome == WokeUp {
+		if r.Event == journal.Notified && r.Stage == StageReported && ReachedLeader(r.Outcome) {
 			woken[r.Task] = true
 		}
 	}

@@ -38,6 +38,10 @@ const (
 	// StateUndelivered — отчёт есть, но до затеявшего он не дошёл. Лечится
 	// дожимом, текст цел.
 	StateUndelivered = "undelivered"
+	// StateQueued — событие лежит в очереди треда Codex, ход с ним не начат.
+	// Не undelivered: сообщение цело и у адресата. И не delivered: его никто
+	// ещё не прочитал.
+	StateQueued = "queued"
 	// StateAbandoned — поручение висит без движения так долго, что ждать его
 	// больше незачем. Отдельно от sent потому, что смешивать их дорого во всех
 	// смыслах: список ожидающих распухает мёртвыми, и на вопрос «что сейчас»
@@ -89,7 +93,7 @@ func StateOf(recs []journal.Record, id string) Lifecycle {
 func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 	l := Lifecycle{Task: id, State: StateCreated}
 	var started, reported, refused, launchFailed bool
-	var delivered bool
+	var delivered, queued bool
 	var sawNotify bool
 
 	var last time.Time
@@ -122,8 +126,11 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 			if r.Delivery != "" {
 				l.Delivery = r.Delivery
 			}
-			if r.Stage == StageReported && r.Outcome == WokeUp {
+			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
 				delivered = true
+			}
+			if r.Stage == StageReported && r.Outcome == ThreadQueued {
+				queued = true
 			}
 		}
 	}
@@ -131,12 +138,12 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 	if launchFailed {
 		started = false
 	}
-	return settle(l, started, reported, refused || launchFailed, sawNotify, delivered, last, now)
+	return settle(l, started, reported, refused || launchFailed, sawNotify, delivered, queued, last, now)
 }
 
 // settle — правила, общие для обоих путей: одиночного разбора и прохода по
 // всему журналу. Держать их в двух местах значит гарантированно разойтись.
-func settle(l Lifecycle, started, reported, refused, notified, delivered bool,
+func settle(l Lifecycle, started, reported, refused, notified, delivered, queued bool,
 	last, now time.Time) Lifecycle {
 
 	if l.Delivery == "" && l.CallerKind != "" {
@@ -151,6 +158,9 @@ func settle(l Lifecycle, started, reported, refused, notified, delivered bool,
 		// исхода: неотданный отчёт выглядит для затеявшего как молчание.
 		if notified && !delivered {
 			l.State = StateUndelivered
+			if queued {
+				l.State = StateQueued
+			}
 		}
 	case started:
 		l.State = StateSent
@@ -161,7 +171,7 @@ func settle(l Lifecycle, started, reported, refused, notified, delivered bool,
 	// недоставленного цел и дослать его можно когда угодно — но в ответе на
 	// «что происходит сейчас» сентябрьскому отчёту места нет. Он никуда не
 	// делся: `--all`, `claudex task <id>` и дожим видят его по-прежнему.
-	if l.State == StateSent || l.State == StateUndelivered {
+	if l.State == StateSent || l.State == StateUndelivered || l.State == StateQueued {
 		if !last.IsZero() && now.Sub(last) > AbandonAfter {
 			l.State = StateAbandoned
 		}
@@ -243,7 +253,7 @@ func open(recs []journal.Record, now time.Time, withAbandoned bool) []Lifecycle 
 			continue
 		}
 		switch l.State {
-		case StateSent, StateUndelivered:
+		case StateSent, StateUndelivered, StateQueued:
 			out = append(out, l)
 		case StateAbandoned:
 			if withAbandoned {
@@ -260,7 +270,7 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 		l                                        Lifecycle
 		last                                     time.Time
 		started, reported, refused, launchFailed bool
-		notified, delivered                      bool
+		notified, delivered, queued              bool
 	}
 	all := map[string]*acc{}
 	for _, r := range recs {
@@ -294,8 +304,11 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 			if r.Delivery != "" {
 				a.l.Delivery = r.Delivery
 			}
-			if r.Stage == StageReported && r.Outcome == WokeUp {
+			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
 				a.delivered = true
+			}
+			if r.Stage == StageReported && r.Outcome == ThreadQueued {
+				a.queued = true
 			}
 		}
 	}
@@ -304,7 +317,7 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 		if a.launchFailed {
 			a.started = false
 		}
-		out[id] = settle(a.l, a.started, a.reported, a.refused || a.launchFailed, a.notified, a.delivered, a.last, now)
+		out[id] = settle(a.l, a.started, a.reported, a.refused || a.launchFailed, a.notified, a.delivered, a.queued, a.last, now)
 	}
 	return out
 }

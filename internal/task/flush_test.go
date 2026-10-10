@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func TestUnconfirmableAddressIsLeftAloneUntilItIsKnown(t *testing.T) {
 func TestReopenedThreadGetsTheWholeReportOnTheNextTouch(t *testing.T) {
 	// Разговор вернулся — и следующий же вызов claudex досылает отчёт.
 	// Наблюдателя для этого не нужно: работа делается внутри команды.
-	sent := codexHome(t, otherThread)
+	sent := unloadedHome(t, otherThread)
 	_, j, c := threadDelivery(t)
 	pending(t, j, "465a77fc", otherThread, "полный текст отчёта")
 
@@ -109,7 +110,7 @@ func TestFlushNeverWritesIntoANeighbouringConversation(t *testing.T) {
 }
 
 func TestFlushDoesNotSendTheSameReportTwice(t *testing.T) {
-	sent := codexHome(t, otherThread)
+	sent := unloadedHome(t, otherThread)
 	_, j, c := threadDelivery(t)
 	pending(t, j, "465a77fc", otherThread, "отчёт")
 
@@ -149,10 +150,15 @@ func TestFlushLeavesPaneTargetsToTheirOwnPath(t *testing.T) {
 
 func TestFlushIsBoundedSoAnOrdinaryCommandStaysQuick(t *testing.T) {
 	// Накопленная очередь не должна превращать обычный вызов в долгий.
-	sent := codexHome(t, otherThread)
+	// После хода тред остаётся загруженным, поэтому у каждого поручения свой.
+	var threads []string
+	for i := 0; i < 12; i++ {
+		threads = append(threads, fmt.Sprintf("01a0cccc-0000-7000-8000-%012d", i))
+	}
+	sent := unloadedHome(t, threads...)
 	_, j, c := threadDelivery(t)
 	for i := 0; i < 12; i++ {
-		pending(t, j, "0000000"+string(rune('a'+i)), otherThread, "отчёт")
+		pending(t, j, "0000000"+string(rune('a'+i)), threads[i], "отчёт")
 	}
 	got := Flush(context.Background(), FlushOptions{Journal: j, Client: c, Max: 3})
 	if len(got) != 3 {

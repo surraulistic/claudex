@@ -1400,7 +1400,12 @@ func cmdWatch(o opts, args []string) error {
 	return emit(o, map[string]any{"pane": p.ID, "status": a.Status, "final_status": a.Status})
 }
 
-func cmdDelegate(o opts, tgt, prompt string) error {
+func cmdDelegate(o opts, tgt, prompt string) (err error) {
+	defer func() {
+		if err == nil {
+			autoSupervise()
+		}
+	}()
 	if o.session {
 		return cmdDelegateSession(o, tgt, prompt)
 	}
@@ -1951,6 +1956,19 @@ func pushText(o opts, summary, id string, from, to time.Time, pane string) strin
 	return taskDigestWith(o, digest.PushOptions(d)).Push(summary)
 }
 
+// printThreadTimeline — доставка в тред Codex по стадиям: принятое в очередь
+// не выдаётся за начатый ход, начатый — за завершённый.
+func printThreadTimeline(recs []journal.Record, id string) {
+	lines := task.ThreadTimeline(recs, id)
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Println("  доставка в тред Codex:")
+	for _, l := range lines {
+		fmt.Printf("    %s\n", l)
+	}
+}
+
 func cmdTaskDigest(o opts, id string) error {
 	prompt, from, to, pane := taskWindow(id)
 	if from.IsZero() {
@@ -1959,6 +1977,9 @@ func cmdTaskDigest(o opts, id string) error {
 	d := taskDigest(o, id, prompt, from, to, pane)
 	if o.pretty {
 		return emit(o, d)
+	}
+	if recs, err := journal.Open(defaultJournal()).Read(); err == nil {
+		printThreadTimeline(recs, id)
 	}
 	fmt.Print(d.Text("(дайджест по запросу)"))
 	return nil
@@ -1997,6 +2018,7 @@ func cmdDone(o opts, args []string) error {
 	if err != nil {
 		return err
 	}
+	autoSupervise()
 	return emit(opts{}, res)
 }
 

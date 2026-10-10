@@ -26,5 +26,13 @@ func TestMain(m *testing.M) {
 	} {
 		os.Unsetenv(k)
 	}
+	isolateCodex()
 	os.Exit(m.Run())
+}
+
+// isolateCodex не даёт тесту дотянуться до живого Codex: подделки выставляют
+// свой сокет сами.
+func isolateCodex() {
+	os.Setenv("CLAUDEX_CODEX_SOCKET", "/nonexistent/claudex-test/app-server.sock")
+	os.Setenv("CLAUDEX_CODEX_BIN", "/nonexistent/claudex-test/codex")
 }
