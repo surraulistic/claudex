@@ -159,8 +159,7 @@ func cmdHeadless(o opts, targetName, prompt string) error {
 	if err := validateHeadlessWake(j, wake); err != nil {
 		return err
 	}
-	reconcilePending(o)
-	flushPending(o)
+	inlineUpkeep(o)
 
 	recs, err := j.Read()
 	if err != nil {
@@ -170,10 +169,6 @@ func cmdHeadless(o opts, targetName, prompt string) error {
 	if err != nil {
 		return exitcode.Wrap(exitcode.BadCall, err)
 	}
-	if err := ensureSupervisor(o); err != nil {
-		return exitcode.Wrap(exitcode.Fail, err)
-	}
-
 	id := task.NewID()
 	started := journal.Record{
 		Task: id, Event: journal.Started,

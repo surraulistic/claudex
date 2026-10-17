@@ -29,6 +29,7 @@ import (
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/state"
 	"github.com/surraulistic/claudex/internal/store"
+	"github.com/surraulistic/claudex/internal/supervise"
 	"github.com/surraulistic/claudex/internal/target"
 	"github.com/surraulistic/claudex/internal/task"
 	"github.com/surraulistic/claudex/internal/textual"
@@ -1436,8 +1437,7 @@ func cmdDelegate(o opts, tgt, prompt string) (err error) {
 	// который его затевает, сейчас заведомо жив, а панели, закончившие молча,
 	// уже видны. Обе ветки отказывают, пока привязка не доказана, поэтому
 	// вызывать их здесь безопасно.
-	reconcilePending(o)
-	flushPending(o)
+	inlineUpkeep(o)
 
 	if o.noWait {
 		a, err := client().Get(p.ID)
@@ -1718,24 +1718,51 @@ func taskDigestWith(o opts, d digest.Options) digest.Digest {
 // ввод не занимается, работа идёт внутри уже запущенного вызова и ограничена
 // сверху. Ошибки намеренно не поднимаются — дожим это побочная любезность, и
 // провалить из-за него основную команду нельзя.
-func flushPending(o opts) []task.Flushed {
+func flushPending(o opts) []task.Flushed { return flushWithin(o, 0, 0) }
+
+func flushWithin(o opts, budget time.Duration, max int) []task.Flushed {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return task.Flush(ctx, task.FlushOptions{
-		Journal: journal.Open(defaultJournal()), Client: client(),
+		Journal: journal.Open(defaultJournal()), Client: client(), Budget: budget, Max: max,
 		Compose: func(summary, id string, from, to time.Time, pane string) string {
 			return pushText(o, summary, id, from, to, pane)
 		},
 	})
 }
 
+// inlineBudget — сколько команда, пришедшая за другим, тратит на попутный
+// дожим и сборку чужих отчётов.
+const inlineBudget = 3 * time.Second
+
+// inlineUpkeep — попутный дожим внутри send/delegate/undelivered. Работающий
+// наблюдатель дожимает сам: второй дожим в чужой команде — дубль и
+// непредсказуемая длительность. Сборку он делает, только если включена.
+func inlineUpkeep(o opts) {
+	st, alive := supervise.Read(supervise.StatusPath())
+	running := alive || supervise.Held(supervise.LockPath())
+	if !running || !st.Reconciling {
+		reconcileWithin(o, inlineBudget)
+	}
+	if !running {
+		flushWithin(o, inlineBudget, 2)
+	}
+}
+
 // reconcilePending собирает отчёты за задачи, закончившие молча.
 //
 // Ошибки не поднимаются по той же причине, что и у дожима: это побочная
 // любезность, и валить из-за неё основную команду нельзя.
-func reconcilePending(o opts) []task.Reconciled {
+func reconcilePending(o opts) []task.Reconciled { return reconcileWithin(o, 0) }
+
+func reconcileWithin(o opts, budget time.Duration) []task.Reconciled {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	c := client()
 	return task.Reconcile(ctx, task.ReconcileOptions{
 		Journal: journal.Open(defaultJournal()), Client: c,
@@ -1867,8 +1894,7 @@ func cmdUndelivered(o opts) error {
 	}
 	// Прежде чем показывать список, пробуем собрать и дожать: панель могла
 	// закончить молча, а разговор — открыться.
-	reconcilePending(o)
-	flushPending(o)
+	inlineUpkeep(o)
 	recs, err = journal.Open(defaultJournal()).Read()
 	if err != nil {
 		return err

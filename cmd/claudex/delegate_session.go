@@ -48,8 +48,7 @@ func delegateToConversation(o opts, s claudesess.Session, pane, prompt string) e
 	if err := wakeIsPossible(j, o); err != nil {
 		return err
 	}
-	reconcilePending(o)
-	flushPending(o)
+	inlineUpkeep(o)
 
 	id := task.NewID()
 	wake := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)

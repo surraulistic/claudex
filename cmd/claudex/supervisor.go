@@ -167,19 +167,32 @@ func autoSupervise() {
 	}
 }
 
+// supervisorStop шлёт сигнал только держателю замка: PID из файла состояния
+// мог уже достаться другому процессу.
 func supervisorStop() error {
-	st, alive := supervise.Read(supervise.StatusPath())
-	if !alive {
+	pid, held := supervise.Holder(supervise.LockPath())
+	if !held {
+		if st, alive := supervise.Read(supervise.StatusPath()); alive {
+			return exitcode.Errorf(exitcode.Fail,
+				"в %s записан pid %d, но замок наблюдателя никто не держит: это может быть уже "+
+					"другой процесс — не останавливаю; проверьте его сами (ps -p %d)",
+				supervise.StatusPath(), st.PID, st.PID)
+		}
 		fmt.Println("наблюдатель не работает")
 		return nil
 	}
-	p, err := os.FindProcess(st.PID)
+	if pid <= 0 {
+		return exitcode.Errorf(exitcode.Fail,
+			"замок наблюдателя занят, но pid в нём не записан (наблюдатель прежней сборки): "+
+				"остановите его вручную")
+	}
+	p, err := os.FindProcess(pid)
 	if err != nil {
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
 	if err := p.Signal(syscall.SIGTERM); err != nil {
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
-	fmt.Printf("остановлен (pid %d)\n", st.PID)
+	fmt.Printf("остановлен (pid %d)\n", pid)
 	return nil
 }

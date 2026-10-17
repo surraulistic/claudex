@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -430,10 +432,27 @@ func Acquire(path string) (release func(), err error) {
 		}
 		return nil, err
 	}
+	if f.Truncate(0) == nil {
+		f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
+	}
 	return func() {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	}, nil
+}
+
+// Holder — держит ли кто-нибудь замок и какой pid он в нём записал; 0 —
+// не записал.
+func Holder(path string) (int, bool) {
+	if !Held(path) {
+		return 0, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, true
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return pid, true
 }
 
 // Held — держит ли кто-нибудь замок. Надёжнее проверки по PID из файла
