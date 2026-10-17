@@ -109,6 +109,8 @@ type Turn struct {
 	ID     string     `json:"id"`
 	Status string     `json:"status"`
 	Items  []TurnItem `json:"items"`
+	// StartedAt — unix-секунды начала хода; 0, если сервер не назвал.
+	StartedAt int64 `json:"startedAt,omitempty"`
 }
 
 type TurnItem struct {
@@ -146,7 +148,9 @@ type AppServer interface {
 	// треда и лишь при фактической смене.
 	SetPermissions(ctx context.Context, thread, permissions string) (Settings, error)
 	QueueStart(ctx context.Context, thread, queueID string) (Turn, error)
-	RecentTurns(ctx context.Context, thread string, limit int) ([]Turn, error)
+	// TurnsPage — страница ходов, новые первыми; next пуст, когда ходов
+	// больше нет.
+	TurnsPage(ctx context.Context, thread, cursor string, limit int) (turns []Turn, next string, err error)
 	Close() error
 }
 
@@ -440,11 +444,19 @@ func (c *client) QueueStart(ctx context.Context, thread, queueID string) (Turn, 
 	return r.Turn, err
 }
 
-func (c *client) RecentTurns(ctx context.Context, thread string, limit int) ([]Turn, error) {
+func (c *client) TurnsPage(ctx context.Context, thread, cursor string, limit int) ([]Turn, string, error) {
 	var r struct {
-		Data []Turn `json:"data"`
+		Data       []Turn  `json:"data"`
+		NextCursor *string `json:"nextCursor"`
 	}
-	err := c.call(ctx, "thread/turns/list", map[string]any{
-		"threadId": thread, "limit": limit, "itemsView": "summary"}, &r)
-	return r.Data, err
+	p := map[string]any{"threadId": thread, "limit": limit, "itemsView": "summary"}
+	if cursor != "" {
+		p["cursor"] = cursor
+	}
+	err := c.call(ctx, "thread/turns/list", p, &r)
+	next := ""
+	if r.NextCursor != nil {
+		next = *r.NextCursor
+	}
+	return r.Data, next, err
 }

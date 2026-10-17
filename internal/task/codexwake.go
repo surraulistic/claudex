@@ -17,7 +17,13 @@ const (
 	ThreadQueued      = "принято в очередь треда, ход не начат"
 	ThreadTurnStarted = WokeUp + ": ход треда начат"
 	ThreadTurnDone    = WokeUp + ": ход треда завершён"
+	// ThreadTurnFailed — ход с событием оборвался: до ведущего не дошло, а
+	// повтор мог бы повторить сделанное, поэтому дожим его не трогает.
+	ThreadTurnFailed = NotDelivered + ": ход треда оборвался"
 )
+
+// CauseTurnFailed — ход с событием кончился failed или interrupted.
+const CauseTurnFailed = codex.HoldTurnFailed
 
 // ThreadClientID — постоянный идентификатор сообщения для пары
 // поручение+стадия. По нему повтор находит уже положенное.
@@ -32,16 +38,24 @@ type threadProgress struct {
 	thread   string
 	turn     string
 	clientID string
+	// seen — какие пары стадия+причина уже записаны: мерцание причины
+	// туда-обратно журнал не растит.
+	seen  map[string]bool
+	first time.Time
 }
 
 func (p threadProgress) accepted() bool { return rank(p.stage) >= rank(codex.StageAccepted) }
 
 func progressOf(recs []journal.Record, id, stage string) threadProgress {
-	var p threadProgress
+	p := threadProgress{seen: map[string]bool{}}
 	for _, r := range recs {
 		if r.Task != id || r.Event != journal.Notified || r.ThreadStage == "" ||
 			orElse(r.Stage, StageFinished) != orElse(stage, StageFinished) {
 			continue
+		}
+		p.seen[r.ThreadStage+"|"+r.Cause] = true
+		if p.first.IsZero() {
+			p.first = r.Time
 		}
 		if rank(r.ThreadStage) >= rank(p.stage) {
 			p.stage, p.hold = r.ThreadStage, r.Cause
@@ -63,7 +77,7 @@ func rank(stage string) int {
 		return 1
 	case codex.StageStarted:
 		return 2
-	case codex.StageCompleted:
+	case codex.StageCompleted, codex.StageTurnFailed:
 		return 3
 	}
 	return 0
@@ -75,6 +89,8 @@ func threadOutcome(stage string) string {
 		return ThreadTurnStarted
 	case codex.StageCompleted:
 		return ThreadTurnDone
+	case codex.StageTurnFailed:
+		return ThreadTurnFailed
 	case codex.StageNotQueued:
 		return ThreadNotQueued
 	}
@@ -89,11 +105,14 @@ func recordThread(j *journal.Journal, id, thread, stage, mode string, prev threa
 	if j == nil {
 		return
 	}
-	if rank(r.Stage) < rank(prev.stage) || (r.Stage == prev.stage && r.Hold == prev.hold) {
+	// Смена прав открытой сессии пишется всегда: это то, что человек должен
+	// увидеть.
+	if r.ProfileSet != codex.ProfileByUpdate && (rank(r.Stage) < rank(prev.stage) ||
+		(r.Stage == prev.stage && r.Hold == prev.hold) || prev.seen[r.Stage+"|"+r.Hold]) {
 		return
 	}
 	// Начатый и сразу завершённый ход — две стадии, и обе видны.
-	if r.Stage == codex.StageCompleted && rank(prev.stage) < rank(codex.StageStarted) {
+	if rank(r.Stage) == rank(codex.StageCompleted) && rank(prev.stage) < rank(codex.StageStarted) {
 		j.Append(journal.Record{Task: id, Event: journal.Notified, Target: thread,
 			TargetKind: KindThread, Stage: stage, Delivery: mode, Outcome: ThreadTurnStarted,
 			ThreadStage: codex.StageStarted, Transport: r.Transport, QueueID: r.QueueID, TurnID: r.TurnID,
@@ -103,11 +122,48 @@ func recordThread(j *journal.Journal, id, thread, stage, mode string, prev threa
 	if r.Stage == codex.StageCompleted && r.TurnStatus != "" {
 		reason = "статус хода: " + r.TurnStatus
 	}
+	if r.ProfileSet != "" {
+		reason = strings.TrimSpace(reason + " · " + profileNote(r))
+	}
 	j.Append(journal.Record{Task: id, Event: journal.Notified, Target: thread,
 		TargetKind: KindThread, Stage: stage, Delivery: mode, Outcome: threadOutcome(r.Stage),
 		Cause: r.Hold, Reason: reason,
 		ThreadStage: r.Stage, Transport: r.Transport, QueueID: r.QueueID, TurnID: r.TurnID,
-		ThreadClientID: r.ClientID})
+		ThreadClientID: r.ClientID, PermissionsSet: r.ProfileSet, PermissionsFrom: r.ProfileFrom})
+}
+
+func profileNote(r codex.WakeResult) string {
+	from := r.ProfileFrom
+	if from == "" {
+		from = "без именованного профиля"
+	}
+	switch r.ProfileSet {
+	case codex.ProfileByUpdate:
+		return "права треда переключены на " + codex.WakePermissionProfile + " (было: " + from + ")"
+	case codex.ProfileByUpdateUnconfirmed:
+		return "послан перевод прав треда на " + codex.WakePermissionProfile + " (было: " + from +
+			"), применение не подтверждено"
+	}
+	return "тред поднят с правами " + codex.WakePermissionProfile
+}
+
+// threadHints — что журнал знает об адресе в целом, а не об одной стадии:
+// клались ли туда сообщения `codex queue` и менял ли claudex права треда.
+func threadHints(recs []journal.Record, thread string) (cli []string, switched bool) {
+	seen := map[string]bool{}
+	for _, r := range recs {
+		if r.Target != thread || r.Event != journal.Notified {
+			continue
+		}
+		if r.PermissionsSet == codex.ProfileByUpdate || r.PermissionsSet == codex.ProfileByResume {
+			switched = true
+		}
+		if r.Transport == codex.TransportQueueOnly && r.ThreadStage == codex.StageAccepted && !seen[r.Task] {
+			seen[r.Task] = true
+			cli = append(cli, r.Task)
+		}
+	}
+	return cli, switched
 }
 
 // FollowedTurn — ход, чьё завершение замечено.
@@ -142,7 +198,7 @@ func FollowTurns(ctx context.Context, j *journal.Journal, max int) []FollowedTur
 				order = append(order, k)
 			}
 			open[k] = r
-		case codex.StageCompleted:
+		case codex.StageCompleted, codex.StageTurnFailed:
 			delete(open, k)
 		}
 	}
@@ -155,8 +211,9 @@ func FollowTurns(ctx context.Context, j *journal.Journal, max int) []FollowedTur
 		if time.Since(r.Time) > AbandonAfter {
 			continue
 		}
-		res, err := codex.Follow(ctx, r.Target, orElse(r.ThreadClientID, ThreadClientID(k.task, k.stage)), 5*time.Second)
-		if err != nil || res.Stage != codex.StageCompleted {
+		res, err := codex.Follow(ctx, r.Target, orElse(r.ThreadClientID, ThreadClientID(k.task, k.stage)),
+			r.Time, 5*time.Second)
+		if err != nil || rank(res.Stage) != rank(codex.StageCompleted) {
 			continue
 		}
 		recordThread(j, k.task, r.Target, k.stage, r.Delivery,
@@ -199,6 +256,8 @@ func stageWords(stage string) string {
 		return "turn started: ход треда начат"
 	case codex.StageCompleted:
 		return "turn completed: ход треда завершён"
+	case codex.StageTurnFailed:
+		return "turn failed: ход треда оборвался, событие могло остаться необработанным"
 	}
 	return stage
 }

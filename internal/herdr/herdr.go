@@ -6,6 +6,7 @@
 package herdr
 
 import (
+	"context"
 	"bufio"
 	"encoding/json"
 	"errors"
@@ -378,6 +379,30 @@ func (c *Client) Wait(target string, until []string, timeout time.Duration) (Age
 // Успешный ответ ещё не значит показ: herdr отвечает shown=false с причиной
 // (busy, rate_limited, no_foreground_client, disabled). Отказ busy наблюдался
 // преходящим — через десять секунд то же уведомление показывалось.
+// NotifyContext — Notify, но не дольше срока ctx.
+func (c *Client) NotifyContext(ctx context.Context, title, body string) (shown bool, reason string, err error) {
+	timeout := c.Timeout
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); left < timeout {
+			timeout = left
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return false, "", fmt.Errorf("уведомление не показано: %w", err)
+	}
+	if timeout <= 0 {
+		return false, "", fmt.Errorf("уведомление не показано: %w", context.DeadlineExceeded)
+	}
+	var out struct {
+		Shown  bool   `json:"shown"`
+		Reason string `json:"reason"`
+	}
+	err = c.call("notification.show", map[string]any{
+		"title": title, "body": body, "sound": "done",
+	}, &out, timeout)
+	return out.Shown, out.Reason, err
+}
+
 func (c *Client) Notify(title, body string) (shown bool, reason string, err error) {
 	var out struct {
 		Shown  bool   `json:"shown"`

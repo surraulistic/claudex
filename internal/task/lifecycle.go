@@ -129,6 +129,10 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
 				delivered = true
 			}
+			// Начатый ход, который потом оборвался, до ведущего не дошёл.
+			if r.Stage == StageReported && r.Cause == CauseTurnFailed {
+				delivered = false
+			}
 			if r.Stage == StageReported && r.Outcome == ThreadQueued {
 				queued = true
 			}
@@ -306,6 +310,10 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 			}
 			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
 				a.delivered = true
+			}
+			// Начатый ход, который потом оборвался, до ведущего не дошёл.
+			if r.Stage == StageReported && r.Cause == CauseTurnFailed {
+				a.delivered = false
 			}
 			if r.Stage == StageReported && r.Outcome == ThreadQueued {
 				a.queued = true

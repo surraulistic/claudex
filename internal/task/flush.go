@@ -34,6 +34,10 @@ const (
 	// flushDeadline — сколько ждать один разговор. Ждать закрытый незачем: он
 	// не откроется за эти секунды, а отчёт уже лежит в канале вытягивания.
 	flushDeadline = 3 * time.Second
+	// flushThreadDeadline — предел на одно пробуждение треда: это не
+	// ожидание, а цепочка вызовов app-server, и в три секунды она не
+	// укладывается.
+	flushThreadDeadline = 10 * time.Second
 )
 
 type FlushOptions struct {
@@ -99,7 +103,11 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 			// долбиться в него каждый тик — шум без пользы.
 			continue
 		}
+		if l.Cause == CauseTurnFailed {
+			continue
+		}
 		st := stateOf(recs, l.Task)
+		deadline := flushDeadline
 		switch st.kind {
 		case KindThread:
 			// Живость треда здесь не требуется: очередь app-server переживает
@@ -109,6 +117,7 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 			if st := codex.State(home, l.Target); st != codex.Live && st != codex.Known {
 				continue
 			}
+			deadline = flushThreadDeadline
 		case KindSession:
 			// Живость разговора — файл в реестре. Дожимать его можно тем же
 			// правом, что и тред: адрес есть сам разговор, промахнуться нельзя.
@@ -135,13 +144,13 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 				Event: &Event{Task: l.Task, Stage: l.Stage, Executor: st.pane,
 					State:  StateOf(recs, l.Task).State,
 					Reason: "отчёт был готов, но сразу не доставился (" + l.Reason + ")"},
-				Deadline: flushDeadline, Poll: 200 * time.Millisecond})
+				Deadline: deadline, Poll: 200 * time.Millisecond})
 
 		// Принятое в очередь, но не начатое — ещё не дошло: наблюдатель
 		// отложит повтор, а не сочтёт доставленным.
 		out = append(out, Flushed{
 			Task: l.Task, Stage: l.Stage, Target: l.Target,
-			Ok: d.OK && !d.Pending, Reason: d.Reason,
+			Ok: d.Reached(), Reason: d.Reason,
 		})
 	}
 	return out

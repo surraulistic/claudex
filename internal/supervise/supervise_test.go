@@ -5,6 +5,7 @@ import (
 
 	"context"
 	"github.com/surraulistic/claudex/internal/codex"
+	"github.com/surraulistic/claudex/internal/codex/codextest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -269,10 +270,21 @@ func codexHomeFor(t *testing.T, live string) *[]queued {
 	return &sent
 }
 
+// wakeableThread — тред загружен и ничей: пробуждение доходит до хода.
+func wakeableThread(t *testing.T, th string) *[]queued {
+	t.Helper()
+	codexHomeFor(t, th)
+	app := codextest.Start(t)
+	app.Add(th, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}})
+	var sent []queued
+	app.OnAdd = func(id, msg string) { sent = append(sent, queued{thread: id, message: msg}) }
+	return &sent
+}
+
 func TestSupervisorWakesForSilentWorkers(t *testing.T) {
 	// Главное, ради чего затевался хук: задача не вызвала done, а затеявший
 	// всё равно узнаёт.
-	sent := codexHomeFor(t, "01a0a268-ca14-7441-844b-8fcd24cd2e45")
+	sent := wakeableThread(t, "01a0a268-ca14-7441-844b-8fcd24cd2e45")
 	j := newJournal(t)
 	silentAssignment(t, j, "43bc6e11", "01a0a268-ca14-7441-844b-8fcd24cd2e45", 10*time.Minute)
 	var seen []task.FlushOptions
@@ -295,7 +307,7 @@ func TestSupervisorWakesForSilentWorkers(t *testing.T) {
 }
 
 func TestSilentWorkerIsNotWokenTwice(t *testing.T) {
-	sent := codexHomeFor(t, "01a0a268-ca14-7441-844b-8fcd24cd2e45")
+	sent := wakeableThread(t, "01a0a268-ca14-7441-844b-8fcd24cd2e45")
 	j := newJournal(t)
 	silentAssignment(t, j, "43bc6e11", "01a0a268-ca14-7441-844b-8fcd24cd2e45", 10*time.Minute)
 	var seen []task.FlushOptions

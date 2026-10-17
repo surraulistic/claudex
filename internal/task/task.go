@@ -339,7 +339,10 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 			FullReport: o.FullReport,
 			Event: &Event{Task: id, Stage: StageReported, Executor: pane,
 				State: stateOfOutcome(outcome), Reason: reason},
-			Deadline: o.Deadline, Poll: o.Poll})
+			Deadline: o.Deadline, Poll: o.Poll,
+			// done идёт внутри хода задачи: не начавшийся сразу ход дожмёт
+			// наблюдатель, а держать задачу повторами незачем.
+			QueueAttempts: 1, StartWait: 3 * time.Second})
 	res.Delivered = &d
 	return res, nil
 }
@@ -483,7 +486,8 @@ func (l Lost) Stale(now time.Time) bool {
 func LivePending(recs []journal.Record, now time.Time) []Lost {
 	var out []Lost
 	for _, l := range LostReports(recs) {
-		if !l.Stale(now) {
+		// Оборвавшийся ход не дожимается: повтор мог бы повторить сделанное.
+		if !l.Stale(now) && l.Cause != CauseTurnFailed {
 			out = append(out, l)
 		}
 	}
@@ -572,6 +576,9 @@ func stateOf(recs []journal.Record, id string) taskState {
 			if ReachedLeader(r.Outcome) {
 				st.delivered[orElse(r.Stage, StageFinished)] = true
 			}
+			if r.Cause == CauseTurnFailed {
+				st.delivered[orElse(r.Stage, StageFinished)] = false
+			}
 			if strings.HasPrefix(r.Outcome, ToldHuman) {
 				st.toldHuman[orElse(r.Stage, StageFinished)] = true
 			}
@@ -637,6 +644,10 @@ type Delivery struct {
 	TurnID      string `json:"turn_id,omitempty"`
 	Pending     bool   `json:"pending,omitempty"`
 }
+
+// Reached — дошло ли до ведущего. OK без Pending: принятое в очередь треда, но
+// не начатое, ещё не дошло.
+func (d Delivery) Reached() bool { return d.OK && !d.Pending }
 
 // Исходы доставки, как они пишутся в журнал. Признак «не доставлено» может
 // нести причину отказа herdr, поэтому сверяется по началу строки.
@@ -805,7 +816,7 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 
 	shared := sharedPane(j, target)
 
-	ctx, cancel := context.WithTimeout(ctx, o.Deadline)
+	wait, cancel := context.WithTimeout(ctx, o.Deadline)
 	defer cancel()
 	var last error
 	for {
@@ -821,7 +832,7 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			// Человеку — уведомлением herdr, и только им: превращать чужой
 			// отчёт в реплику неизвестного разговора нельзя ни при каких
 			// обстоятельствах.
-			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
 				text+"\n\n"+d.Reason)
 			record(j, id, target, KindPane, o.Stage, d)
 			return d
@@ -840,11 +851,11 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			}
 		}
 		select {
-		case <-ctx.Done():
+		case <-wait.Done():
 			d.Waited = time.Since(started)
 			d.Seconds = int(d.Waited.Seconds())
 			d.Reason = fmt.Sprintf("ведущий не освободился за %s: %v", o.Deadline, last)
-			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
 				text+"\n\nРазбудить "+target+" не удалось: "+last.Error())
 			record(j, id, target, KindPane, o.Stage, d)
 			return d
@@ -865,6 +876,8 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	started := time.Now()
 	d := Delivery{Target: thread}
 	home := codex.Home()
+	wctx, cancel := context.WithTimeout(ctx, o.Deadline)
+	defer cancel()
 
 	// Замок писателя пропадает на миг при перезапуске Codex, поэтому
 	// несколько взглядов подряд. Долго ждать закрытый тред незачем: он не
@@ -872,7 +885,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	state := codex.State(home, thread)
 	for i := 0; state != codex.Live && i < 2; i++ {
 		select {
-		case <-ctx.Done():
+		case <-wctx.Done():
 		case <-time.After(o.Poll):
 			state = codex.State(home, thread)
 			continue
@@ -885,7 +898,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		d.Seconds = int(d.Waited.Seconds())
 		d.Cause, d.Reason = v.cause, v.reason
 		if !o.HumanTold {
-			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
 				text+"\n\n"+d.Reason)
 		}
 		record(j, id, thread, KindThread, o.Stage, d)
@@ -893,15 +906,24 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}
 
 	queued, mode := payload(text, o, KindThread)
-	var prev threadProgress
+	prev := threadProgress{seen: map[string]bool{}}
+	var cli []string
+	var switched bool
 	if j != nil {
 		if recs, err := j.Read(); err == nil {
 			prev = progressOf(recs, id, o.Stage)
+			cli, switched = threadHints(recs, thread)
 		}
 	}
-	r, err := wakeThread(ctx, codex.WakeRequest{
+	since := started
+	if !prev.first.IsZero() && prev.first.Before(since) {
+		since = prev.first
+	}
+	r, err := wakeThread(wctx, codex.WakeRequest{
 		Thread: thread, ClientID: ThreadClientID(id, o.Stage), Task: id, Text: queued,
 		Accepted: prev.accepted(), SeenClientID: prev.clientID,
+		Since: since, QueuedByCLI: cli, KeepProfile: switched,
+		QueueOnlyText: queueOnlyText(id, mode, o),
 		// Замок писателя у выгруженного в демоне треда значит, что его
 		// держит другой процесс.
 		OpenElsewhere: func() bool { return codex.State(home, thread) == codex.Live },
@@ -909,6 +931,22 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}, o)
 	d.Waited = time.Since(started)
 	d.Seconds = int(d.Waited.Seconds())
+	if err == nil && r.Stage == codex.StageTurnFailed {
+		d.Mode = mode
+		d.ThreadStage, d.Transport, d.TurnID = r.Stage, r.Transport, r.TurnID
+		d.Cause, d.Reason = CauseTurnFailed, r.Reason
+		recordThread(j, id, thread, o.Stage, mode, prev, r)
+		if !o.HumanTold {
+			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" — ход треда оборвался",
+				d.Reason)
+		}
+		return d
+	}
+	if err == nil && r.Hold == codex.HoldProfileReverted && !prev.seen[r.Stage+"|"+r.Hold] {
+		// Без человека этот тред больше не разбудить: сказать ему об этом
+		// надо один раз, даже если про сам отчёт он уже знает.
+		tellHuman(ctx, c, "claudex: поручение "+id+" ждёт решения о правах треда", r.Reason)
+	}
 	if err == nil {
 		d.OK = true
 		d.Mode = mode
@@ -924,11 +962,24 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	d.Cause = CauseQueueFailed
 	d.Reason = fmt.Sprintf("очередь треда %s не приняла отчёт: %v", short(thread), err)
 	if !o.HumanTold {
-		d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+		d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
 			text+"\n\n"+d.Reason)
 	}
 	record(j, id, thread, KindThread, o.Stage, d)
 	return d
+}
+
+// queueOnlyText — что класть `codex queue`, когда app-server недоступен. Ход
+// с этим сообщением начнётся с правами того, кто откроет тред, поэтому отчёт
+// исполнителя туда не идёт: только событие или указатель на поручение.
+func queueOnlyText(id, mode string, o DeliverOptions) string {
+	if mode == DeliveryEvent {
+		return ""
+	}
+	if o.Event != nil {
+		return o.Event.Text()
+	}
+	return fmt.Sprintf("%s%s — отчёт готов. Прочитай сам: claudex task %s", codex.TextPrefix, id, id)
 }
 
 // mayQueue — можно ли класть отчёт в очередь этого треда.
@@ -946,9 +997,8 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 // идентификатора, пустая привязка, тред, о котором $CODEX_HOME не знает вовсе.
 //
 // Запрещено, пока не доказано, ровно как у панели. Разница в том, что
-// доказывать: у панели — что в ней всё ещё тот разговор, у треда — что он
-// вообще открыт. Закрытый тред принимает очередь молча и не читает её никогда,
-// поэтому «известен, но не жив» — это отказ, а не успех.
+// доказывать: у панели — что в ней всё ещё тот разговор, у треда — что
+// $CODEX_HOME его знает.
 func mayQueue(thread, state string) verdict {
 	switch {
 	case thread == "":
@@ -976,19 +1026,29 @@ func MayQueue(thread, state string) verdict { return mayQueue(thread, state) }
 //
 // Отказ herdr бывает преходящим (наблюдалось busy, через десять секунд то же
 // уведомление показывалось), поэтому несколько попыток. Долго ждать нельзя:
-// эта ветка выполняется в том числе внутри хода самой задачи.
-var humanRetryGap = 3 * time.Second
+// эта ветка выполняется в том числе внутри хода самой задачи — отсюда общий
+// предел humanBudget и отмена вызывающим.
+var (
+	humanRetryGap = 3 * time.Second
+	humanBudget   = 8 * time.Second
+)
 
-func tellHuman(c *herdr.Client, title, body string) (bool, string) {
+func tellHuman(ctx context.Context, c *herdr.Client, title, body string) (bool, string) {
 	if c == nil {
 		return false, "herdr недоступен"
 	}
+	ctx, cancel := context.WithTimeout(ctx, humanBudget)
+	defer cancel()
 	var reason string
 	for i := 0; i < 3; i++ {
 		if i > 0 {
-			time.Sleep(humanRetryGap)
+			select {
+			case <-ctx.Done():
+				return false, orElse(reason, "уведомление не показано: "+ctx.Err().Error())
+			case <-time.After(humanRetryGap):
+			}
 		}
-		shown, why, err := c.Notify(title, body)
+		shown, why, err := c.NotifyContext(ctx, title, body)
 		if shown {
 			return true, ""
 		}

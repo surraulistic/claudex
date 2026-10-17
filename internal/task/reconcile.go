@@ -276,8 +276,8 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 				State:  StateLost,
 				Reason: "закончила и не отчиталась; на экране: " + oneLineCut(text, EventChars)},
 			Deadline: 15 * time.Second, Poll: time.Second})
-	r.Delivered, r.Cause, r.Reason = d.OK, d.Cause, d.Reason
-	if d.OK && r.Cause == "" {
+	r.Delivered, r.Cause, r.Reason = d.Reached(), d.Cause, d.Reason
+	if d.Reached() && r.Cause == "" {
 		// Отчёта не появилось — появилось пробуждение. Называется честно.
 		r.Cause, r.Reason = CauseNoScreen, "затеявший разбужен наблюдением, отчёта задачи нет"
 	}

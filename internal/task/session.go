@@ -39,12 +39,15 @@ func deliverSession(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	started := time.Now()
 	d := Delivery{Target: target}
 
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, o.Deadline)
+	defer cancel()
 	fail := func(cause, reason string) Delivery {
 		d.Waited = time.Since(started)
 		d.Seconds = int(d.Waited.Seconds())
 		d.Cause, d.Reason = cause, reason
 		if !o.HumanTold {
-			d.Fallback, d.Refused = tellHuman(c, "claudex: поручение "+id+" завершено",
+			d.Fallback, d.Refused = tellHuman(parent, c, "claudex: поручение "+id+" завершено",
 				text+"\n\n"+d.Reason)
 		}
 		record(j, id, target, KindSession, o.Stage, d)

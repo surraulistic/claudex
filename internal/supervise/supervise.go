@@ -158,7 +158,8 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	// а недоставленный отчёт хотя бы существует. Прежде эта проверка стояла
 	// после раннего выхода «дожимать нечего» и при пустом списке не
 	// выполнялась вовсе — поймано тестом.
-	t.Silent = s.wakeSilent(ctx, recs, now)
+	silent := map[string]bool{}
+	t.Silent = s.wakeSilent(ctx, recs, now, silent)
 
 	// Считаем то, что дожимаем. Брошенное видно в `claudex undelivered`, а
 	// здесь оно создавало бы впечатление очереди, которая не двигается.
@@ -170,6 +171,11 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	skip := map[string]bool{}
 	for _, l := range lost {
 		if until, ok := s.next[l.Task]; ok && now.Before(until) {
+			skip[l.Task] = true
+			t.Deferred++
+		} else if silent[l.Task] {
+			// Пробуждение за молчуна повторяет wakeSilent со своим событием и
+			// своей отсрочкой; второй попытки за тот же тик не нужно.
 			skip[l.Task] = true
 			t.Deferred++
 		}
@@ -231,15 +237,25 @@ func (s *Supervisor) archiveOnce(now time.Time) {
 	}
 }
 
-// wakeSilent будит затеявшего за тех, кто закончил ход и замолчал.
+// wakeSilent будит затеявшего за тех, кто закончил ход и замолчал, и отмечает
+// в owned всех молчунов: их повторы ведёт он, а не дожим.
 //
 // Событие говорит ровно то, что видно: работа кончилась, вот последняя
 // реплика. Исхода оно не называет — исход даёт только сама задача.
-func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now time.Time) []string {
+//
+// Разбуженным считается только то, что дошло: событие, принятое в очередь
+// треда без начатого хода, откладывается, как любой отказ. Предел MaxPerTick
+// — на попытки, а не на удачи.
+func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now time.Time,
+	owned map[string]bool) []string {
+	ctx, cancel := context.WithTimeout(ctx, s.o.Budget)
+	defer cancel()
 	var out []string
+	tried := 0
 	for _, sl := range task.SilentTasks(recs, now, s.o.SilenceGrace) {
-		if len(out) >= s.o.MaxPerTick || ctx.Err() != nil {
-			break
+		owned[sl.Task] = true
+		if tried >= s.o.MaxPerTick || ctx.Err() != nil {
+			continue
 		}
 		if until, ok := s.next["тишина:"+sl.Task]; ok && now.Before(until) {
 			continue
@@ -249,19 +265,31 @@ func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now 
 		if w.Target == "" {
 			continue
 		}
+		tried++
 		d := task.Deliver(ctx, s.o.Client, s.o.Journal, sl.Task, w.Target,
 			"", task.DeliverOptions{
 				Stage: task.StageReported, Kind: w.Kind, WantSession: w.Session,
 				HumanTold: true, Event: task.SilenceEvent(sl, st.Executor),
-				Deadline: 5 * time.Second, Poll: time.Second,
+				Deadline: silenceDeadline(w.Kind), Poll: time.Second,
 			})
-		if d.OK {
+		if d.Reached() {
 			out = append(out, sl.Task)
+			delete(s.next, "тишина:"+sl.Task)
+			delete(s.wait, "тишина:"+sl.Task)
 			continue
 		}
 		s.defer_("тишина:"+sl.Task, now)
 	}
 	return out
+}
+
+// silenceDeadline — сколько ждать одно пробуждение: панель ждём недолго, а
+// пробуждение треда — цепочка вызовов app-server.
+func silenceDeadline(kind string) time.Duration {
+	if kind == task.KindThread {
+		return 10 * time.Second
+	}
+	return 5 * time.Second
 }
 
 // defer_ откладывает адрес вдвое дальше прошлого раза, но не дальше предела.

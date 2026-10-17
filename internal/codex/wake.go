@@ -25,6 +25,11 @@ const (
 	StageAccepted  = "queue_accepted"
 	StageStarted   = "turn_started"
 	StageCompleted = "turn_completed"
+	// StageTurnFailed — ход с нашим сообщением кончился failed или
+	// interrupted: сообщение в истории треда, но обработано ли — неизвестно.
+	// Повтор с новым сообщением мог бы повторить уже сделанное, поэтому
+	// дальше решает человек.
+	StageTurnFailed = "turn_failed"
 )
 
 const (
@@ -57,6 +62,10 @@ const (
 	// или небезопасный sandbox. Если своё сообщение уже лежало в очереди
 	// выгруженного треда, ход с ним мог начаться.
 	HoldWrongProfile = "permission_profile_mismatch"
+	// claudex уже переключал права этого треда, а сейчас они другие: их
+	// вернули. Повторно менять права живой сессии не наше решение.
+	HoldProfileReverted = "permission_profile_reverted"
+	HoldTurnFailed      = "turn_failed"
 )
 
 // ClientIDPrefix метит сообщения claudex в очереди: по нему отличаем свои от
@@ -82,6 +91,18 @@ type WakeRequest struct {
 	// снова нельзя ни при каких обстоятельствах, даже если в очереди его нет:
 	// значит, его забрали или удалили.
 	Accepted bool
+	// Since — не позже первой попытки положить сообщение: ход с ним не может
+	// начаться раньше, и история треда глубже не листается.
+	Since time.Time
+	// QueuedByCLI — поручения, чьи записи `codex queue` журнал клал в этот
+	// тред. Только они без своего clientUserMessageId не считаются чужими.
+	QueuedByCLI []string
+	// QueueOnlyText — что класть через `codex queue`, когда app-server
+	// недоступен: ход тогда начнётся с правами того, кто откроет тред.
+	QueueOnlyText string
+	// KeepProfile — права этого треда claudex уже менял: другой профиль
+	// сейчас значит, что их вернули, и повторно не переключаем.
+	KeepProfile bool
 	// OpenElsewhere — держит ли тред писатель вне демона. Вызывается только
 	// для выгруженного треда.
 	OpenElsewhere func() bool
@@ -102,10 +123,28 @@ type WakeResult struct {
 	TurnStatus string
 	Hold       string
 	Reason     string
+	// ProfileSet — как claudex перевёл тред на claudex-work: resume
+	// выгруженного или thread/settings/update загруженного; пусто — не менял.
+	ProfileSet string
+	// ProfileFrom — профиль до thread/settings/update; пусто — без профиля.
+	ProfileFrom string
 }
 
+const (
+	ProfileByResume = "resume"
+	ProfileByUpdate = "settings_update"
+	// ProfileByUpdateUnconfirmed — update послан, но применение не
+	// подтверждено: права могли смениться, а могли и нет.
+	ProfileByUpdateUnconfirmed = "settings_update_unconfirmed"
+)
+
 // Started — дошло ли до хода.
-func (r WakeResult) Started() bool { return r.Stage == StageStarted || r.Stage == StageCompleted }
+func (r WakeResult) Started() bool {
+	return r.Stage == StageStarted || r.Stage == StageCompleted || r.Stage == StageTurnFailed
+}
+
+// Processed — ход с нашим сообщением завершился штатно.
+func (r WakeResult) Processed() bool { return r.Stage == StageCompleted }
 
 // Wake кладёт событие в очередь треда только после того, как тред переведён на
 // claudex-work, и запускает ход. Отказ по правилам — Hold с причиной, а не
@@ -120,8 +159,9 @@ func Wake(ctx context.Context, req WakeRequest) (WakeResult, error) {
 	return wake(ctx, s, req)
 }
 
-// Follow смотрит, чем кончился ход, ничего не кладя и не запуская.
-func Follow(ctx context.Context, thread, clientID string, each time.Duration) (WakeResult, error) {
+// Follow смотрит, чем кончился ход, ничего не кладя и не запуская. since —
+// не позже начала хода.
+func Follow(ctx context.Context, thread, clientID string, since time.Time, each time.Duration) (WakeResult, error) {
 	if each <= 0 {
 		each = 10 * time.Second
 	}
@@ -132,7 +172,7 @@ func Follow(ctx context.Context, thread, clientID string, each time.Duration) (W
 	defer s.Close()
 	c, cancel := context.WithTimeout(ctx, each)
 	defer cancel()
-	t, id, err := findTurn(c, s, thread, clientID)
+	t, id, err := findTurn(c, s, thread, since, clientID)
 	if err != nil || id == "" {
 		return WakeResult{Transport: TransportAppServer}, err
 	}
@@ -168,9 +208,13 @@ func queueOnly(ctx context.Context, req WakeRequest, dialErr error) (WakeResult,
 		r.Reason = "app-server недоступен; сообщение уже в очереди, ход не запускался: " + dialErr.Error()
 		return r, nil
 	}
+	text := req.Text
+	if req.QueueOnlyText != "" {
+		text = req.QueueOnlyText
+	}
 	c, cancel := context.WithTimeout(ctx, req.Each)
 	defer cancel()
-	if err := Queue(c, req.Thread, req.Text); err != nil {
+	if err := Queue(c, req.Thread, text); err != nil {
 		return WakeResult{Transport: TransportQueueOnly},
 			fmt.Errorf("app-server недоступен (%v), и codex queue не принял: %w", dialErr, err)
 	}
@@ -197,7 +241,7 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 
 	// Ход с нашим сообщением уже был — повтор ничего не кладёт.
 	c, cancel = call()
-	t, id, err := findTurn(c, s, req.Thread, req.ClientID, req.SeenClientID)
+	t, id, err := findTurn(c, s, req.Thread, req.Since, req.ClientID, req.SeenClientID)
 	cancel()
 	if err != nil {
 		return res, err
@@ -233,7 +277,7 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 	loaded := th.Status.Type == StatusIdle
 	// И resume, и загруженный тред вычитывают всю очередь, поэтому чужие
 	// сообщения в ней — запрет: запускать их не нам.
-	if foreign(queue) {
+	if foreign(queue, req) {
 		return held(res, HoldForeignQueue,
 			"в очереди треда есть сообщения не от claudex: тред запустил бы и их"), nil
 	}
@@ -247,9 +291,16 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 	if why := profileUnusable(profiles, err); why != "" {
 		return held(res, HoldNoProfile, why+": права треда не меняем"), nil
 	}
+	text := req.Text
 	if loaded {
-		if r, ok := confirmLoaded(ctx, s, req, res); !ok {
+		r, ok := confirmLoaded(ctx, s, req, res)
+		if !ok {
 			return r, nil
+		}
+		res = r
+		if res.ProfileSet == ProfileByUpdate {
+			text += fmt.Sprintf("\n\n(claudex перевёл права этого треда на %s; было: %s)",
+				WakePermissionProfile, orNone(res.ProfileFrom))
 		}
 	} else {
 		c, cancel = call()
@@ -263,6 +314,7 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 				"после resume профиль %q, sandbox %q вместо %s: ничего не кладём и не запускаем",
 				rs.Profile, rs.Sandbox, WakePermissionProfile)), nil
 		}
+		res.ProfileSet = ProfileByResume
 	}
 
 	if !queued {
@@ -281,7 +333,7 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 			return held(res, hold, why), nil
 		}
 		c, cancel = call()
-		mine, err = s.QueueAdd(c, req.Thread, req.ClientID, req.Text)
+		mine, err = s.QueueAdd(c, req.Thread, req.ClientID, text)
 		cancel()
 		if err != nil {
 			return res, err
@@ -319,11 +371,9 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 	if err != nil {
 		return held(res, HoldNotStarted, "thread/queue/start не прошёл: "+err.Error()), nil
 	}
-	res.Stage, res.TurnID, res.TurnStatus, res.Hold, res.Reason = StageStarted, turn.ID, turn.Status, "", ""
-	if turn.Status != "" && turn.Status != TurnInProgress {
-		res.Stage = StageCompleted
-	}
-	return res, nil
+	r := turnResult(turn, res.ClientID)
+	r.QueueID, r.ProfileSet, r.ProfileFrom = res.QueueID, res.ProfileSet, res.ProfileFrom
+	return r, nil
 }
 
 // confirmLoaded переводит загруженный тред на claudex-work. thread/settings/updated
@@ -344,9 +394,16 @@ func confirmLoaded(ctx context.Context, s AppServer, req WakeRequest, res WakeRe
 		}
 		return res, true
 	}
+	if req.KeepProfile {
+		return held(res, HoldProfileReverted, fmt.Sprintf(
+			"claudex уже переводил этот тред на %s, а сейчас у него %s: права вернули, "+
+				"и менять их открытой сессии повторно не будем — разбудить тред может человек",
+			WakePermissionProfile, orNone(rs.Profile))), false
+	}
 	c, cancel = context.WithTimeout(ctx, req.Each)
 	st, err := s.SetPermissions(c, req.Thread, WakePermissionProfile)
 	cancel()
+	res.ProfileSet, res.ProfileFrom = ProfileByUpdateUnconfirmed, rs.Profile
 	if err != nil {
 		return held(res, HoldLoadedProfile,
 			"профиль загруженного треда не подтверждён ("+err.Error()+"): ничего не кладём и не запускаем"), false
@@ -356,12 +413,20 @@ func confirmLoaded(ctx context.Context, s AppServer, req WakeRequest, res WakeRe
 			"после thread/settings/update профиль %q, sandbox %q вместо %s: ничего не кладём и не запускаем",
 			st.Profile, st.Sandbox, WakePermissionProfile)), false
 	}
+	res.ProfileSet = ProfileByUpdate
 	return res, true
 }
 
 // safeSandbox — только песочницы самого Codex: externalSandbox, как и
 // dangerFullAccess, даёт полный доступ к диску.
 func safeSandbox(t string) bool { return t == "readOnly" || t == "workspaceWrite" }
+
+func orNone(profile string) string {
+	if profile == "" {
+		return "без именованного профиля"
+	}
+	return profile
+}
 
 // statusHold — почему тред с таким состоянием нельзя трогать. Пусто — можно.
 func statusHold(st ThreadStatus) (string, string) {
@@ -385,11 +450,11 @@ func pollStart(ctx context.Context, s AppServer, req WakeRequest, res WakeResult
 	deadline := time.Now().Add(req.StartWait)
 	for {
 		c, cancel := context.WithTimeout(ctx, req.Each)
-		t, id, err := findTurn(c, s, req.Thread, req.ClientID, res.ClientID)
+		t, id, err := findTurn(c, s, req.Thread, req.Since, req.ClientID, res.ClientID)
 		cancel()
 		if err == nil && id != "" {
 			r := turnResult(t, id)
-			r.QueueID = res.QueueID
+			r.QueueID, r.ProfileSet, r.ProfileFrom = res.QueueID, res.ProfileSet, res.ProfileFrom
 			return r, true
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
@@ -403,30 +468,59 @@ func pollStart(ctx context.Context, s AppServer, req WakeRequest, res WakeResult
 	}
 }
 
-// findTurn ищет среди последних ходов тот, что начат одним из clientIDs, и
-// говорит, каким именно.
-func findTurn(ctx context.Context, s AppServer, thread string, clientIDs ...string) (Turn, string, error) {
-	turns, err := s.RecentTurns(ctx, thread, 10)
-	if err != nil {
-		return Turn{}, "", err
+const (
+	turnPage     = 50
+	turnMaxPages = 40
+	// turnSlack — запас на расхождение часов claudex и демона.
+	turnSlack = 5 * time.Minute
+)
+
+// findTurn ищет ход, начатый одним из clientIDs, листая историю от новых к
+// старым до since. Не долистали — ошибка, а не «хода нет»: иначе принятое
+// сообщение выглядело бы пропавшим.
+func findTurn(ctx context.Context, s AppServer, thread string, since time.Time, clientIDs ...string) (Turn, string, error) {
+	floor := int64(0)
+	if !since.IsZero() {
+		floor = since.Add(-turnSlack).Unix()
 	}
-	for _, t := range turns {
-		for _, id := range t.ClientIDs() {
-			for _, want := range clientIDs {
-				if want != "" && id == want {
-					return t, id, nil
+	cursor := ""
+	for page := 0; page < turnMaxPages; page++ {
+		turns, next, err := s.TurnsPage(ctx, thread, cursor, turnPage)
+		if err != nil {
+			return Turn{}, "", err
+		}
+		for _, t := range turns {
+			for _, id := range t.ClientIDs() {
+				for _, want := range clientIDs {
+					if want != "" && id == want {
+						return t, id, nil
+					}
 				}
 			}
 		}
+		if next == "" || len(turns) == 0 {
+			return Turn{}, "", nil
+		}
+		if last := turns[len(turns)-1].StartedAt; floor > 0 && last > 0 && last < floor {
+			return Turn{}, "", nil
+		}
+		cursor = next
 	}
-	return Turn{}, "", nil
+	return Turn{}, "", fmt.Errorf("история треда %s длиннее %d ходов: свой ход не найден и не исключён",
+		thread, turnPage*turnMaxPages)
 }
 
 func turnResult(t Turn, clientID string) WakeResult {
 	r := WakeResult{Stage: StageStarted, Transport: TransportAppServer, TurnID: t.ID,
 		TurnStatus: t.Status, ClientID: clientID}
-	if t.Status != "" && t.Status != TurnInProgress {
+	switch t.Status {
+	case "", TurnInProgress:
+	case TurnCompleted:
 		r.Stage = StageCompleted
+	default:
+		r.Stage, r.Hold = StageTurnFailed, HoldTurnFailed
+		r.Reason = fmt.Sprintf("ход %s кончился статусом %q: событие могло остаться необработанным; "+
+			"повторно не кладём, чтобы не повторить сделанное", t.ID, t.Status)
 	}
 	return r
 }
@@ -458,16 +552,32 @@ func own(q []QueuedItem, req WakeRequest) (QueuedItem, bool) {
 		}
 	}
 	for _, it := range q {
-		if req.Task != "" && strings.HasPrefix(it.Text(), TextPrefix+req.Task) {
+		if req.Task != "" && !strings.HasPrefix(it.ClientID, ClientIDPrefix) &&
+			strings.HasPrefix(it.Text(), TextPrefix+req.Task) {
 			return it, true
 		}
 	}
 	return QueuedItem{}, false
 }
 
-func foreign(q []QueuedItem) bool {
+// foreign — есть ли в очереди не наше. Запись без своего clientId признаётся
+// нашей, только если журнал сам клал её `codex queue` по этому поручению:
+// одного начала текста мало, так может начать сообщение и человек.
+func foreign(q []QueuedItem, req WakeRequest) bool {
 	for _, it := range q {
-		if !strings.HasPrefix(it.ClientID, ClientIDPrefix) && !strings.HasPrefix(it.Text(), TextPrefix) {
+		if strings.HasPrefix(it.ClientID, ClientIDPrefix) {
+			continue
+		}
+		if !queuedByCLI(it, req) {
+			return true
+		}
+	}
+	return false
+}
+
+func queuedByCLI(it QueuedItem, req WakeRequest) bool {
+	for _, task := range append([]string{req.Task}, req.QueuedByCLI...) {
+		if task != "" && strings.HasPrefix(it.Text(), TextPrefix+task) {
 			return true
 		}
 	}

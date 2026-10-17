@@ -31,6 +31,9 @@ const (
 	// Завершением поручения сама по себе не является: ход кончается и посреди
 	// работы. Решает наблюдатель — по тому, сколько исполнитель молчит.
 	Idle = "idle"
+	// Continued — продолжение уже идущего поручения: текст, отправленный тому
+	// же исполнителю, и исход отправки.
+	Continued = "continued"
 	// Refused — поручение не было отправлено вовсе. Пишется вместе с текстом:
 	// иначе он исчезает совсем, а вызывающему доложено об успехе.
 	Refused = "refused"
@@ -102,6 +105,10 @@ type Record struct {
 	// ThreadClientID — clientUserMessageId записи в очереди; по нему
 	// опознаётся ход.
 	ThreadClientID string `json:"thread_client_id,omitempty"`
+	// PermissionsSet — claudex сменил permission profile треда (resume или
+	// settings_update); PermissionsFrom — прежний, если сервер его назвал.
+	PermissionsSet  string `json:"permissions_set,omitempty"`
+	PermissionsFrom string `json:"permissions_from,omitempty"`
 }
 
 type Journal struct {

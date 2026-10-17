@@ -489,14 +489,14 @@ func TestFollowSeesCompletion(t *testing.T) {
 	if r.Stage != codex.StageStarted || r.TurnStatus != codex.TurnInProgress {
 		t.Fatalf("начат, не завершён: %+v", r)
 	}
-	r, _ = codex.Follow(context.Background(), th, req().ClientID, time.Second)
+	r, _ = codex.Follow(context.Background(), th, req().ClientID, time.Time{}, time.Second)
 	if r.Stage != codex.StageStarted {
 		t.Fatalf("пока идёт — started, получено %+v", r)
 	}
 	f.Finish(th, codex.TurnFailed)
-	r, _ = codex.Follow(context.Background(), th, req().ClientID, time.Second)
-	if r.Stage != codex.StageCompleted || r.TurnStatus != codex.TurnFailed {
-		t.Fatalf("завершение видно со статусом, получено %+v", r)
+	r, _ = codex.Follow(context.Background(), th, req().ClientID, time.Time{}, time.Second)
+	if r.Stage != codex.StageTurnFailed || r.TurnStatus != codex.TurnFailed || r.Processed() {
+		t.Fatalf("оборванный ход виден со статусом и обработкой не считается, получено %+v", r)
 	}
 }
 

@@ -28,6 +28,8 @@ type Thread struct {
 	NoDrainOnResume bool
 	// KeepRunning — начатый ход не кончается сам.
 	KeepRunning bool
+	// EndStatus — чем кончается начатый ход; пусто — completed.
+	EndStatus string
 	// FailResume — resume отвечает ошибкой.
 	FailResume bool
 	// Profile — липкий permission profile треда; пусто — Full Access.
@@ -63,6 +65,8 @@ type Thread struct {
 	SettingsSandbox string
 	// BusyAfterSettings — к концу update тред занят чужим ходом.
 	BusyAfterSettings bool
+	// DropAfterSettings — update применён, а соединение рвётся до ответа.
+	DropAfterSettings bool
 }
 
 // NoProfile для SettingsProfile: профиль снят.
@@ -77,6 +81,7 @@ type Fake struct {
 	Profiles []codex.PermissionProfile
 	// FailProfiles — permissionProfile/list отвечает ошибкой.
 	FailProfiles bool
+	stall map[string]bool
 
 	mu      sync.Mutex
 	threads map[string]*Thread
@@ -85,6 +90,7 @@ type Fake struct {
 	updates []map[string]any
 	// ProfileCwds — с каким cwd спрашивали permissionProfile/list.
 	ProfileCwds []string
+	turnPages   int
 	seq         int
 	ln          net.Listener
 }
@@ -232,7 +238,13 @@ func (f *Fake) conn(c net.Conn) {
 		if json.Unmarshal(p, &m) != nil || m.ID == nil {
 			continue
 		}
+		if f.stalled(m.Method) {
+			continue
+		}
 		res, rpcErr, n := f.handle(sess, m.Method, m.Params)
+		if n.drop {
+			return
+		}
 		// Уведомление и встречный запрос перед ответом — как у живого демона.
 		sess.send(map[string]any{"method": "thread/status/changed", "params": map[string]any{}})
 		if n.v != nil && n.first {
@@ -273,6 +285,7 @@ type notice struct {
 	v     any
 	first bool
 	delay time.Duration
+	drop  bool
 }
 
 func send(c net.Conn, v any) {
@@ -400,11 +413,28 @@ func (f *Fake) reply(sess *session, method string, raw json.RawMessage) (any, st
 		}
 		return nil, "queued submission not found"
 	case "thread/turns/list":
+		// Как у сервера: новые первыми, страница не больше limit, cursor —
+		// непрозрачное продолжение после последнего отданного хода.
+		var q struct {
+			Limit  int    `json:"limit"`
+			Cursor string `json:"cursor"`
+		}
+		json.Unmarshal(raw, &q)
+		f.turnPages++
+		from := len(th.Turns) - 1
+		if q.Cursor != "" {
+			fmt.Sscanf(q.Cursor, "c%d", &from)
+		}
 		out := make([]codex.Turn, 0, len(th.Turns))
-		for i := len(th.Turns) - 1; i >= 0; i-- {
+		i := from
+		for ; i >= 0 && (q.Limit <= 0 || len(out) < q.Limit); i-- {
 			out = append(out, th.Turns[i])
 		}
-		return map[string]any{"data": out}, ""
+		var next any
+		if i >= 0 {
+			next = fmt.Sprintf("c%d", i)
+		}
+		return map[string]any{"data": out, "nextCursor": next}, ""
 	}
 	return nil, "unknown method " + method
 }
@@ -453,6 +483,9 @@ func (f *Fake) settingsUpdate(sess *session, raw json.RawMessage) (any, string, 
 	if th.BusyAfterSettings {
 		th.Status = codex.ThreadStatus{Type: codex.StatusActive, ActiveFlags: []string{}}
 	}
+	if th.DropAfterSettings {
+		return nil, "", notice{drop: true}
+	}
 	changed := th.Profile != was || th.SettingsSandbox != ""
 	if th.NoSettingsNotice || !changed || !sess.subbed[id] {
 		return map[string]any{}, "", notice{}
@@ -475,6 +508,42 @@ func (f *Fake) settingsUpdate(sess *session, raw json.RawMessage) (any, string, 
 		"params": map[string]any{"threadId": to, "threadSettings": settings}}}
 }
 
+// TurnPages — сколько страниц thread/turns/list отдано.
+func (f *Fake) TurnPages() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.turnPages
+}
+
+func (f *Fake) stalled(method string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stall[method]
+}
+
+// StallOn — на эти методы сервер больше не отвечает вовсе, как зависший демон.
+func (f *Fake) StallOn(methods ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stall = map[string]bool{}
+	for _, m := range methods {
+		f.stall[m] = true
+	}
+}
+
+// AddTurns дописывает треду чужие завершённые ходы, как будто человек
+// продолжал разговор.
+func (f *Fake) AddTurns(id string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	th := f.threads[id]
+	for i := 0; i < n; i++ {
+		f.seq++
+		th.Turns = append(th.Turns, codex.Turn{ID: fmt.Sprintf("t%d", f.seq), Status: codex.TurnCompleted,
+			StartedAt: time.Now().Unix(), Items: []codex.TurnItem{{Type: "userMessage", ClientID: fmt.Sprintf("human-%d", f.seq)}}})
+	}
+}
+
 func (f *Fake) allowed(id string) bool {
 	for _, p := range f.Profiles {
 		if p.ID == id && p.Allowed {
@@ -494,8 +563,11 @@ func (f *Fake) drain(th *Thread) {
 
 func (f *Fake) start(th *Thread, it codex.QueuedItem) codex.Turn {
 	f.seq++
-	t := codex.Turn{ID: fmt.Sprintf("t%d", f.seq), Status: codex.TurnCompleted,
+	t := codex.Turn{ID: fmt.Sprintf("t%d", f.seq), Status: codex.TurnCompleted, StartedAt: time.Now().Unix(),
 		Items: []codex.TurnItem{{Type: "userMessage", ClientID: it.ClientID}}}
+	if th.EndStatus != "" {
+		t.Status = th.EndStatus
+	}
 	if th.KeepRunning {
 		t.Status = codex.TurnInProgress
 		th.Status = codex.ThreadStatus{Type: codex.StatusActive, ActiveFlags: []string{}}
