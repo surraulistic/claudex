@@ -477,6 +477,16 @@ func cmdDoctor(o opts) error {
 		}
 	}
 
+	b := buildInfo()
+	drift := 0
+	for _, c := range skillCopies() {
+		if !c.Matches {
+			drift++
+		}
+	}
+	add("сборка", b.Source == "build" && drift == 0,
+		"ревизия %s (%s), skill не той ревизии: %d — подробнее: claudex version", short12(b.Revision), b.Source, drift)
+
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".claudex")); err != nil {
 		add("каталог состояния", false, "~/.claudex: %v", err)
 	}

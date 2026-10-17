@@ -36,6 +36,7 @@ import (
 )
 
 type opts struct {
+	version       bool
 	db            string
 	limit         int
 	chars         int
@@ -100,7 +101,10 @@ func main() {
 // значением `--compact`.
 func registerFlags(fs *flag.FlagSet, o *opts) {
 	fs.SetOutput(os.Stderr)
-	fs.Usage = usage
+	// Ошибка флага не печатает справку целиком: это четырнадцать килобайт в
+	// контекст агента за одну опечатку.
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, "справка: claudex help") }
+	fs.BoolVar(&o.version, "version", false, "из какой ревизии собран бинарь")
 	fs.StringVar(&o.db, "db-path", defaultIndex(), "индекс claudex")
 	fs.IntVar(&o.limit, "limit", 8, "записей истории или результатов поиска")
 	fs.IntVar(&o.chars, "chars", 400, "символов на запись")
@@ -205,6 +209,9 @@ func run() error {
 	o.waitFree = wf
 
 	args := rest
+	if o.version {
+		return cmdVersion(o)
+	}
 	if len(args) == 0 {
 		if o.headless {
 			return exitcode.Errorf(exitcode.BadCall, `нужно: claudex --headless "<задача>"`)
@@ -228,7 +235,7 @@ func run() error {
 var boolFlags = map[string]bool{
 	"no-wait": true, "full": true, "raw": true, "pretty": true, "all": true,
 	"detach": true, "force": true, "help": true, "h": true,
-	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true, "full-report": true, "dry-run": true, "json": true,
+	"session": true, "compact": true, "panel": true, "wait": true, "headless": true, "new": true, "once": true, "reconcile": true, "full-report": true, "dry-run": true, "json": true, "version": true,
 }
 
 func splitArgs(argv []string) (flags, rest []string) {
@@ -301,6 +308,8 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
                                          свежесть (task digest — прежнее имя)
   claudex doctor                         цела ли обвязка: herdr, разговоры,
                                          адрес возврата, журнал, наблюдатель
+  claudex version                        из какой ревизии собран бинарь и той
+                                         ли ревизии skill у агентов
   claudex supervisor                     фоновый наблюдатель: сам досылает
                                          отчёты, которые до вас не дошли.
                                          Не языковая модель и ничего не
@@ -388,6 +397,7 @@ const helpText = `claudex — сводка по сессиям Claude Code (cass
                      Журнал — единственная память об этой работе, поэтому по
                      умолчанию выключено
   --pretty           JSON с отступами
+  --version          то же, что claudex version
 
 Прежние имена работают и останутся: delegate = send, tasks = task list,
 digest = task log. Новых вызовов на них лучше не заводить.

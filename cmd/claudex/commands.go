@@ -43,6 +43,7 @@ func commands() []command {
 		{Name: "doctor", Run: func(o opts, _ []string) error { return cmdDoctor(o) }},
 		{Name: "supervisor", Run: cmdSupervisor},
 		{Name: "done", Run: cmdDone},
+		{Name: "version", Run: func(o opts, _ []string) error { return cmdVersion(o) }},
 
 		{Name: "sessions", Run: func(o opts, _ []string) error { return cmdSessions(o, false) }},
 		{Name: "brief", Run: func(o opts, _ []string) error { return cmdSessions(o, true) }},
