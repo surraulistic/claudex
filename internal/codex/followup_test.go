@@ -107,9 +107,28 @@ func TestTextAloneDoesNotMakeAQueueItemOurs(t *testing.T) {
 	f2 := codextest.Start(t)
 	f2.Add(th, &codextest.Thread{Queue: []codex.QueuedItem{human}})
 	q := req()
-	q.QueuedByCLI = []string{"bbbb2222"}
+	q.QueuedByCLI = []codex.CLIQueued{{Task: "bbbb2222", Hash: codex.TextHash("claudex: поручение bbbb2222 — другое")}}
+	if r, err := codex.Wake(context.Background(), q); err != nil || r.Hold != codex.HoldForeignQueue {
+		t.Fatalf("начало текста совпало, отпечаток нет — чужое: %+v %v", r, err)
+	}
+	q.QueuedByCLI = []codex.CLIQueued{{Task: "bbbb2222", Hash: codex.TextHash(human.Text())}}
 	if r, err := codex.Wake(context.Background(), q); err != nil || r.Hold == codex.HoldForeignQueue {
 		t.Fatalf("запись, которую журнал клал codex queue, — своя: %+v %v", r, err)
+	}
+}
+
+func TestUnconfirmedSwitchAfterRevertIsNotRepeated(t *testing.T) {
+	f := codextest.Start(t)
+	f.Add(th, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}, Watched: true,
+		Profile: ":workspace", NoSettingsNotice: true})
+	if r, _ := codex.Wake(context.Background(), req()); r.ProfileSet != codex.ProfileByUpdateUnconfirmed {
+		t.Fatalf("update без подтверждения — возможная смена прав: %+v", r)
+	}
+	f2 := codextest.Start(t)
+	f2.Add(th, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}, Watched: true,
+		Profile: ":workspace", FailSettings: true})
+	if r, _ := codex.Wake(context.Background(), req()); r.ProfileSet != "" {
+		t.Fatalf("явный отказ сервера — права не менялись: %+v", r)
 	}
 }
 

@@ -109,6 +109,9 @@ type Record struct {
 	// settings_update); PermissionsFrom — прежний, если сервер его назвал.
 	PermissionsSet  string `json:"permissions_set,omitempty"`
 	PermissionsFrom string `json:"permissions_from,omitempty"`
+	// QueuedTextHash — sha256 текста, положенного `codex queue`: своего
+	// clientUserMessageId у такой записи нет, и узнаётся она по нему.
+	QueuedTextHash string `json:"queued_text_hash,omitempty"`
 }
 
 type Journal struct {

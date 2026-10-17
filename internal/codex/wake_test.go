@@ -444,6 +444,7 @@ func TestItemQueuedByCLIIsRecognisedByText(t *testing.T) {
 		Input: []codex.UserInput{{Type: "text", Text: codex.TextPrefix + "aaaa1111 — готово"}}}}})
 	q := req()
 	q.Accepted = true
+	q.QueuedByCLI = []codex.CLIQueued{{Task: "aaaa1111", Hash: codex.TextHash(codex.TextPrefix + "aaaa1111 — готово")}}
 	r, _ := codex.Wake(context.Background(), q)
 	if f.Count("thread/queue/add") != 0 || r.QueueID != "cli1" {
 		t.Fatalf("запись от codex queue узнаётся и не дублируется: %+v %v", r, f.Calls())

@@ -95,16 +95,24 @@ func cmdSend(o opts, tgt, prompt string) (err error) {
 // Отдельного поручения не заводит: это продолжение уже начатого, и его
 // жизненный цикл остаётся за исходным поручением. Завести второе значило бы
 // разорвать отчётность надвое.
-func sendContinuation(o opts, id string, recs []journal.Record, prompt string) error {
+func sendContinuation(o opts, id string, recs []journal.Record, prompt string) (err error) {
+	var sendErr error
 	who, ok := task.ExecutorOfTask(recs, id)
 	if !ok {
 		return exitcode.Errorf(exitcode.NotFound,
 			"у поручения %s не записан разговор-исполнитель: продолжать некому", id)
 	}
+	j := journal.Open(defaultJournal())
+	attempt, err := task.BeginContinuation(j, id, who, prompt)
+	if err != nil {
+		return exitcode.Errorf(exitcode.Fail, "продолжение не записано в журнал, не отправляю: %v", err)
+	}
+	defer func() { task.EndContinuation(j, id, attempt, sendErr) }()
 	if sessionID, cwd, headlessWorker := task.HeadlessExecutor(recs, id); headlessWorker {
 		session, err := headless.Resume(context.Background(), cwd, id, sessionID,
 			task.WithReport(prompt, "", id))
 		if err != nil {
+			sendErr = err
 			return exitcode.Wrap(exitcode.Fail, err)
 		}
 		if session.SessionID != sessionID {
@@ -116,7 +124,7 @@ func sendContinuation(o opts, id string, recs []journal.Record, prompt string) e
 			}
 			binding.Time = time.Time{}
 			binding.PaneSession = session.SessionID
-			if err := journal.Open(defaultJournal()).Append(binding); err != nil {
+			if err := j.Append(binding); err != nil {
 				return exitcode.Wrap(exitcode.Fail, err)
 			}
 		}
@@ -126,12 +134,14 @@ func sendContinuation(o opts, id string, recs []journal.Record, prompt string) e
 	}
 	s, err := claudesess.Lookup(claudesess.Home(), who)
 	if err != nil {
+		sendErr = fmt.Errorf("исполнитель больше не жив: %w", err)
 		return exitcode.Errorf(exitcode.NotFound,
 			"исполнитель поручения %s больше не жив: %v", id, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), claudesess.SendTimeout)
 	defer cancel()
 	if err := claudesess.Send(ctx, s, prompt); err != nil {
+		sendErr = err
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
 	fmt.Printf("продолжение поручения %s ушло исполнителю %s (%s)\n",
@@ -364,6 +374,7 @@ func cmdTaskOne(o opts, id string) error {
 		fmt.Printf("  %s\n", l.Reason)
 	}
 	printThreadTimeline(recs, id)
+	printContinuations(recs, id)
 	switch l.State {
 	case task.StateQueued:
 		fmt.Println("  событие в очереди треда Codex, ход с ним не начат — это ещё не обработка")

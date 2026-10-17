@@ -129,7 +129,8 @@ func recordThread(j *journal.Journal, id, thread, stage, mode string, prev threa
 		TargetKind: KindThread, Stage: stage, Delivery: mode, Outcome: threadOutcome(r.Stage),
 		Cause: r.Hold, Reason: reason,
 		ThreadStage: r.Stage, Transport: r.Transport, QueueID: r.QueueID, TurnID: r.TurnID,
-		ThreadClientID: r.ClientID, PermissionsSet: r.ProfileSet, PermissionsFrom: r.ProfileFrom})
+		ThreadClientID: r.ClientID, PermissionsSet: r.ProfileSet, PermissionsFrom: r.ProfileFrom,
+		QueuedTextHash: r.TextHash})
 }
 
 func profileNote(r codex.WakeResult) string {
@@ -149,18 +150,19 @@ func profileNote(r codex.WakeResult) string {
 
 // threadHints — что журнал знает об адресе в целом, а не об одной стадии:
 // клались ли туда сообщения `codex queue` и менял ли claudex права треда.
-func threadHints(recs []journal.Record, thread string) (cli []string, switched bool) {
-	seen := map[string]bool{}
+//
+// Неподтверждённая смена считается сменой: права могли и смениться, а
+// переключать их второй раз после того, как человек вернул свои, нельзя.
+func threadHints(recs []journal.Record, thread string) (cli []codex.CLIQueued, switched bool) {
 	for _, r := range recs {
 		if r.Target != thread || r.Event != journal.Notified {
 			continue
 		}
-		if r.PermissionsSet == codex.ProfileByUpdate || r.PermissionsSet == codex.ProfileByResume {
+		if r.PermissionsSet != "" {
 			switched = true
 		}
-		if r.Transport == codex.TransportQueueOnly && r.ThreadStage == codex.StageAccepted && !seen[r.Task] {
-			seen[r.Task] = true
-			cli = append(cli, r.Task)
+		if r.Transport == codex.TransportQueueOnly && r.ThreadStage == codex.StageAccepted {
+			cli = append(cli, codex.CLIQueued{Task: r.Task, Hash: r.QueuedTextHash})
 		}
 	}
 	return cli, switched

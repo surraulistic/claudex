@@ -455,12 +455,26 @@ type Refused struct {
 // RefusedTasks — неотправленные поручения из журнала.
 func RefusedTasks(recs []journal.Record) []Refused {
 	var out []Refused
+	failed := map[string]bool{}
+	var order []string
 	for _, r := range recs {
+		if r.Event == journal.Continued && r.Outcome == ContinuationFailed && !failed[r.Task] {
+			failed[r.Task] = true
+			order = append(order, r.Task)
+		}
 		if r.Event != journal.Refused {
 			continue
 		}
 		out = append(out, Refused{Task: r.Task, Pane: r.Pane,
 			At: r.Time.Format(time.RFC3339), Reason: r.Reason, Prompt: r.Prompt})
+	}
+	for _, id := range order {
+		for _, c := range Continuations(recs, id) {
+			if c.Outcome == ContinuationFailed {
+				out = append(out, Refused{Task: id, At: c.At.Format(time.RFC3339),
+					Reason: "продолжение не отправлено: " + c.Reason, Prompt: c.Prompt})
+			}
+		}
 	}
 	return out
 }
@@ -907,7 +921,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 
 	queued, mode := payload(text, o, KindThread)
 	prev := threadProgress{seen: map[string]bool{}}
-	var cli []string
+	var cli []codex.CLIQueued
 	var switched bool
 	if j != nil {
 		if recs, err := j.Read(); err == nil {

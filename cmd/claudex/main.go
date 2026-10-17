@@ -1969,6 +1969,28 @@ func printThreadTimeline(recs []journal.Record, id string) {
 	}
 }
 
+func printContinuations(recs []journal.Record, id string) {
+	cs := task.Continuations(recs, id)
+	if len(cs) == 0 {
+		return
+	}
+	fmt.Printf("  продолжения (%d):\n", len(cs))
+	for _, c := range cs {
+		fmt.Printf("    %s  %s — %s\n", c.At.Format("02.01 15:04:05"),
+			orDash(c.Outcome), cutTo(oneLine(c.Prompt), 60))
+		if c.Reason != "" {
+			fmt.Printf("      %s\n", c.Reason)
+		}
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "исход не записан"
+	}
+	return s
+}
+
 func cmdTaskDigest(o opts, id string) error {
 	prompt, from, to, pane := taskWindow(id)
 	if from.IsZero() {
@@ -1980,6 +2002,7 @@ func cmdTaskDigest(o opts, id string) error {
 	}
 	if recs, err := journal.Open(defaultJournal()).Read(); err == nil {
 		printThreadTimeline(recs, id)
+		printContinuations(recs, id)
 	}
 	fmt.Print(d.Text("(дайджест по запросу)"))
 	return nil

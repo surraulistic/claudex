@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -94,9 +96,9 @@ type WakeRequest struct {
 	// Since — не позже первой попытки положить сообщение: ход с ним не может
 	// начаться раньше, и история треда глубже не листается.
 	Since time.Time
-	// QueuedByCLI — поручения, чьи записи `codex queue` журнал клал в этот
-	// тред. Только они без своего clientUserMessageId не считаются чужими.
-	QueuedByCLI []string
+	// QueuedByCLI — что журнал клал в этот тред через `codex queue`. Только
+	// эти записи без своего clientUserMessageId не считаются чужими.
+	QueuedByCLI []CLIQueued
 	// QueueOnlyText — что класть через `codex queue`, когда app-server
 	// недоступен: ход тогда начнётся с правами того, кто откроет тред.
 	QueueOnlyText string
@@ -128,6 +130,23 @@ type WakeResult struct {
 	ProfileSet string
 	// ProfileFrom — профиль до thread/settings/update; пусто — без профиля.
 	ProfileFrom string
+	// TextHash — TextHash положенного `codex queue`: по нему запись потом
+	// узнаётся точно.
+	TextHash string
+}
+
+// CLIQueued — запись, положенная `codex queue` по поручению Task. Hash пуст
+// у записей прежних сборок: тогда остаётся сверка по началу текста.
+type CLIQueued struct {
+	Task string
+	Hash string
+}
+
+// TextHash — отпечаток текста записи очереди. Пробелы по краям не в счёт:
+// как `codex queue` хранит текст, вживую не сверялось.
+func TextHash(text string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
+	return hex.EncodeToString(sum[:])
 }
 
 const (
@@ -219,6 +238,7 @@ func queueOnly(ctx context.Context, req WakeRequest, dialErr error) (WakeResult,
 			fmt.Errorf("app-server недоступен (%v), и codex queue не принял: %w", dialErr, err)
 	}
 	r.Reason = "принято codex queue; app-server недоступен, ход не запускался: " + dialErr.Error()
+	r.TextHash = TextHash(text)
 	return r, nil
 }
 
@@ -403,7 +423,11 @@ func confirmLoaded(ctx context.Context, s AppServer, req WakeRequest, res WakeRe
 	c, cancel = context.WithTimeout(ctx, req.Each)
 	st, err := s.SetPermissions(c, req.Thread, WakePermissionProfile)
 	cancel()
-	res.ProfileSet, res.ProfileFrom = ProfileByUpdateUnconfirmed, rs.Profile
+	// Явный отказ сервера — права не менялись; обрыв или тишина — могли.
+	var refused *RPCError
+	if !errors.As(err, &refused) {
+		res.ProfileSet, res.ProfileFrom = ProfileByUpdateUnconfirmed, rs.Profile
+	}
 	if err != nil {
 		return held(res, HoldLoadedProfile,
 			"профиль загруженного треда не подтверждён ("+err.Error()+"): ничего не кладём и не запускаем"), false
@@ -553,7 +577,7 @@ func own(q []QueuedItem, req WakeRequest) (QueuedItem, bool) {
 	}
 	for _, it := range q {
 		if req.Task != "" && !strings.HasPrefix(it.ClientID, ClientIDPrefix) &&
-			strings.HasPrefix(it.Text(), TextPrefix+req.Task) {
+			strings.HasPrefix(it.Text(), TextPrefix+req.Task) && queuedByCLI(it, req) {
 			return it, true
 		}
 	}
@@ -576,8 +600,15 @@ func foreign(q []QueuedItem, req WakeRequest) bool {
 }
 
 func queuedByCLI(it QueuedItem, req WakeRequest) bool {
-	for _, task := range append([]string{req.Task}, req.QueuedByCLI...) {
-		if task != "" && strings.HasPrefix(it.Text(), TextPrefix+task) {
+	text := it.Text()
+	hash := TextHash(text)
+	for _, q := range req.QueuedByCLI {
+		switch {
+		case q.Hash != "":
+			if q.Hash == hash {
+				return true
+			}
+		case q.Task != "" && strings.HasPrefix(text, TextPrefix+q.Task):
 			return true
 		}
 	}
