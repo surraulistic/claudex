@@ -6,8 +6,8 @@
 package herdr
 
 import (
-	"context"
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"

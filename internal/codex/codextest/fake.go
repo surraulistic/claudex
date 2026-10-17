@@ -81,7 +81,7 @@ type Fake struct {
 	Profiles []codex.PermissionProfile
 	// FailProfiles — permissionProfile/list отвечает ошибкой.
 	FailProfiles bool
-	stall map[string]bool
+	stall        map[string]bool
 
 	mu      sync.Mutex
 	threads map[string]*Thread
