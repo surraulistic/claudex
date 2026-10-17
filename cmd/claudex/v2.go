@@ -374,6 +374,11 @@ func cmdTaskOne(o opts, id string) error {
 	case task.StateQueued:
 		fmt.Println("  событие в очереди треда Codex, ход с ним не начат — это ещё не обработка")
 	case task.StateUndelivered:
+		if turnFailed(recs, id) {
+			fmt.Println("  ход треда с событием оборвался: повторно не кладём, чтобы не повторить сделанное —" +
+				" напишите в тред сами")
+			break
+		}
 		fmt.Println("  отчёт цел, но затеявшего не достиг: claudex flush")
 	case task.StateSent:
 		fmt.Println("  отчёта ещё не было: claudex task log " + id)
@@ -455,6 +460,22 @@ func cmdDoctor(o opts) error {
 		add("журнал", true, "%d записей, ожидающих поручений %d", len(recs), len(task.Open(recs)))
 		lost := task.LostReports(recs)
 		live := task.LivePending(recs, time.Now())
+		var failedTurns int
+		for _, l := range lost {
+			if l.Cause == task.CauseTurnFailed {
+				failedTurns++
+			}
+		}
+		if failedTurns > 0 {
+			add("ход треда оборвался", false,
+				"%d — событие могло остаться необработанным, повторно не кладём: claudex undelivered", failedTurns)
+		}
+		lost = lost[:0:0]
+		for _, l := range task.LostReports(recs) {
+			if l.Cause != task.CauseTurnFailed {
+				lost = append(lost, l)
+			}
+		}
 		switch {
 		case len(live) > 0:
 			add("недоставленные отчёты", false, "%d — досылает наблюдатель", len(live))
@@ -485,7 +506,7 @@ func cmdDoctor(o opts) error {
 		}
 	}
 	add("сборка", b.Source == "build" && drift == 0,
-		"ревизия %s (%s), skill не той ревизии: %d — подробнее: claudex version", short12(b.Revision), b.Source, drift)
+		"ревизия %s (%s), skill расходится с бинарём: %d — подробнее: claudex version", short12(b.Revision), b.Source, drift)
 
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".claudex")); err != nil {
 		add("каталог состояния", false, "~/.claudex: %v", err)
@@ -600,4 +621,13 @@ func continueOrStart(recs []journal.Record, session string, forceNew bool) (stri
 	default:
 		return "", &task.TooManyOpen{Who: session, Open: open}
 	}
+}
+
+func turnFailed(recs []journal.Record, id string) bool {
+	for _, l := range task.LostReports(recs) {
+		if l.Task == id && l.Cause == task.CauseTurnFailed {
+			return true
+		}
+	}
+	return false
 }

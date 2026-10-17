@@ -1911,7 +1911,7 @@ func cmdUndelivered(o opts) error {
 	}
 	lost := task.LostReports(recs)
 	if ref := task.RefusedTasks(recs); len(ref) > 0 {
-		fmt.Printf("Не отправлено вовсе (%d) — текст цел, панель была занята:\n", len(ref))
+		fmt.Printf("Не отправлено вовсе (%d) — текст цел:\n", len(ref))
 		for _, r := range ref {
 			fmt.Printf("  %s %-10s %s\n", r.At[11:19], r.Pane, cutTo(oneLine(r.Reason), 52))
 			if o.all {

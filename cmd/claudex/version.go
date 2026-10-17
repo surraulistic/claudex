@@ -126,7 +126,7 @@ func cmdVersion(o opts) error {
 	}
 	fmt.Printf("claudex ревизия %s%s, %s\n", rev, dirty, b.Go)
 	fmt.Printf("  бинарь: %s\n", b.Path)
-	if b.DiffSHA256 != "" {
+	if b.Modified && b.DiffSHA256 != "" {
 		fmt.Printf("  правки: sha256 %s\n", b.DiffSHA256[:16])
 	}
 	switch {
