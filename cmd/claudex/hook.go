@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -64,12 +67,19 @@ func cmdHook(o opts, args []string) error {
 // hookStop молчалив по устройству: он выполняется внутри чужого хода, и любая
 // его строка попадёт человеку на экран.
 func hookStop(o opts) error {
-	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, hookStdinLimit+1))
 	if err != nil || len(raw) == 0 {
 		return nil
 	}
+	if len(raw) > hookStdinLimit {
+		hookLog("hook stop: stdin больше %d байт, отметка не записана", hookStdinLimit)
+		return nil
+	}
 	var p stopPayload
-	if json.Unmarshal(raw, &p) != nil || p.SessionID == "" {
+	if err := json.Unmarshal(raw, &p); err != nil || p.SessionID == "" {
+		if err != nil {
+			hookLog("hook stop: stdin не разобран: %v", err)
+		}
 		return nil
 	}
 	for _, b := range p.Background {
@@ -80,6 +90,12 @@ func hookStop(o opts) error {
 	}
 
 	j := journal.Open(defaultJournal())
+	// Хук идёт на каждый ход любой сессии, а поручение есть у немногих:
+	// сессия, которой в журнале нет вовсе, отметки не получит, и разбирать
+	// его целиком незачем.
+	if strings.TrimSpace(os.Getenv("CLAUDEX_TASK_ID")) == "" && !journalMentions(j.Path, p.SessionID) {
+		return nil
+	}
 	recs, err := j.Read()
 	if err != nil {
 		return nil
@@ -100,6 +116,31 @@ func hookStop(o opts) error {
 		Reason: strings.TrimSpace(p.Last),
 	})
 	return nil
+}
+
+// hookStdinLimit — больше Claude Code не присылает; больше — значит, что-то
+// не то, и это пишется в hook.log, а не теряется молча.
+const hookStdinLimit = 32 << 20
+
+// hookLog пишет в ~/.claudex/hook.log: на экран хуку писать нельзя.
+func hookLog(format string, a ...any) {
+	f, err := os.OpenFile(filepath.Join(filepath.Dir(defaultJournal()), "hook.log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s "+format+"\n", append([]any{time.Now().Format(time.RFC3339)}, a...)...)
+}
+
+// journalMentions — встречается ли строка в журнале. Ошибка чтения — «да»:
+// пусть решает полный разбор.
+func journalMentions(path, s string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return bytes.Contains(b, []byte(s))
 }
 
 // bindHeadlessSession updates the worker binding when Claude resumes a
