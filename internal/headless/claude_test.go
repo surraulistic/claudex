@@ -70,3 +70,24 @@ printf 'backgrounded · d00df00d · claudex-abc12345\n'
 		}
 	}
 }
+
+func TestOversizedPromptIsRefusedBeforeLaunch(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "launched")
+	fake := filepath.Join(root, "claude")
+	os.WriteFile(fake, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755)
+	t.Setenv("PATH", root)
+	big := strings.Repeat("я", MaxPromptBytes)
+	for _, call := range []func() error{
+		func() error { _, err := Start(context.Background(), root, "abc12345", "", big); return err },
+		func() error { _, err := Resume(context.Background(), root, "abc12345", "s", big); return err },
+	} {
+		err := call()
+		if err == nil || !strings.Contains(err.Error(), "файл") {
+			t.Fatalf("отказ с понятной причиной, получено %v", err)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("Claude Code не запускался")
+	}
+}

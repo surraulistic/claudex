@@ -52,6 +52,9 @@ func Start(ctx context.Context, cwd, taskID, _sessionID, prompt string) (Session
 		return Session{}, fmt.Errorf("рабочий каталог %q — не папка", abs)
 	}
 
+	if err := fitsArgv(prompt); err != nil {
+		return Session{}, err
+	}
 	bin, err := exec.LookPath("claude")
 	if err != nil {
 		return Session{}, fmt.Errorf("Claude Code не найден в PATH: %w", err)
@@ -79,6 +82,9 @@ func Start(ctx context.Context, cwd, taskID, _sessionID, prompt string) (Session
 
 // Resume continues a tracked background session with another instruction.
 func Resume(ctx context.Context, cwd, taskID, sessionID, prompt string) (Session, error) {
+	if err := fitsArgv(prompt); err != nil {
+		return Session{}, err
+	}
 	bin, err := exec.LookPath("claude")
 	if err != nil {
 		return Session{}, fmt.Errorf("Claude Code не найден в PATH: %w", err)
@@ -154,4 +160,17 @@ func withTaskEnv(env []string, taskID string) []string {
 		}
 	}
 	return append(out, key+taskID)
+}
+
+// MaxPromptBytes — сколько текста отдаётся `claude` аргументом. Другого пути
+// для --bg нет, а предел аргументов ОС (ARG_MAX, 1 МиБ на macOS) общий с
+// окружением.
+const MaxPromptBytes = 256 << 10
+
+func fitsArgv(prompt string) error {
+	if len(prompt) > MaxPromptBytes {
+		return fmt.Errorf("текст поручения %d КиБ — больше %d КиБ, которые можно передать Claude Code "+
+			"аргументом: положите его в файл и поручите прочитать файл", len(prompt)>>10, MaxPromptBytes>>10)
+	}
+	return nil
 }
