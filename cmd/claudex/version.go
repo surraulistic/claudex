@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,7 +47,8 @@ type SkillCopy struct {
 }
 
 func buildInfo() Build {
-	b := Build{Version: "(неизвестно)", Skill: sha(claudex.Skill)}
+	b := Build{Version: "(неизвестно)"}
+	b.Skill, _ = claudex.SkillHash(claudex.SkillFS())
 	b.Path, _ = os.Executable()
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -76,11 +75,6 @@ func buildInfo() Build {
 	return b
 }
 
-func sha(b []byte) string {
-	s := sha256.Sum256(b)
-	return hex.EncodeToString(s[:])
-}
-
 // skillCopies — установленные skill claudex у агентов.
 func skillCopies() []SkillCopy {
 	var dirs []string
@@ -90,7 +84,7 @@ func skillCopies() []SkillCopy {
 	if h, err := os.UserHomeDir(); err == nil {
 		dirs = append(dirs, filepath.Join(h, ".claude", "skills", "claudex"))
 	}
-	want := sha(claudex.Skill)
+	want, _ := claudex.SkillHash(claudex.SkillFS())
 	var out []SkillCopy
 	for _, d := range dirs {
 		if _, err := os.Lstat(d); err != nil {
@@ -100,16 +94,20 @@ func skillCopies() []SkillCopy {
 		if r, err := filepath.EvalSymlinks(d); err == nil && r != d {
 			c.Resolved = r
 		}
-		b, err := os.ReadFile(filepath.Join(d, "SKILL.md"))
+		src := d
+		if c.Resolved != "" {
+			src = c.Resolved
+		}
+		h, err := claudex.SkillHash(os.DirFS(src))
 		if err != nil {
-			c.Note = "SKILL.md не прочитан: " + err.Error()
+			c.Note = "skill не прочитан: " + err.Error()
 			out = append(out, c)
 			continue
 		}
-		c.SHA256 = sha(b)
-		c.Matches = c.SHA256 == want
+		c.SHA256 = h
+		c.Matches = h == want
 		if !c.Matches {
-			c.Note = "SKILL.md не той ревизии, из которой собран бинарь"
+			c.Note = "skill не той ревизии, из которой собран бинарь"
 		}
 		out = append(out, c)
 	}

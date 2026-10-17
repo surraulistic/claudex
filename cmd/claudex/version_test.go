@@ -31,11 +31,15 @@ func TestSkillOfAnotherRevisionIsReported(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	same := filepath.Join(home, ".codex", "skills", "claudex")
-	os.MkdirAll(same, 0o755)
-	os.WriteFile(filepath.Join(same, "SKILL.md"), claudex.Skill, 0o644)
+	if err := os.CopyFS(same, claudex.SkillFS()); err != nil {
+		t.Fatal(err)
+	}
 	other := filepath.Join(home, ".claude", "skills", "claudex")
-	os.MkdirAll(other, 0o755)
-	os.WriteFile(filepath.Join(other, "SKILL.md"), []byte("прежний skill"), 0o644)
+	if err := os.CopyFS(other, claudex.SkillFS()); err != nil {
+		t.Fatal(err)
+	}
+	// SKILL.md тот же, а справочник отстал: дрейф и это.
+	os.WriteFile(filepath.Join(other, "references", "working.md"), []byte("прежний текст"), 0o644)
 
 	got := skillCopies()
 	if len(got) != 2 || !got[0].Matches || got[1].Matches || got[1].Note == "" {
