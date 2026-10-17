@@ -16,11 +16,11 @@ func TestOwnTurnIsFoundBehindManyLaterTurns(t *testing.T) {
 	if r, err := codex.Wake(context.Background(), req()); err != nil || r.Stage != codex.StageCompleted {
 		t.Fatalf("ход начат и завершён: %+v %v", r, err)
 	}
-	f.AddTurns(th, 25)
+	f.AddTurns(th, 120)
 
 	r, err := codex.Follow(context.Background(), th, req().ClientID, time.Time{}, time.Second)
 	if err != nil || r.Stage != codex.StageCompleted || r.TurnID == "" {
-		t.Fatalf("свой ход виден и за 25 чужими: %+v %v", r, err)
+		t.Fatalf("свой ход виден и за 120 чужими, на третьей странице: %+v %v", r, err)
 	}
 	q := req()
 	q.Accepted = true

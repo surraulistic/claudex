@@ -103,9 +103,6 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 			// долбиться в него каждый тик — шум без пользы.
 			continue
 		}
-		if l.Cause == CauseTurnFailed {
-			continue
-		}
 		st := stateOf(recs, l.Task)
 		deadline := flushDeadline
 		switch st.kind {
