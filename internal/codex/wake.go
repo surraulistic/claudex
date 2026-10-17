@@ -155,6 +155,10 @@ const (
 	// ProfileByUpdateUnconfirmed — update послан, но применение не
 	// подтверждено: права могли смениться, а могли и нет.
 	ProfileByUpdateUnconfirmed = "settings_update_unconfirmed"
+	// ProfileByResumeLoaded — resume загруженного треда назвал claudex-work.
+	// Ничейный тред сервер перезагружает с переопределением, так что права
+	// могли смениться; прежние он не называет.
+	ProfileByResumeLoaded = "resume_loaded"
 )
 
 // Started — дошло ли до хода.
@@ -412,6 +416,7 @@ func confirmLoaded(ctx context.Context, s AppServer, req WakeRequest, res WakeRe
 			return held(res, HoldWrongProfile, fmt.Sprintf(
 				"профиль %s, но sandbox %q: ничего не кладём и не запускаем", WakePermissionProfile, rs.Sandbox)), false
 		}
+		res.ProfileSet = ProfileByResumeLoaded
 		return res, true
 	}
 	if req.KeepProfile {

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -24,7 +26,7 @@ func pendingThreadReport(t *testing.T) *int32 {
 	codexHome := t.TempDir()
 	os.WriteFile(filepath.Join(codexHome, "session_index.jsonl"), []byte(`{"id":"`+pendingThread+`"}`+"\n"), 0o644)
 	t.Setenv("CODEX_HOME", codexHome)
-	dir, _ := os.MkdirTemp("", "cx")
+	dir, _ := os.MkdirTemp("/tmp", "cx")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	ln, err := net.Listen("unix", filepath.Join(dir, "s.sock"))
 	if err != nil {
@@ -79,5 +81,39 @@ func TestInlineUpkeepWithoutSupervisorIsBounded(t *testing.T) {
 	}
 	if atomic.LoadInt32(dials) == 0 {
 		t.Fatal("без наблюдателя попутный дожим всё-таки пробует")
+	}
+}
+
+// D11: файл состояния называет живой чужой процесс, а замок свободен —
+// наблюдателя нет, и попутный дожим всё-таки идёт.
+func TestInlineUpkeepDoesNotTrustAStalePidFile(t *testing.T) {
+	dials := pendingThreadReport(t)
+	other := exec.Command("sleep", "30")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { other.Process.Kill(); other.Wait() })
+	b, _ := json.Marshal(supervise.Status{PID: other.Process.Pid})
+	os.MkdirAll(filepath.Dir(supervise.StatusPath()), 0o755)
+	os.WriteFile(supervise.StatusPath(), b, 0o644)
+	inlineUpkeep(opts{})
+	if atomic.LoadInt32(dials) == 0 {
+		t.Fatal("pid из файла без замка — не наблюдатель")
+	}
+}
+
+// D8: сортировка вывода не переставляет общий кэш журнала.
+func TestTasksOutputDoesNotReorderTheCachedJournal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	j := journal.Open(defaultJournal())
+	now := time.Now()
+	j.Append(journal.Record{Task: "bbbb0002", Event: journal.Started, Time: now})
+	j.Append(journal.Record{Task: "aaaa0001", Event: journal.Started, Time: now.Add(-time.Hour)})
+	before, _ := j.Read()
+	order := before[0].Task + before[1].Task
+	cmdTasks(opts{all: true}, nil)
+	after, _ := j.Read()
+	if after[0].Task+after[1].Task != order {
+		t.Fatalf("порядок записей в кэше прежний: %s → %s", order, after[0].Task+after[1].Task)
 	}
 }

@@ -16,8 +16,19 @@ import (
 const workerSession = "81fad209-733a-4b55-b5f2-6a8b9cc14eed"
 
 // isolatedWorker — HOME, реестр Claude и сокет исполнителя только во
-// временных каталогах. listening=false — запись реестра есть, а слушать некому.
+// временных каталогах. listening=false — сокет есть, а слушать некому.
 func isolatedWorker(t *testing.T, listening bool) *journal.Journal {
+	t.Helper()
+	j := isolatedSession(t, listening)
+	if err := j.Append(journal.Record{Task: "465a77fc", Event: journal.Started,
+		PaneSession: workerSession, Prompt: "исходное поручение"}); err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+// isolatedSession — то же без заведённого поручения.
+func isolatedSession(t *testing.T, listening bool) *journal.Journal {
 	t.Helper()
 	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
 		"CLAUDE_CODE_MESSAGING_TOKEN", "HERDR_PANE_ID", "CODEX_THREAD_ID"} {
@@ -26,7 +37,7 @@ func isolatedWorker(t *testing.T, listening bool) *journal.Journal {
 	t.Setenv("HOME", t.TempDir())
 	cfg := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
-	dir, err := os.MkdirTemp("", "cs")
+	dir, err := os.MkdirTemp("/tmp", "cs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,8 +60,14 @@ func isolatedWorker(t *testing.T, listening bool) *journal.Journal {
 				c.Close()
 			}
 		}()
-	} else if err := os.WriteFile(sock, nil, 0o600); err != nil {
-		t.Fatal(err)
+	} else {
+		// Сокет на месте, а слушать некому: так выглядит упавший разговор.
+		l, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.(*net.UnixListener).SetUnlinkOnClose(false)
+		l.Close()
 	}
 	rec, _ := json.Marshal(map[string]any{"pid": 1, "sessionId": workerSession, "cwd": "/tmp",
 		"kind": "interactive", "name": "worker", "status": "idle", "messagingSocketPath": sock,
@@ -59,12 +76,7 @@ func isolatedWorker(t *testing.T, listening bool) *journal.Journal {
 	if err := os.WriteFile(filepath.Join(cfg, "sessions", "1.json"), rec, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	j := journal.Open(defaultJournal())
-	if err := j.Append(journal.Record{Task: "465a77fc", Event: journal.Started,
-		PaneSession: workerSession, Prompt: "исходное поручение"}); err != nil {
-		t.Fatal(err)
-	}
-	return j
+	return journal.Open(defaultJournal())
 }
 
 func TestFailedContinuationKeepsItsText(t *testing.T) {

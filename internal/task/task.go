@@ -376,6 +376,9 @@ type Lost struct {
 	Stage  string `json:"stage"`
 	Target string `json:"target"`
 	At     string `json:"at"`
+	// Since — первая неудача с последнего успеха: по ней считается давность,
+	// иначе каждая новая попытка откладывала бы отказ от попыток навсегда.
+	Since  string `json:"since,omitempty"`
 	Cause  string `json:"cause,omitempty"`
 	Reason string `json:"reason"`
 	Report string `json:"report,omitempty"`
@@ -462,7 +465,7 @@ func RefusedTasks(recs []journal.Record) []Refused {
 			failed[r.Task] = true
 			order = append(order, r.Task)
 		}
-		if r.Event != journal.Refused {
+		if r.Event != journal.Refused && r.Event != journal.LaunchFailed {
 			continue
 		}
 		out = append(out, Refused{Task: r.Task, Pane: r.Pane,
@@ -489,7 +492,7 @@ func RefusedTasks(recs []journal.Record) []Refused {
 // Отчёт при этом никуда не девается: он виден в `claudex undelivered` и
 // `claudex task <id>`, текст цел. Прекращаются только попытки.
 func (l Lost) Stale(now time.Time) bool {
-	t, err := time.Parse(time.RFC3339, l.At)
+	t, err := time.Parse(time.RFC3339, orElse(l.Since, l.At))
 	if err != nil {
 		return false
 	}
@@ -528,9 +531,13 @@ func LostReports(recs []journal.Record) []Lost {
 				state[k] = nil
 				continue
 			}
+			since := r.Time.Format(time.RFC3339)
+			if prev := state[k]; prev != nil {
+				since = orElse(prev.Since, prev.At)
+			}
 			state[k] = &Lost{
 				Task: r.Task, Stage: k.stage, Target: r.Target, Cause: r.Cause,
-				At: r.Time.Format(time.RFC3339), Reason: r.Outcome + ": " + r.Reason,
+				At: r.Time.Format(time.RFC3339), Since: since, Reason: r.Outcome + ": " + r.Reason,
 			}
 		}
 	}
@@ -950,7 +957,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		d.ThreadStage, d.Transport, d.TurnID = r.Stage, r.Transport, r.TurnID
 		d.Cause, d.Reason = CauseTurnFailed, r.Reason
 		recordThread(j, id, thread, o.Stage, mode, prev, r)
-		if !o.HumanTold {
+		if !o.HumanTold && !prev.seen[r.Stage+"|"+r.Hold] {
 			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" — ход треда оборвался",
 				d.Reason)
 		}

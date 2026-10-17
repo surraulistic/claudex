@@ -7,8 +7,9 @@ LDFLAGS := -s -w -X main.buildRevision=$(REV) -X main.buildDirty=$(DIRTY) -X mai
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o claudex ./cmd/claudex
 
-install: build
-	install -m 0755 claudex $(BIN)
+# Как install.sh: бинарь и копия skill той же ревизии.
+install:
+	./install.sh
 
 test:
 	go vet ./... && go test -race ./...

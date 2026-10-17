@@ -31,7 +31,7 @@ func Start(t *testing.T) *Fake {
 	t.Helper()
 	// Путь юникс-сокета обрезается на 104 байтах, а t.TempDir() подставляет имя
 	// теста — на длинных именах bind падает с invalid argument.
-	dir, err := os.MkdirTemp("", "cx")
+	dir, err := os.MkdirTemp("/tmp", "cx")
 	if err != nil {
 		t.Fatal(err)
 	}

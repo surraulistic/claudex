@@ -59,7 +59,7 @@ func executedBy(r journal.Record, who string) bool {
 func ActiveFor(recs []journal.Record, pane string) []Assignment {
 	reported := map[string]bool{}
 	for _, r := range recs {
-		if r.Event == journal.Reported {
+		if r.Event == journal.Reported || r.Event == journal.LaunchFailed {
 			reported[r.Task] = true
 		}
 	}

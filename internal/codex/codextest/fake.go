@@ -100,7 +100,7 @@ func Start(t *testing.T) *Fake {
 	t.Helper()
 	// Короткий путь: у unix-сокета на macOS предел в 104 байта, а t.TempDir()
 	// длиннее.
-	dir, err := os.MkdirTemp("", "cx")
+	dir, err := os.MkdirTemp("/tmp", "cx")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -144,6 +144,9 @@ func profileNote(r codex.WakeResult) string {
 	case codex.ProfileByUpdateUnconfirmed:
 		return "послан перевод прав треда на " + codex.WakePermissionProfile + " (было: " + from +
 			"), применение не подтверждено"
+	case codex.ProfileByResumeLoaded:
+		return "загруженный тред поднят resume с правами " + codex.WakePermissionProfile +
+			": без подписчиков сервер перезагружает его с ними, прежние права не названы"
 	}
 	return "тред поднят с правами " + codex.WakePermissionProfile
 }

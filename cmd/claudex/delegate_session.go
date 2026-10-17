@@ -67,8 +67,10 @@ func delegateToConversation(o opts, s claudesess.Session, pane, prompt string) e
 	err = claudesess.Send(send, s, task.WithReport(prompt, "", id))
 	cancel()
 	if err != nil {
-		j.Append(journal.Record{Task: id, Event: journal.Finished, Pane: pane,
-			Outcome: "не отправлено", Reason: err.Error()})
+		// LaunchFailed, а не Finished: поручение не ушло и у этого разговора
+		// не числится, иначе его Stop-хук принял бы реплику человека за итог.
+		j.Append(journal.Record{Task: id, Event: journal.LaunchFailed, Pane: pane,
+			PaneSession: s.ID, Prompt: prompt, Outcome: "не отправлено", Reason: err.Error()})
 		return exitcode.Wrap(exitcode.Fail, err)
 	}
 

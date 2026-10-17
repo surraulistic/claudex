@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -114,6 +115,13 @@ type Record struct {
 	QueuedTextHash string `json:"queued_text_hash,omitempty"`
 }
 
+// maxLine — предел одной записи и при записи, и при чтении: строку, которую
+// чтение не возьмёт, Append не пишет. Переменная ради тестов.
+var maxLine = 64 << 20
+
+// ErrTooLarge — запись больше предела строки журнала.
+var ErrTooLarge = errors.New("запись журнала слишком велика")
+
 type Journal struct {
 	Path string
 	poll time.Duration
@@ -130,6 +138,9 @@ func (j *Journal) Append(r Record) error {
 	line, err := json.Marshal(r)
 	if err != nil {
 		return err
+	}
+	if len(line) > maxLine {
+		return fmt.Errorf("%w: %d байт при пределе %d", ErrTooLarge, len(line), maxLine)
 	}
 	if err := os.MkdirAll(filepath.Dir(j.Path), 0o755); err != nil {
 		return err
@@ -204,16 +215,35 @@ func (j *Journal) parse() ([]Record, error) {
 	defer f.Close()
 
 	var out []Record
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
+	rd := bufio.NewReaderSize(f, 64*1024)
+	var line []byte
+	over := false
+	for {
+		chunk, err := rd.ReadSlice('\n')
+		switch {
+		case over:
+		case len(line)+len(chunk) > maxLine:
+			// Строку сверх предела пропускаем целиком: следующие читаются.
+			over, line = true, line[:0]
+		default:
+			line = append(line, chunk...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
 		var r Record
 		// Обрыв записи на падении портит одну строку; остальные читаются.
-		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Event != "" {
+		if !over && len(line) > 0 && json.Unmarshal(line, &r) == nil && r.Event != "" {
 			out = append(out, r)
 		}
+		line, over = line[:0], false
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
 	}
-	return out, sc.Err()
 }
 
 // Await ждёт запись по задаче. Сначала смотрит уже записанное: задача может

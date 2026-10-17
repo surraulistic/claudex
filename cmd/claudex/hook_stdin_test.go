@@ -65,3 +65,18 @@ func TestOversizedStopPayloadIsLoggedNotSwallowed(t *testing.T) {
 		t.Fatalf("причина видна в hook.log, получено %q %v", b, err)
 	}
 }
+
+// D2 целиком: Stop с репликой в 5 МиБ записан полностью, журнал читается, и
+// записи после неё видны.
+func TestFiveMebibyteStopKeepsTheJournalReadable(t *testing.T) {
+	j := hookHome(t)
+	j.Append(journal.Record{Task: "465a77fc", Event: journal.Started, PaneSession: workerSession})
+	last := strings.Repeat("я", 5<<20/2+1)
+	withStdin(t, []byte(`{"session_id":"`+workerSession+`","last_assistant_message":"`+last+`"}`))
+	hookStop(opts{})
+	j.Append(journal.Record{Task: "5e1f00aa", Event: journal.Started, PaneSession: "другой"})
+	recs, err := j.Read()
+	if err != nil || len(recs) != 3 || recs[1].Reason != last || recs[2].Task != "5e1f00aa" {
+		t.Fatalf("журнал читается целиком, реплика не обрезана: %d %v", len(recs), err)
+	}
+}

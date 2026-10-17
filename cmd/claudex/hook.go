@@ -111,10 +111,12 @@ func hookStop(o opts) error {
 	if !ok {
 		return nil
 	}
-	j.Append(journal.Record{
+	if err := j.Append(journal.Record{
 		Task: id, Event: journal.Idle, PaneSession: p.SessionID,
 		Reason: strings.TrimSpace(p.Last),
-	})
+	}); err != nil {
+		hookLog("hook stop: отметка по %s не записана: %v", id, err)
+	}
 	return nil
 }
 

@@ -1749,8 +1749,10 @@ const inlineBudget = 3 * time.Second
 // наблюдатель дожимает сам: второй дожим в чужой команде — дубль и
 // непредсказуемая длительность. Сборку он делает, только если включена.
 func inlineUpkeep(o opts) {
-	st, alive := supervise.Read(supervise.StatusPath())
-	running := alive || supervise.Held(supervise.LockPath())
+	// Только замок: файл состояния переживает упавший процесс, а его pid
+	// может достаться другому.
+	running := supervise.Held(supervise.LockPath())
+	st, _ := supervise.Read(supervise.StatusPath())
 	if !running || !st.Reconciling {
 		reconcileWithin(o, inlineBudget)
 	}
@@ -2130,6 +2132,8 @@ func cmdTasks(o opts, args []string) error {
 		}
 		return emit(o, st)
 	}
+	// Срез — общий кэш журнала в процессе: сортировать копию.
+	recs = append([]journal.Record(nil), recs...)
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].Time.Before(recs[j].Time) })
 	// Журнал — это все отчёты целиком, и он растёт: замерено 120 КБ, около
 	// тридцати тысяч токенов за один вызов. Для «что происходило» нужен хвост,

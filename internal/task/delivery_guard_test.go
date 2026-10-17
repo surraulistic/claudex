@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -80,7 +81,7 @@ func TestFollowedFailedTurnRevokesDelivery(t *testing.T) {
 // stalledSocket принимает соединения и молчит, как зависший демон.
 func stalledSocket(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cx")
+	dir, err := os.MkdirTemp("/tmp", "cx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,5 +284,167 @@ func TestSpoofedQueueItemIsNotTakenForOurs(t *testing.T) {
 	f := Flush(context.Background(), FlushOptions{Journal: j})
 	if len(f) != 1 || f[0].Ok || app.Count("thread/resume") != 0 {
 		t.Fatalf("подделка под нашу запись — чужое сообщение, тред не поднимаем: %+v %v", f, app.Calls())
+	}
+}
+
+// D3: queued → turn_started → turn_failed — не доставлено, а не «в очереди».
+func TestQueuedThenFailedTurnIsUndeliveredNotQueued(t *testing.T) {
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "465a77fc", Event: journal.Started, Time: now.Add(-time.Hour),
+			Target: leaderThread, TargetKind: KindThread},
+		{Task: "465a77fc", Event: journal.Finished, Time: now.Add(-time.Hour), Outcome: SentNoWait},
+		{Task: "465a77fc", Event: journal.Reported, Time: now.Add(-50 * time.Minute), Outcome: "готово"},
+		{Task: "465a77fc", Event: journal.Notified, Time: now.Add(-50 * time.Minute), Target: leaderThread,
+			TargetKind: KindThread, Stage: StageReported, Outcome: ThreadQueued,
+			ThreadStage: codex.StageAccepted, Cause: codex.HoldNotStarted},
+		{Task: "465a77fc", Event: journal.Notified, Time: now.Add(-10 * time.Minute), Target: leaderThread,
+			TargetKind: KindThread, Stage: StageReported, Outcome: ThreadTurnStarted,
+			ThreadStage: codex.StageStarted, TurnID: "t9"},
+		{Task: "465a77fc", Event: journal.Notified, Time: now.Add(-5 * time.Minute), Target: leaderThread,
+			TargetKind: KindThread, Stage: StageReported, Outcome: ThreadTurnFailed,
+			ThreadStage: codex.StageTurnFailed, Cause: CauseTurnFailed, TurnID: "t9"},
+	}
+	if st := StateAt(recs, "465a77fc", now); st.State != StateUndelivered {
+		t.Fatalf("одиночный разбор: undelivered, получено %s", st.State)
+	}
+	if st := statesAt(recs, now)["465a77fc"]; st.State != StateUndelivered {
+		t.Fatalf("проход по журналу: undelivered, получено %s", st.State)
+	}
+	if l := LostReports(recs); len(l) != 1 || l[0].Cause != CauseTurnFailed {
+		t.Fatalf("виден как оборванный: %+v", l)
+	}
+}
+
+func notices(h *herdrtest.Fake, title string) int {
+	n := 0
+	for _, r := range h.Requests() {
+		if strings.Contains(r, "notification.show") && strings.Contains(r, title) {
+			n++
+		}
+	}
+	return n
+}
+
+// D4: молчание панельного исполнителя разбудило тред, ход там оборвался.
+// Дальше ни сборка, ни повторная доставка не показывают это человеку снова.
+func TestFailedTurnIsToldOnceAndReconcileLeavesItAlone(t *testing.T) {
+	unloadedHome(t, leaderThread)
+	app := codextest.Start(t)
+	app.Add(leaderThread, &codextest.Thread{EndStatus: codex.TurnFailed})
+	h := herdrtest.Start(t)
+	h.Reply("notification.show", `{"id":"x","result":{"shown":true}}`)
+	c := herdr.New(h.Path)
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	now := time.Now()
+	for _, r := range []journal.Record{
+		{Task: "465a77fc", Event: journal.Started, Time: now.Add(-time.Hour), Pane: "wE:p37",
+			PaneSession: "разговор", Target: leaderThread, TargetSession: leaderThread, TargetKind: KindThread},
+		{Task: "465a77fc", Event: journal.Finished, Time: now.Add(-time.Hour), Outcome: SentNoWait},
+		{Task: "465a77fc", Event: journal.Idle, Time: now.Add(-30 * time.Minute), PaneSession: "разговор",
+			Reason: "готово"},
+	} {
+		j.Append(r)
+	}
+	o := DeliverOptions{Kind: KindThread, Stage: StageReported, WantSession: leaderThread,
+		Event: &Event{Task: "465a77fc", Stage: StageReported, State: StateLost}, Deadline: 5 * time.Second,
+		Poll: time.Millisecond}
+	for i := 0; i < 3; i++ {
+		Deliver(context.Background(), c, j, "465a77fc", leaderThread, "", o)
+	}
+	if n := notices(h, "оборвался"); n != 1 {
+		t.Fatalf("про оборванный ход человеку сказано один раз, получено %d", n)
+	}
+	recs, _ := j.Read()
+	if a := silent(recs, now.Add(time.Hour), time.Minute); len(a) != 0 {
+		t.Fatalf("оборванный ход — уже не молчание для сборки: %+v", a)
+	}
+	before := len(h.Requests())
+	for i := 0; i < 3; i++ {
+		Reconcile(context.Background(), ReconcileOptions{Journal: j, Client: c, MinAge: time.Minute,
+			Read: func(string, int) (string, error) { return "", nil }})
+	}
+	if len(h.Requests()) != before || app.Count("thread/queue/add") != 1 {
+		t.Fatalf("сборка его не трогает и никого не будит: %d→%d %v", before, len(h.Requests()), app.Calls())
+	}
+}
+
+// D5: ничейный загруженный тред resume перезагружает с claudex-work — это
+// смена прав, и она видна в журнале.
+func TestSilentResumeOfAnUnwatchedLoadedThreadIsJournaled(t *testing.T) {
+	codexHome(t, leaderThread)
+	app := codextest.Start(t)
+	app.Add(leaderThread, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle},
+		Profile: ":workspace"})
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	seedThreadTask(t, j, "465a77fc", leaderThread)
+	res, _ := Report(context.Background(), "465a77fc", "готово", reportText, doneOpts(j))
+	if !res.Delivered.Reached() || app.Thread(leaderThread).Profile != codex.WakePermissionProfile {
+		t.Fatalf("доставлено, тред на claudex-work: %+v", res.Delivered)
+	}
+	recs, _ := j.Read()
+	var set string
+	for _, r := range recs {
+		if r.PermissionsSet != "" {
+			set = r.PermissionsSet
+		}
+	}
+	if set != codex.ProfileByResumeLoaded {
+		t.Fatalf("смена прав через resume записана, получено %q", set)
+	}
+}
+
+// D6: занятый ведущий отказывает каждые полчаса — попытки всё равно кончаются
+// через трое суток от первой неудачи, а не никогда.
+func TestRetriedFailureBecomesStaleFromItsFirstAttempt(t *testing.T) {
+	now := time.Now()
+	recs := []journal.Record{{Task: "465a77fc", Event: journal.Reported, Time: now.Add(-100 * time.Hour)}}
+	for at := now.Add(-96 * time.Hour); at.Before(now); at = at.Add(30 * time.Minute) {
+		recs = append(recs, journal.Record{Task: "465a77fc", Event: journal.Notified, Time: at,
+			Target: "s", TargetKind: KindSession, Stage: StageReported, Outcome: NotDelivered, Cause: CauseSendFailed})
+	}
+	if l := LostReports(recs); len(l) != 1 || !l[0].Stale(now) {
+		t.Fatalf("давность — от первой неудачи: %+v", l)
+	}
+	if l := LivePending(recs, now); len(l) != 0 {
+		t.Fatalf("брошенное не дожимается: %+v", l)
+	}
+}
+
+// D7: при пределе на тик берутся давние молчуны, а не случайные.
+func TestSilentTasksComeOldestFirst(t *testing.T) {
+	now := time.Now()
+	var recs []journal.Record
+	for i, ago := range []time.Duration{20, 90, 50, 70, 30} {
+		id := fmt.Sprintf("aaaa000%d", i)
+		recs = append(recs,
+			journal.Record{Task: id, Event: journal.Started, Time: now.Add(-2 * time.Hour)},
+			journal.Record{Task: id, Event: journal.Idle, Time: now.Add(-ago * time.Minute)})
+	}
+	for i := 0; i < 5; i++ {
+		got := SilentTasks(recs, now, time.Minute)
+		if len(got) != 5 || got[0].Task != "aaaa0001" || got[4].Task != "aaaa0000" {
+			t.Fatalf("давние первыми, получено %+v", got)
+		}
+	}
+}
+
+// Оборванный ход считается пробуждением и для сборки, как для молчания, даже
+// без предшествующей записи «ход начат».
+func TestTurnFailedAloneCountsAsWokenForBothSilenceChecks(t *testing.T) {
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "465a77fc", Event: journal.Started, Time: now.Add(-2 * time.Hour), Pane: "wE:p37",
+			PaneSession: "разговор", Target: leaderThread, TargetKind: KindThread},
+		{Task: "465a77fc", Event: journal.Idle, Time: now.Add(-time.Hour), PaneSession: "разговор"},
+		{Task: "465a77fc", Event: journal.Notified, Time: now.Add(-50 * time.Minute), Target: leaderThread,
+			TargetKind: KindThread, Stage: StageReported, Outcome: ThreadTurnFailed, Cause: CauseTurnFailed,
+			ThreadStage: codex.StageTurnFailed},
+	}
+	if a := silent(recs, now, time.Minute); len(a) != 0 {
+		t.Fatalf("сборка: %+v", a)
+	}
+	if s := SilentTasks(recs, now, time.Minute); len(s) != 0 {
+		t.Fatalf("молчание: %+v", s)
 	}
 }

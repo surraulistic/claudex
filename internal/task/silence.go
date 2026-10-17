@@ -1,6 +1,7 @@
 package task
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -72,6 +73,14 @@ func SilentTasks(recs []journal.Record, now time.Time, grace time.Duration) []Si
 		}
 		out = append(out, Silence{Task: id, Last: strings.TrimSpace(r.Reason), Idle: r.Time})
 	}
+	// Давние первыми: при пределе на тик иначе одни и те же вытесняли бы
+	// остальных случайным порядком обхода map.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Idle.Equal(out[j].Idle) {
+			return out[i].Idle.Before(out[j].Idle)
+		}
+		return out[i].Task < out[j].Task
+	})
 	return out
 }
 

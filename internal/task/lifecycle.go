@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/journal"
 )
 
@@ -135,6 +136,10 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 			}
 			if r.Stage == StageReported && r.Outcome == ThreadQueued {
 				queued = true
+			}
+			// Ход начался — событие из очереди уже взято, что бы ни было дальше.
+			if r.Stage == StageReported && rank(r.ThreadStage) >= rank(codex.StageStarted) {
+				queued = false
 			}
 		}
 	}
@@ -317,6 +322,10 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 			}
 			if r.Stage == StageReported && r.Outcome == ThreadQueued {
 				a.queued = true
+			}
+			// Ход начался — событие из очереди уже взято, что бы ни было дальше.
+			if r.Stage == StageReported && rank(r.ThreadStage) >= rank(codex.StageStarted) {
+				a.queued = false
 			}
 		}
 	}
