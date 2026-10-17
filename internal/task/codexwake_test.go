@@ -111,10 +111,15 @@ func TestBusyThreadKeepsTheMessageAndWakesLater(t *testing.T) {
 	}
 }
 
+// openThread — загруженный idle тред, открытый в приложении.
+func openThread(profile string) *codextest.Thread {
+	return &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}, Watched: true, Profile: profile}
+}
+
 func TestLoadedIdleThreadIsWokenAfterProfileConfirmed(t *testing.T) {
 	codexHome(t)
 	app := codextest.Start(t)
-	app.Add(otherThread, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}})
+	app.Add(otherThread, openThread(":workspace"))
 	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
 	seedThreadTask(t, j, "465a77fc", otherThread)
 
@@ -124,11 +129,13 @@ func TestLoadedIdleThreadIsWokenAfterProfileConfirmed(t *testing.T) {
 		t.Fatalf("загруженный idle тред взял событие под claudex-work: %+v", res.Delivered)
 	}
 	calls := strings.Join(app.Calls(), ",")
-	if i, k := strings.Index(calls, "thread/settings/update"), strings.Index(calls, "thread/queue/add"); i < 0 || k < i {
-		t.Fatalf("сначала профиль, потом очередь: %s", calls)
+	r, i, k := strings.Index(calls, "thread/resume"), strings.Index(calls, "thread/settings/update"),
+		strings.Index(calls, "thread/queue/add")
+	if r < 0 || i < r || k < i {
+		t.Fatalf("сначала подписка, потом профиль, потом очередь: %s", calls)
 	}
-	if n := app.Count("thread/resume") + app.Count("thread/queue/start"); n != 0 {
-		t.Fatalf("открытый тред не resume-ится и не стартуется явно: %s", calls)
+	if n := app.Count("thread/queue/start"); n != 0 {
+		t.Fatalf("открытый тред не стартуется явно: %s", calls)
 	}
 	if p := app.Thread(otherThread).Profile; p != codex.WakePermissionProfile {
 		t.Fatalf("тред на claudex-work, получено %q", p)
@@ -139,10 +146,32 @@ func TestLoadedIdleThreadIsWokenAfterProfileConfirmed(t *testing.T) {
 	}
 }
 
+// Как у 3a560c46/6a1d858b: тред открыт и уже на claudex-work, уведомления
+// о смене не будет — подтверждает ответ resume.
+func TestOpenThreadAlreadyOnClaudexWorkIsDelivered(t *testing.T) {
+	codexHome(t)
+	app := codextest.Start(t)
+	th := openThread(codex.WakePermissionProfile)
+	th.ResumeSandbox = "workspaceWrite"
+	app.Add(otherThread, th)
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	seedThreadTask(t, j, "465a77fc", otherThread)
+
+	res, _ := Report(context.Background(), "465a77fc", "готово", reportText, doneOpts(j))
+	if res.Delivered == nil || res.Delivered.Pending || res.Delivered.ThreadStage != codex.StageCompleted {
+		t.Fatalf("ход начат и завершён: %+v", res.Delivered)
+	}
+	if app.Count("thread/settings/update") != 0 || app.Count("thread/queue/add") != 1 {
+		t.Fatalf("update не нужен, сообщение одно: %v", app.Calls())
+	}
+}
+
 func TestLoadedIdleThreadWithUnconfirmedProfileIsHeld(t *testing.T) {
 	codexHome(t)
 	app := codextest.Start(t)
-	app.Add(otherThread, &codextest.Thread{Status: codex.ThreadStatus{Type: codex.StatusIdle}, FailSettings: true})
+	th := openThread(":workspace")
+	th.FailSettings = true
+	app.Add(otherThread, th)
 	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
 	seedThreadTask(t, j, "465a77fc", otherThread)
 
@@ -152,7 +181,7 @@ func TestLoadedIdleThreadWithUnconfirmedProfileIsHeld(t *testing.T) {
 		t.Fatalf("профиль не подтверждён — придержано до queue/add: %+v", res.Delivered)
 	}
 	Flush(context.Background(), FlushOptions{Journal: j})
-	for _, m := range []string{"thread/queue/add", "thread/resume", "thread/queue/start"} {
+	for _, m := range []string{"thread/queue/add", "thread/queue/start"} {
 		if n := app.Count(m); n != 0 {
 			t.Fatalf("%s не вызывался, получено %d: %v", m, n, app.Calls())
 		}
@@ -163,6 +192,93 @@ func TestLoadedIdleThreadWithUnconfirmedProfileIsHeld(t *testing.T) {
 	recs, _ := j.Read()
 	if st := StateOf(recs, "465a77fc"); st.State == StateDone || st.State == StateQueued {
 		t.Fatalf("непринятое не выдаётся ни за доставку, ни за очередь: %+v", st)
+	}
+}
+
+// Наблюдатель дожимает неподтверждённый профиль: пока подтверждения нет —
+// ни очереди, ни новых записей; как только есть — одно сообщение и один ход.
+func TestUnconfirmedProfileIsRetriedBySupervisorWithoutDuplicate(t *testing.T) {
+	codexHome(t)
+	app := codextest.Start(t)
+	th := openThread(":workspace")
+	th.FailSettings = true
+	app.Add(otherThread, th)
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	seedThreadTask(t, j, "465a77fc", otherThread)
+	stages := func() []string {
+		recs, _ := j.Read()
+		var out []string
+		for _, r := range recs {
+			if r.ThreadStage != "" {
+				out = append(out, r.ThreadStage+"/"+r.Cause)
+			}
+		}
+		return out
+	}
+
+	res, _ := Report(context.Background(), "465a77fc", "готово", reportText, doneOpts(j))
+	if res.Delivered == nil || !res.Delivered.Pending || res.Delivered.Cause != codex.HoldLoadedProfile {
+		t.Fatalf("смена не подтверждена — придержано: %+v", res.Delivered)
+	}
+	for i := 0; i < 2; i++ {
+		if f := Flush(context.Background(), FlushOptions{Journal: j}); len(f) != 1 || f[0].Ok {
+			t.Fatalf("тик %d: без подтверждения не доставлено: %+v", i, f)
+		}
+	}
+	if app.Count("thread/queue/add")+app.Count("thread/queue/start") != 0 {
+		t.Fatalf("без подтверждения ничего не кладём: %v", app.Calls())
+	}
+	if got := stages(); len(got) != 1 || got[0] != codex.StageNotQueued+"/"+codex.HoldLoadedProfile {
+		t.Fatalf("повторы с той же причиной журнал не множат: %v", got)
+	}
+	recs, _ := j.Read()
+	if l := LostReports(recs); len(l) != 1 {
+		t.Fatalf("отчёт не потерян, дожимается: %+v", l)
+	}
+
+	app.Set(otherThread, func(th *codextest.Thread) { th.FailSettings = false })
+	if f := Flush(context.Background(), FlushOptions{Journal: j}); len(f) != 1 || !f[0].Ok {
+		t.Fatalf("подтверждение пришло — доставлено: %+v", f)
+	}
+	Flush(context.Background(), FlushOptions{Journal: j})
+	if app.Count("thread/queue/add") != 1 || len(app.Thread(otherThread).Turns) != 1 {
+		t.Fatalf("одно сообщение, один ход: %v", app.Calls())
+	}
+	recs, _ = j.Read()
+	if st := StateOf(recs, "465a77fc"); st.State != StateDone {
+		t.Fatalf("дошло, получено %+v", st)
+	}
+	if l := LostReports(recs); len(l) != 0 {
+		t.Fatalf("дожимать больше нечего: %+v", l)
+	}
+	want := []string{codex.StageNotQueued + "/" + codex.HoldLoadedProfile, codex.StageStarted + "/", codex.StageCompleted + "/"}
+	if got := stages(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("стадии по одной, получено %v", got)
+	}
+}
+
+// Сервер применил профиль, но уведомление потерялось: следующий тик видит
+// claudex-work в ответе resume и второй update не шлёт.
+func TestLostSettingsNoticeIsConfirmedByResumeOnNextTick(t *testing.T) {
+	codexHome(t)
+	app := codextest.Start(t)
+	th := openThread(":workspace")
+	th.NoSettingsNotice = true
+	th.ResumeSandbox = "workspaceWrite"
+	app.Add(otherThread, th)
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	seedThreadTask(t, j, "465a77fc", otherThread)
+
+	res, _ := Report(context.Background(), "465a77fc", "готово", reportText, doneOpts(j))
+	if res.Delivered == nil || !res.Delivered.Pending || res.Delivered.Cause != codex.HoldLoadedProfile ||
+		app.Count("thread/queue/add") != 0 {
+		t.Fatalf("уведомления нет — придержано: %+v %v", res.Delivered, app.Calls())
+	}
+	if f := Flush(context.Background(), FlushOptions{Journal: j}); len(f) != 1 || !f[0].Ok {
+		t.Fatalf("профиль назван resume — доставлено: %+v", f)
+	}
+	if app.Count("thread/settings/update") != 1 || app.Count("thread/queue/add") != 1 {
+		t.Fatalf("один update, одно сообщение: %v", app.Calls())
 	}
 }
 

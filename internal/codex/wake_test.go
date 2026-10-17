@@ -106,15 +106,32 @@ func idle(th codextest.Thread) *codextest.Thread {
 	return &th
 }
 
+// watched — загруженный idle тред, открытый в приложении на другом профиле.
+func watched(th codextest.Thread) *codextest.Thread {
+	th.Watched = true
+	if th.Profile == "" {
+		th.Profile = ":workspace"
+	}
+	return idle(th)
+}
+
 func TestLoadedIdleThreadIsSwitchedToClaudexWorkBeforeQueueAdd(t *testing.T) {
-	for _, first := range []bool{false, true} {
-		name := "notice after ack"
-		if first {
-			name = "notice before ack"
-		}
-		t.Run(name, func(t *testing.T) {
+	cases := []struct {
+		name string
+		th   codextest.Thread
+	}{
+		{"notice after ack", codextest.Thread{}},
+		{"notice before ack", codextest.Thread{SettingsNoticeFirst: true}},
+		{"notice delayed within Each", codextest.Thread{SettingsNoticeDelay: 150 * time.Millisecond}},
+		{"full access before", codextest.Thread{Profile: ""}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
 			f := codextest.Start(t)
-			f.Add(th, idle(codextest.Thread{Cwd: "/work/repo", SettingsNoticeFirst: first}))
+			c.th.Cwd = "/work/repo"
+			tt := idle(c.th)
+			tt.Watched = true
+			f.Add(th, tt)
 			r, err := codex.Wake(context.Background(), req())
 			if err != nil {
 				t.Fatal(err)
@@ -123,12 +140,17 @@ func TestLoadedIdleThreadIsSwitchedToClaudexWorkBeforeQueueAdd(t *testing.T) {
 				t.Fatalf("тред взял сообщение сам, ход виден: %+v", r)
 			}
 			calls := f.Calls()
-			before(t, calls, "permissionProfile/list", "thread/settings/update")
+			before(t, calls, "permissionProfile/list", "thread/resume")
+			before(t, calls, "thread/resume", "thread/settings/update")
 			before(t, calls, "thread/settings/update", "thread/queue/add")
-			untouched(t, f, "thread/resume", "thread/queue/start")
+			untouched(t, f, "thread/queue/start")
 			want := map[string]any{"threadId": th, "permissions": codex.WakePermissionProfile}
 			if got := f.SettingsUpdates(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 				t.Fatalf("update ровно с профилем claudex-work и без sandbox: %v", got)
+			}
+			wantResume := map[string]any{"threadId": th, "excludeTurns": true, "permissions": codex.WakePermissionProfile}
+			if got := f.Resumes(); len(got) != 1 || !reflect.DeepEqual(got[0], wantResume) {
+				t.Fatalf("resume ровно с профилем claudex-work: %v", got)
 			}
 			if len(f.ProfileCwds) != 1 || f.ProfileCwds[0] != "/work/repo" {
 				t.Fatalf("профиль проверяется в cwd треда: %v", f.ProfileCwds)
@@ -140,6 +162,37 @@ func TestLoadedIdleThreadIsSwitchedToClaudexWorkBeforeQueueAdd(t *testing.T) {
 	}
 }
 
+// Задачи 3a560c46 и 6a1d858b: тред открыт в приложении и уже на claudex-work
+// после прошлого пробуждения. update ничего не меняет, уведомления нет ни
+// для кого — профиль подтверждает ответ resume.
+func TestLoadedThreadAlreadyOnClaudexWorkIsWokenWithoutSettingsUpdate(t *testing.T) {
+	f := codextest.Start(t)
+	f.Add(th, watched(codextest.Thread{Profile: codex.WakePermissionProfile, ResumeSandbox: "workspaceWrite"}))
+	r, err := codex.Wake(context.Background(), req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Started() || r.Hold != "" || f.Count("thread/queue/add") != 1 {
+		t.Fatalf("профиль назван resume, ход начат: %+v %v", r, f.Calls())
+	}
+	before(t, f.Calls(), "thread/resume", "thread/queue/add")
+	untouched(t, f, "thread/settings/update", "thread/queue/start")
+}
+
+func TestUnwatchedLoadedIdleThreadIsReloadedWithClaudexWork(t *testing.T) {
+	f := codextest.Start(t)
+	f.Add(th, idle(codextest.Thread{}))
+	r, err := codex.Wake(context.Background(), req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Started() || r.Hold != "" || f.Thread(th).Profile != codex.WakePermissionProfile {
+		t.Fatalf("ничей idle тред перезагружен resume с claudex-work: %+v %v", r, f.Calls())
+	}
+	before(t, f.Calls(), "thread/resume", "thread/queue/add")
+	untouched(t, f, "thread/settings/update", "thread/queue/start")
+}
+
 func TestLoadedIdleThreadWithoutConfirmedProfileGetsNothingQueued(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -148,14 +201,21 @@ func TestLoadedIdleThreadWithoutConfirmedProfileGetsNothingQueued(t *testing.T) 
 		hold     string
 	}{
 		{"profile disallowed", codextest.Thread{}, []codex.PermissionProfile{{ID: "claudex-work"}}, codex.HoldNoProfile},
+		{"resume error", codextest.Thread{FailResume: true}, nil, codex.HoldLoadedProfile},
 		{"update error", codextest.Thread{FailSettings: true}, nil, codex.HoldLoadedProfile},
 		{"no notification", codextest.Thread{NoSettingsNotice: true}, nil, codex.HoldLoadedProfile},
 		{"notification for another thread", codextest.Thread{SettingsNoticeFor: "01a0cccc-0000-7000-8000-000000000002"},
 			nil, codex.HoldLoadedProfile},
-		{"wrong profile", codextest.Thread{IgnorePermissions: true, Profile: ":workspace"}, nil, codex.HoldWrongProfile},
-		{"full access, no profile", codextest.Thread{IgnorePermissions: true}, nil, codex.HoldWrongProfile},
+		{"notification later than Each", codextest.Thread{SettingsNoticeDelay: time.Second}, nil, codex.HoldLoadedProfile},
+		{"update without effect", codextest.Thread{IgnorePermissions: true}, nil, codex.HoldLoadedProfile},
+		{"wrong profile", codextest.Thread{SettingsProfile: ":read-only"}, nil, codex.HoldWrongProfile},
+		{"full access, no profile", codextest.Thread{SettingsProfile: codextest.NoProfile}, nil, codex.HoldWrongProfile},
 		{"right profile, full access", codextest.Thread{SettingsSandbox: "dangerFullAccess"}, nil, codex.HoldWrongProfile},
 		{"right profile, external sandbox", codextest.Thread{SettingsSandbox: "externalSandbox"}, nil, codex.HoldWrongProfile},
+		{"already claudex-work, full access", codextest.Thread{Profile: codex.WakePermissionProfile,
+			ResumeSandbox: "dangerFullAccess"}, nil, codex.HoldWrongProfile},
+		{"already claudex-work, external sandbox", codextest.Thread{Profile: codex.WakePermissionProfile,
+			ResumeSandbox: "externalSandbox"}, nil, codex.HoldWrongProfile},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -163,7 +223,7 @@ func TestLoadedIdleThreadWithoutConfirmedProfileGetsNothingQueued(t *testing.T) 
 			if c.profiles != nil {
 				f.Profiles = c.profiles
 			}
-			f.Add(th, idle(c.th))
+			f.Add(th, watched(c.th))
 			q := req()
 			q.Each = 300 * time.Millisecond
 			r, err := codex.Wake(context.Background(), q)
@@ -173,7 +233,7 @@ func TestLoadedIdleThreadWithoutConfirmedProfileGetsNothingQueued(t *testing.T) 
 			if r.Stage != codex.StageNotQueued || r.Hold != c.hold || r.Started() || r.Reason == "" {
 				t.Fatalf("не положено (%s) и сказано почему, получено %+v", c.hold, r)
 			}
-			untouched(t, f, "thread/queue/add", "thread/queue/start", "thread/resume")
+			untouched(t, f, "thread/queue/add", "thread/queue/start")
 			if got := f.Thread(th); len(got.Queue) != 0 || len(got.Turns) != 0 || got.Status.Type != codex.StatusIdle {
 				t.Fatalf("ни очереди, ни хода: %+v", got)
 			}
@@ -181,14 +241,41 @@ func TestLoadedIdleThreadWithoutConfirmedProfileGetsNothingQueued(t *testing.T) 
 	}
 }
 
+// Протокольный факт 0.162.1: thread/settings/updated приходит только
+// подписчикам треда, а подписывает resume.
+func TestSettingsNoticeReachesOnlySubscribedConnection(t *testing.T) {
+	f := codextest.Start(t)
+	f.Add(th, watched(codextest.Thread{}))
+	s, err := codex.DialSocket(context.Background(), f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	_, err = s.SetPermissions(c, th, codex.WakePermissionProfile)
+	cancel()
+	if err == nil {
+		t.Fatal("без подписки уведомления нет")
+	}
+	f.Set(th, func(tt *codextest.Thread) { tt.Profile = ":workspace" })
+	rs, err := s.Resume(context.Background(), th, codex.WakePermissionProfile)
+	if err != nil || rs.Profile != ":workspace" {
+		t.Fatalf("открытый тред переопределения resume не принимает, профиль назван: %+v %v", rs, err)
+	}
+	st, err := s.SetPermissions(context.Background(), th, codex.WakePermissionProfile)
+	if err != nil || st.Profile != codex.WakePermissionProfile {
+		t.Fatalf("после resume уведомление приходит: %+v %v", st, err)
+	}
+}
+
 func TestThreadTakenDuringSettingsUpdateGetsNothingQueued(t *testing.T) {
 	f := codextest.Start(t)
-	f.Add(th, idle(codextest.Thread{BusyAfterSettings: true}))
+	f.Add(th, watched(codextest.Thread{BusyAfterSettings: true}))
 	r, _ := codex.Wake(context.Background(), req())
 	if r.Stage != codex.StageNotQueued || r.Hold != codex.HoldBusy || f.Count("thread/settings/update") != 1 {
 		t.Fatalf("тред занят к концу update — не кладём: %+v %v", r, f.Calls())
 	}
-	untouched(t, f, "thread/queue/add", "thread/queue/start", "thread/resume")
+	untouched(t, f, "thread/queue/add", "thread/queue/start")
 }
 
 func TestOwnQueuedItemOnLoadedIdleThreadIsNotStartedExplicitly(t *testing.T) {
@@ -203,7 +290,7 @@ func TestOwnQueuedItemOnLoadedIdleThreadIsNotStartedExplicitly(t *testing.T) {
 	if f.Count("thread/settings/update") != 1 {
 		t.Fatalf("профиль сменён и подтверждён: %v", f.Calls())
 	}
-	untouched(t, f, "thread/queue/add", "thread/queue/start", "thread/resume")
+	untouched(t, f, "thread/queue/add", "thread/queue/start")
 	if len(f.Thread(th).Queue) != 1 {
 		t.Fatalf("очередь не тронута: %+v", f.Thread(th).Queue)
 	}
@@ -218,7 +305,10 @@ func TestOwnQueuedItemOnLoadedIdleThreadWaitsForConfirmedProfile(t *testing.T) {
 	if r.Stage != codex.StageAccepted || r.Hold != codex.HoldLoadedProfile || r.QueueID != "own1" {
 		t.Fatalf("своё уже в очереди, профиль не подтверждён: %+v", r)
 	}
-	untouched(t, f, "thread/queue/add", "thread/queue/start", "thread/resume")
+	untouched(t, f, "thread/queue/add", "thread/queue/start")
+	if got := f.Thread(th); len(got.Queue) != 1 || len(got.Turns) != 0 {
+		t.Fatalf("очередь не тронута, хода нет: %+v", got)
+	}
 }
 
 func TestThreadsThatMustNotBeTouchedGetNothingQueued(t *testing.T) {

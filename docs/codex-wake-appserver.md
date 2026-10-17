@@ -57,8 +57,8 @@ resume). claudex считал «очередь приняла» доставко
   приходит server notification `thread/settings/updated` с `threadId` и
   `threadSettings` (`activePermissionProfile: {id, extends}|null`,
   `sandboxPolicy.type`: `dangerFullAccess` | `readOnly` | `externalSandbox` |
-  `workspaceWrite`). Вживую не вызывалось: кому демон шлёт это уведомление
-  (вызвавшему соединению или только подписчикам треда), не проверено.
+  `workspaceWrite`). Уведомление получают **только подписчики треда** и
+  **только при фактической смене** настроек — см. раздел поручения b0729eba.
 - `~/.codex/config.toml`: `default_permissions = "claudex-work"`,
   `sandbox_mode` не задан, `approval_policy = "never"`. Дефолт конфига влияет
   только на новые треды; старый тред с Full Access держит его, пока resume не
@@ -77,13 +77,16 @@ resume). claudex считал «очередь приняла» доставко
 не трогаем; чужие сообщения в очереди — запрет; `permissionProfile/list(cwd)`.
 Дальше ветки:
 
-- **idle (загруженный)**: `thread/settings/update {threadId, permissions:
-  claudex-work}` → ack → ждём `thread/settings/updated` именно этого
-  `threadId` (в пределах `Each`; пришедшее до ответа тоже считается, до
-  запроса — нет) → `activePermissionProfile.id == claudex-work` и
-  `sandboxPolicy.type` ∈ {`readOnly`, `workspaceWrite`} → повторный read
-  (idle) → `queue/add` → тред берёт сам, ждём ход. `queue/start` здесь не
-  зовётся никогда: не взял сам — `turn_not_started`.
+- **idle (загруженный)**: `thread/resume {permissions: claudex-work}` —
+  подписка на тред и действующий профиль в ответе. Уже `claudex-work` с
+  `sandbox.type` ∈ {`readOnly`, `workspaceWrite`} → дальше без update. Иначе
+  `thread/settings/update {threadId, permissions: claudex-work}` → ack → ждём
+  `thread/settings/updated` именно этого `threadId` (в пределах `Each`;
+  пришедшее до ответа тоже считается, до запроса — нет) →
+  `activePermissionProfile.id == claudex-work` и `sandboxPolicy.type` ∈
+  {`readOnly`, `workspaceWrite`} → повторный read (idle) → `queue/add` → тред
+  берёт сам, ждём ход. `queue/start` здесь не зовётся никогда: не взял сам —
+  `turn_not_started`.
 - **notLoaded**: запрет при чужом писателе → resume с `claudex-work` →
   проверка профиля → read → `queue/add` (если журнал не знает о принятии) →
   ожидание хода → `queue/start` своего id, только если он первый.
@@ -113,10 +116,11 @@ App-server недоступен → `codex queue` и `queue_only`.
   `sandbox.type` — не `dangerFullAccess`, иначе `permission_profile_mismatch`
   и `queue/start` не вызывается. Вторая проверка не предотвращает ход:
   resume сам вычитывает очередь — гейт это первая проверка.
-- Загруженный idle тред (поручение 840c0d1a): до `queue/add` —
-  `thread/settings/update` и подтверждение уведомлением, см. «Решение».
-  Ошибка update, нет уведомления за `Each`, уведомление про другой тред →
-  `loaded_thread_profile_unconfirmed`; не тот профиль, `null`,
+- Загруженный idle тред (поручения 840c0d1a, b0729eba): до `queue/add` —
+  resume и, если профиль не тот, `thread/settings/update` с подтверждением
+  уведомлением, см. «Решение». Ошибка resume или update, нет уведомления за
+  `Each`, уведомление про другой тред → `loaded_thread_profile_unconfirmed`;
+  не тот профиль, `null`,
   `dangerFullAccess` или `externalSandbox` (полный доступ к диску) →
   `permission_profile_mismatch`. В обоих случаях стадия `not_queued`, ни
   `queue/add`, ни `queue/start`. `externalSandbox` отвергается намеренно —
@@ -172,16 +176,85 @@ user input/systemError/unknown — ни одного трогающего выз
 `settings/update`. `internal/task`: idle с подтверждением доходит до
 `done`; `FailSettings` → Hold `not_queued`. Живые треды не трогались.
 
+## Подтверждение профиля загруженного треда (поручение b0729eba)
+
+Симптом: 3a560c46 (Geo) и 6a1d858b (Payment) — `not_queued` /
+`loaded_thread_profile_unconfirmed`: update принят, `thread/settings/updated`
+за 10 с не пришло; очередь не тронута. Раньше af63b94d в Payment дошёл — через
+холодный resume, после которого тред липко стоит на `claudex-work`.
+
+Корень (исходник `rust-v0.162.1`, `codex-rs/app-server`):
+
+- `bespoke_event_handling.rs`, `EventMsg::ThreadSettingsApplied` → `send_server_notification`
+  потокового `ThreadScopedOutgoingMessageSender`, а его `connection_ids` —
+  `subscribed_connection_ids(thread)` (`thread_lifecycle.rs`). Подписывают
+  `thread/start`/`resume`/`fork`; claudex на загруженный тред их не звал —
+  уведомление уходило приложению, не ему. Никакая задержка это не лечит.
+- Там же `note_thread_settings` шлёт уведомление, только если настройки
+  изменились. Тред уже на `claudex-work` → update пустой → уведомления нет ни
+  для кого. Это и есть Payment/Geo после прошлых пробуждений.
+- `resume_running_thread`: `permissions` для загруженного треда — всегда
+  «mismatch». Если у треда нет подписчиков и он idle — сервер его гасит и
+  холодно поднимает уже с переопределением; иначе переопределение
+  игнорируется (warn), соединение подписывается, а ответ строится из
+  `config_snapshot` — действующие `activePermissionProfile` и `sandbox`.
+
+Живая проверка на одноразовых тредах (`thread/start` в `$CLAUDE_JOB_DIR/tmp`,
+`thread/inject_items` вместо хода, после — `thread/archive`; Payment/Geo не
+трогались), два соединения: «приложение» (подписано) и «claudex»:
+
+- update от неподписанного → уведомление только приложению; повтор того же
+  update → никому; resume открытого треда с `claudex-work` → ответ `:workspace`
+  (не применено); update после этого → уведомление и claudex; resume ничейного
+  idle треда → `claudex-work` применён.
+- `claudex-work` проецируется как `workspaceWrite` (writableRoots `~/.claudex`,
+  `~/.codex`, `/private/tmp`, сеть включена) — `safeSandbox` его пропускает.
+- Исправленный `Wake` из этой ветки, тред открыт приложением на `:workspace`:
+  resume → update → уведомление → `queue/add` → `turn_started` →
+  `turn_completed`; повторный `Wake` ход узнал, второй раз не положил. Тред
+  открыт и уже на `claudex-work` (как Payment): update не послан, ход начат и
+  завершён. Два коротких хода модели на тестовых тредах.
+
+Исправление (`confirmLoaded`): сначала resume, профиль из ответа; update — только
+если профиль не `claudex-work`, и уже подписанным соединением. `claudex-work` с
+чужой песочницей — `permission_profile_mismatch` без update. Fail-closed
+прежний: queue/add только после подтверждения resume или уведомлением.
+
+Подделка (`codextest`) теперь моделирует подписку по соединениям: уведомление —
+только подписанному и только при смене; `Watched` — тред открыт другим
+клиентом (resume тогда не применяет переопределения; `Held` подразумевает
+`Watched`), `SettingsNoticeDelay`, `SettingsProfile`/`NoProfile`. Старый код
+на ней падает так же, как в production.
+
+Тесты: `internal/codex` — открытый тред на чужом профиле/Full Access (порядок
+`permissionProfile/list` → resume → update → `queue/add`, уведомление до/после
+ответа/с задержкой в пределах `Each`); уже на `claudex-work` — без update;
+ничейный idle — перезагрузка resume; отказы: ошибка resume/update, нет
+уведомления, уведомление про другой тред, позже `Each`, update без эффекта,
+не тот/снятый профиль, Full Access/`externalSandbox` из уведомления или из
+resume; клиент получает уведомление только после resume. `internal/task` —
+открытый тред на `claudex-work` доходит до `done`; повторы наблюдателя
+(`Flush`): пока не подтверждено — ни `queue/add`, ни новых записей журнала,
+отчёт в `LostReports`; после — одно сообщение, один ход, `done`; потерянное
+уведомление подтверждает resume на следующем тике без второго update.
+
+Ограничения: resume подписывает claudex на тред до закрытия соединения (как и
+холодный путь); встречные запросы сервера claudex по-прежнему не отвечает.
+`thread/resume` пишет в тред `clientInfo` claudex (`set_app_server_client_info`).
+Ничейный загруженный тред resume перезагружает — если своё сообщение уже было
+в очереди, ход с ним начнётся при resume (под `claudex-work`, как в холодном
+пути).
+
 ## Следующий шаг
 
+Поручение b0729eba: правки не закоммичены (по условию поручения), бинарь не
+ставился. После установки и перезапуска наблюдателя 3a560c46 и 6a1d858b он
+должен дожать сам (окно дожима — 72 ч от отчёта, 11.10 ~11:50): их стадия
+`not_queued`, сообщение не клалось, дубля не будет. Живой Payment/Geo при этом
+получит resume (подписка, переопределение для открытого треда игнорируется) и,
+если профиль уже `claudex-work`, — сразу `queue/add`.
+
 Мерж ветки в main (за человеком), `make install`, перезапуск наблюдателя (старый не держит
-замок; новый его учитывает и второй не поднимет, пока жив старый pid). Первая
-живая проверка — на отдельном тестовом треде, не на рабочем: что
-`activePermissionProfile.id` в ответе resume действительно `claudex-work`
-(иначе каждый холодный wake встанет в `permission_profile_mismatch`), какой
-`sandbox.type` демон проецирует для `claudex-work`, и что resume с
-несуществующим профилем отвечает ошибкой, а не молча берёт прежний. Для idle —
-на отдельном загруженном тестовом треде: приходит ли `thread/settings/updated`
-соединению claudex (не подписчику треда; если нет — вся idle-ветка встанет в
-`loaded_thread_profile_unconfirmed`), какой `sandboxPolicy.type` в нём для
-`claudex-work`, и что update с несуществующим профилем — ошибка.
+замок; новый его учитывает и второй не поднимет, пока жив старый pid). Не
+проверено вживую: что resume и update с несуществующим профилем отвечают
+ошибкой, а не молча берут прежний (гейт — `permissionProfile/list` до них).

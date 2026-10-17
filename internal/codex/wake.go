@@ -48,8 +48,8 @@ const (
 	HoldEphemeral     = "thread_ephemeral"
 	HoldItemGone      = "queue_item_gone"
 	HoldNotStarted    = "turn_not_started"
-	// Загруженный тред: смена профиля не подтверждена уведомлением сервера.
-	// Ничего не кладём.
+	// Загруженный тред: профиль не прочитан resume или его смена не
+	// подтверждена уведомлением сервера. Ничего не кладём.
 	HoldLoadedProfile = "loaded_thread_profile_unconfirmed"
 	// Профиль claudex-work не найден или не разрешён: resume не делался.
 	HoldNoProfile = "permission_profile_unavailable"
@@ -326,11 +326,25 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 	return res, nil
 }
 
-// confirmLoaded переводит загруженный тред на claudex-work. resume здесь не
-// годится: тред уже открыт. Годится только подтверждение от сервера — ответ на
-// update пуст, а thread/read прав не показывает.
+// confirmLoaded переводит загруженный тред на claudex-work. thread/settings/updated
+// сервер шлёт только подписчикам треда и только при фактической смене, поэтому
+// сначала resume: он подписывает соединение и называет действующий профиль.
 func confirmLoaded(ctx context.Context, s AppServer, req WakeRequest, res WakeResult) (WakeResult, bool) {
 	c, cancel := context.WithTimeout(ctx, req.Each)
+	rs, err := s.Resume(c, req.Thread, WakePermissionProfile)
+	cancel()
+	if err != nil {
+		return held(res, HoldLoadedProfile,
+			"профиль загруженного треда не прочитан (thread/resume: "+err.Error()+"): ничего не кладём и не запускаем"), false
+	}
+	if rs.Profile == WakePermissionProfile {
+		if !safeSandbox(rs.Sandbox) {
+			return held(res, HoldWrongProfile, fmt.Sprintf(
+				"профиль %s, но sandbox %q: ничего не кладём и не запускаем", WakePermissionProfile, rs.Sandbox)), false
+		}
+		return res, true
+	}
+	c, cancel = context.WithTimeout(ctx, req.Each)
 	st, err := s.SetPermissions(c, req.Thread, WakePermissionProfile)
 	cancel()
 	if err != nil {

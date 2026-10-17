@@ -157,10 +157,12 @@ Code — они запускают команды. Уведомление herdr 
 
 Ход запускается только там, где это безопасно, и только под permission
 profile `claudex-work` (сначала `permissionProfile/list` в cwd треда). Загруженный
-свободный тред переводится на него `thread/settings/update`; событие кладётся,
-лишь когда уведомление `thread/settings/updated` этого треда назвало
-`claudex-work` и песочницу Codex (не `dangerFullAccess`), — дальше тред забирает
-очередь сам. Выгруженный будится `thread/resume` с тем же профилем. Профиль
+свободный тред сначала `thread/resume` с этим профилем: ответ называет
+действующий профиль и подписывает claudex на тред. Не `claudex-work` — тред
+переводится `thread/settings/update`, и событие кладётся, лишь когда уведомление
+`thread/settings/updated` этого треда назвало `claudex-work`; в обоих случаях
+песочница должна быть своей у Codex (`readOnly`/`workspaceWrite`). Дальше тред
+забирает очередь сам. Выгруженный будится `thread/resume` с тем же профилем. Профиль
 липкий: тред остаётся на нём. Не подтверждено — ничего не кладём
 (`loaded_thread_profile_unconfirmed`, `permission_profile_unavailable`,
 `permission_profile_mismatch`). Не трогаем: занятый ход (`thread_busy` —

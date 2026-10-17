@@ -136,10 +136,14 @@ type AppServer interface {
 	PermissionProfiles(ctx context.Context, cwd string) ([]PermissionProfile, error)
 	// Resume загружает тред с заданным permission profile. Настройка липкая,
 	// поэтому пробуждение намеренно переводит его на профиль claudex-work.
+	// Загруженный тред, открытый другим клиентом, переопределения не
+	// принимает: ответ называет действующий профиль, а соединение
+	// подписывается на тред.
 	Resume(ctx context.Context, thread, permissions string) (Resumed, error)
 	// SetPermissions переводит загруженный тред на permission profile и ждёт
 	// thread/settings/updated именно этого треда. Ответ на update пуст:
-	// применённое видно только в уведомлении.
+	// применённое видно только в уведомлении, а оно приходит лишь подписчикам
+	// треда и лишь при фактической смене.
 	SetPermissions(ctx context.Context, thread, permissions string) (Settings, error)
 	QueueStart(ctx context.Context, thread, queueID string) (Turn, error)
 	RecentTurns(ctx context.Context, thread string, limit int) ([]Turn, error)

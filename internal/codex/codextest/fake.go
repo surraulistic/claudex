@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/surraulistic/claudex/internal/codex"
 )
@@ -39,6 +40,10 @@ type Thread struct {
 	// BusyAfterResume — к концу resume тред занят чужим ходом.
 	BusyAfterResume bool
 	Cwd             string
+	// Watched — тред открыт другим клиентом (приложением). Тогда resume
+	// загруженного треда переопределения не применяет, а называет действующий
+	// профиль. Held подразумевает Watched.
+	Watched bool
 
 	// FailSettings — thread/settings/update отвечает ошибкой.
 	FailSettings bool
@@ -48,12 +53,20 @@ type Thread struct {
 	SettingsNoticeFor string
 	// SettingsNoticeFirst — уведомление обгоняет ответ на update.
 	SettingsNoticeFirst bool
+	// SettingsNoticeDelay — уведомление приходит с задержкой после ответа.
+	SettingsNoticeDelay time.Duration
+	// SettingsProfile — какой профиль update применяет вместо запрошенного;
+	// NoProfile — никакого, то есть Full Access.
+	SettingsProfile string
 	// SettingsSandbox — какой sandboxPolicy.type назвать в уведомлении вместо
 	// выведенного из профиля.
 	SettingsSandbox string
 	// BusyAfterSettings — к концу update тред занят чужим ходом.
 	BusyAfterSettings bool
 }
+
+// NoProfile для SettingsProfile: профиль снят.
+const NoProfile = "-"
 
 type Fake struct {
 	Path string
@@ -177,8 +190,23 @@ func (f *Fake) serve() {
 	}
 }
 
+// session — одно соединение: на какие треды оно подписано и замок записи,
+// чтобы отложенное уведомление не рвало кадры ответа.
+type session struct {
+	c      net.Conn
+	mu     sync.Mutex
+	subbed map[string]bool
+}
+
+func (s *session) send(v any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	send(s.c, v)
+}
+
 func (f *Fake) conn(c net.Conn) {
 	defer c.Close()
+	sess := &session{c: c, subbed: map[string]bool{}}
 	r := bufio.NewReader(c)
 	req, err := http.ReadRequest(r)
 	if err != nil || !codex.IsUpgrade(req.Header) {
@@ -204,14 +232,14 @@ func (f *Fake) conn(c net.Conn) {
 		if json.Unmarshal(p, &m) != nil || m.ID == nil {
 			continue
 		}
-		res, rpcErr, n := f.handle(m.Method, m.Params)
+		res, rpcErr, n := f.handle(sess, m.Method, m.Params)
 		// Уведомление и встречный запрос перед ответом — как у живого демона.
-		send(c, map[string]any{"method": "thread/status/changed", "params": map[string]any{}})
+		sess.send(map[string]any{"method": "thread/status/changed", "params": map[string]any{}})
 		if n.v != nil && n.first {
-			send(c, n.v)
+			sess.send(n.v)
 		}
 		if m.Method == "thread/resume" {
-			send(c, map[string]any{"id": 900, "method": "item/commandExecution/requestApproval",
+			sess.send(map[string]any{"id": 900, "method": "item/commandExecution/requestApproval",
 				"params": map[string]any{}})
 		}
 		out := map[string]any{"id": *m.ID}
@@ -221,12 +249,21 @@ func (f *Fake) conn(c net.Conn) {
 			out["result"] = res
 		}
 		if m.Method == "thread/turns/list" {
+			sess.mu.Lock()
 			sendFragmented(c, out)
+			sess.mu.Unlock()
 		} else {
-			send(c, out)
+			sess.send(out)
 		}
-		if n.v != nil && !n.first {
-			send(c, n.v)
+		switch {
+		case n.v == nil || n.first:
+		case n.delay > 0:
+			go func(v any) {
+				time.Sleep(n.delay)
+				sess.send(v)
+			}(n.v)
+		default:
+			sess.send(n.v)
 		}
 	}
 }
@@ -235,6 +272,7 @@ func (f *Fake) conn(c net.Conn) {
 type notice struct {
 	v     any
 	first bool
+	delay time.Duration
 }
 
 func send(c net.Conn, v any) {
@@ -255,15 +293,15 @@ func sendFragmented(c net.Conn, v any) {
 	codex.WriteFrame(c, 0x0, b[half:], false)
 }
 
-func (f *Fake) handle(method string, raw json.RawMessage) (any, string, notice) {
+func (f *Fake) handle(sess *session, method string, raw json.RawMessage) (any, string, notice) {
 	if method == "thread/settings/update" {
-		return f.settingsUpdate(raw)
+		return f.settingsUpdate(sess, raw)
 	}
-	res, err := f.reply(method, raw)
+	res, err := f.reply(sess, method, raw)
 	return res, err, notice{}
 }
 
-func (f *Fake) reply(method string, raw json.RawMessage) (any, string) {
+func (f *Fake) reply(sess *session, method string, raw json.RawMessage) (any, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, method)
@@ -322,10 +360,16 @@ func (f *Fake) reply(method string, raw json.RawMessage) (any, string) {
 		if th.FailResume {
 			return nil, "resume failed"
 		}
-		if !th.IgnorePermissions {
+		sess.subbed[p.ThreadID] = true
+		// Как resume_running_thread у 0.162.1: открытый кем-то загруженный
+		// тред переопределений не принимает, ничейный idle — перезагружается
+		// с ними.
+		watched := th.Status.Type == codex.StatusActive ||
+			(th.Status.Type == codex.StatusIdle && (th.Watched || th.Held))
+		if !watched && !th.IgnorePermissions {
 			th.Profile = perm
 		}
-		if th.Status.Type == codex.StatusNotLoaded {
+		if !watched {
 			th.Status = codex.ThreadStatus{Type: codex.StatusIdle}
 			if !th.NoDrainOnResume && !th.Held {
 				f.drain(th)
@@ -367,7 +411,9 @@ func (f *Fake) reply(method string, raw json.RawMessage) (any, string) {
 
 // settingsUpdate — как thread/settings/update у 0.162.1: ответ пуст, а
 // применённые настройки приходят уведомлением thread/settings/updated.
-func (f *Fake) settingsUpdate(raw json.RawMessage) (any, string, notice) {
+// Уведомление получают только подписанные на тред соединения и только если
+// настройки действительно сменились.
+func (f *Fake) settingsUpdate(sess *session, raw json.RawMessage) (any, string, notice) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "thread/settings/update")
@@ -394,13 +440,21 @@ func (f *Fake) settingsUpdate(raw json.RawMessage) (any, string, notice) {
 	if th.FailSettings {
 		return nil, "settings update failed", notice{}
 	}
-	if !th.IgnorePermissions {
+	was := th.Profile
+	switch {
+	case th.IgnorePermissions:
+	case th.SettingsProfile == NoProfile:
+		th.Profile = ""
+	case th.SettingsProfile != "":
+		th.Profile = th.SettingsProfile
+	default:
 		th.Profile = perm
 	}
 	if th.BusyAfterSettings {
 		th.Status = codex.ThreadStatus{Type: codex.StatusActive, ActiveFlags: []string{}}
 	}
-	if th.NoSettingsNotice {
+	changed := th.Profile != was || th.SettingsSandbox != ""
+	if th.NoSettingsNotice || !changed || !sess.subbed[id] {
 		return map[string]any{}, "", notice{}
 	}
 	settings := map[string]any{"cwd": th.Cwd, "model": "gpt-test", "modelProvider": "openai",
@@ -416,7 +470,7 @@ func (f *Fake) settingsUpdate(raw json.RawMessage) (any, string, notice) {
 	if th.SettingsNoticeFor != "" {
 		to = th.SettingsNoticeFor
 	}
-	return map[string]any{}, "", notice{first: th.SettingsNoticeFirst, v: map[string]any{
+	return map[string]any{}, "", notice{first: th.SettingsNoticeFirst, delay: th.SettingsNoticeDelay, v: map[string]any{
 		"method": "thread/settings/updated",
 		"params": map[string]any{"threadId": to, "threadSettings": settings}}}
 }
