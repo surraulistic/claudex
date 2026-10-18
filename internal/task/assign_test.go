@@ -241,3 +241,25 @@ func TestCorrectedReportLandsUnderTheLiveTaskAndSaysSo(t *testing.T) {
 			last.ClaimedTask, last.Correction)
 	}
 }
+
+func TestResolveWithoutExecutorNeverCorrectsToSomeoneElsesTask(t *testing.T) {
+	// R3: из шелла человека или cron исполнителя нет, и единственное активное
+	// поручение в системе — чужое.
+	recs := []journal.Record{
+		{Task: "aaaa0001", Event: journal.Started, Pane: "wE:p1"},
+		{Task: "bbbb0002", Event: journal.Started, Pane: "wE:p2"},
+		{Task: "bbbb0002", Event: journal.Reported, Outcome: "готово"},
+	}
+	if r, err := Resolve(recs, "", "bbbb0002"); err != nil || r.Corrected || r.Task != "bbbb0002" {
+		t.Fatalf("точный закрытый id — повтор доставки, не догадка: %+v %v", r, err)
+	}
+	for _, claimed := range []string{"", "ffff0009", "текст отчёта"} {
+		r, err := Resolve(recs, "", claimed)
+		if err == nil || r.Corrected {
+			t.Fatalf("%q: без исполнителя не исправляем на чужое aaaa0001, получено %+v %v", claimed, r, err)
+		}
+	}
+	if r, err := Resolve(recs, "", "aaaa0001"); err != nil || r.Task != "aaaa0001" || r.Corrected {
+		t.Fatalf("активный id, названный точно, принимается: %+v %v", r, err)
+	}
+}

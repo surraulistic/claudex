@@ -3,6 +3,7 @@ package task
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/surraulistic/claudex/internal/claudesess"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -151,6 +152,67 @@ func OpenFor(recs []journal.Record, who string) []Assignment {
 	return a
 }
 
+// ContinueTarget — какое открытое поручение исполнителя продолжает отправка от
+// sender. Пустой id без ошибки — заводить новое, why говорит почему.
+//
+// Продолжение возвращает результат тому, кто затеял исходное поручение, —
+// поэтому продолжать можно только своё: чужое увело бы ответ прежнему ведущему.
+// Брошенное не продолжается: его уже никто не ждёт.
+func ContinueTarget(recs []journal.Record, executor string, sender Wake, now time.Time) (id, why string, err error) {
+	open := OpenFor(recs, executor)
+	if len(open) == 0 {
+		return "", "", nil
+	}
+	states := statesAt(recs, now)
+	var live, mine []Assignment
+	for _, a := range open {
+		if states[a.Task].State == StateAbandoned {
+			continue
+		}
+		live = append(live, a)
+		if sameCaller(a, sender) {
+			mine = append(mine, a)
+		}
+	}
+	switch {
+	case len(live) == 0:
+		return "", fmt.Sprintf("открытые поручения %s брошены", short(executor)), nil
+	case sender.Empty():
+		return "", "", &SenderUnknown{Who: executor, Open: live}
+	case len(mine) == 1:
+		return mine[0].Task, "", nil
+	case len(mine) > 1:
+		return "", "", &TooManyOpen{Who: executor, Open: mine}
+	}
+	return "", fmt.Sprintf("открытое у %s поручение %s затеял другой ведущий (%s)",
+		short(executor), live[0].Task, short(live[0].Target)), nil
+}
+
+// sameCaller — тот ли это ведущий. У панели адрес — место, а не разговор,
+// поэтому нужен ещё и тот же разговор в ней.
+func sameCaller(a Assignment, w Wake) bool {
+	kind := orElse(a.Kind, KindPane)
+	if w.Empty() || kind != w.Kind || a.Target != w.Target {
+		return false
+	}
+	return kind != KindPane || a.Session != "" && a.Session == w.Session
+}
+
+// SenderUnknown — отправитель не определён, а у исполнителя открыта работа:
+// чья она, не угадать, и продолжение могло бы увести ответ чужому ведущему.
+type SenderUnknown struct {
+	Who  string
+	Open []Assignment
+}
+
+func (e *SenderUnknown) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "отправитель не определён (нет ни треда Codex, ни разговора Claude Code, ни панели herdr), "+
+		"а у %s открытых поручений %d — чьё это продолжение, не угадать:", short(e.Who), len(e.Open))
+	listOpen(&b, e.Open)
+	return b.String()
+}
+
 // TooManyOpen — у работника несколько незакрытых поручений, и какое из них
 // продолжают, знает только человек.
 type TooManyOpen struct {
@@ -162,14 +224,18 @@ func (e *TooManyOpen) Error() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "у %s незакрытых поручений %d — какое продолжаем, не угадать:",
 		short(e.Who), len(e.Open))
-	for i, a := range e.Open {
+	listOpen(&b, e.Open)
+	return b.String()
+}
+
+func listOpen(b *strings.Builder, open []Assignment) {
+	for i, a := range open {
 		if i == 5 {
-			fmt.Fprintf(&b, "\n  … и ещё %d", len(e.Open)-5)
+			fmt.Fprintf(b, "\n  … и ещё %d", len(open)-5)
 			break
 		}
-		fmt.Fprintf(&b, "\n  %s  %s", a.Task, a.Started.Format("02.01 15:04"))
+		fmt.Fprintf(b, "\n  %s  %s", a.Task, a.Started.Format("02.01 15:04"))
 	}
 	b.WriteString("\n  продолжить названное: claudex send <id поручения> \"…\"" +
 		"\n  завести отдельное:    claudex send <разговор> --new \"…\"")
-	return b.String()
 }

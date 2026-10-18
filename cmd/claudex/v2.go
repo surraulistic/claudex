@@ -75,12 +75,16 @@ func cmdSend(o opts, tgt, prompt string) (err error) {
 		// Отправить работнику, у которого работа уже идёт, — это чаще всего
 		// продолжение, а не второе поручение. Прежде каждая отправка заводила
 		// отдельное, и у одного исполнителя их накопилось 62.
-		id, err := continueOrStart(recs, a.Session.ID, o.newSession)
+		sender := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)
+		id, why, err := continueOrStart(recs, a.Session.ID, o.newSession, sender)
 		if err != nil {
 			return exitcode.Wrap(exitcode.BadCall, err)
 		}
 		if id != "" {
 			return sendContinuation(o, id, recs, prompt)
+		}
+		if why != "" {
+			fmt.Printf("не продолжение: %s — заводится отдельное поручение с возвратом сюда\n", why)
 		}
 		return delegateToConversation(o, a.Session, "", prompt)
 	case task.AddrTask:
@@ -184,6 +188,23 @@ func cmdHeadless(o opts, targetName, prompt string) error {
 
 	workerPrompt := task.WithReport(prompt, "", id)
 	session, err := headless.Start(context.Background(), cwd, id, "", workerPrompt)
+	if errors.Is(err, headless.ErrNotListed) {
+		// Сессия работает с CLAUDEX_TASK_ID: привязку допишет её Stop-хук или done.
+		if err := j.Append(journal.Record{Task: id, Event: journal.Finished,
+			Outcome: task.SentNoWait}); err != nil {
+			return exitcode.Wrap(exitcode.Fail, err)
+		}
+		if o.pretty {
+			return emit(o, map[string]any{
+				"task": id, "executor": map[string]any{"kind": "claude-background",
+					"name": session.Name, "cwd": session.CWD, "bound": false},
+				"state": task.StateSent, "return_to": wake, "note": err.Error(),
+			})
+		}
+		fmt.Printf("поручение %s запущено в headless Claude (%s), но сессия ещё не видна: %v\n", id, cwd, err)
+		fmt.Printf("привяжется при первом её ходе; результат вернётся сюда; полный ход: claudex task log %s\n", id)
+		return nil
+	}
 	if err != nil {
 		j.Append(journal.Record{Task: id, Event: journal.LaunchFailed,
 			Outcome: "headless запуск не удался", Reason: err.Error(), Prompt: prompt})
@@ -373,6 +394,9 @@ func cmdTaskOne(o opts, id string) error {
 	switch l.State {
 	case task.StateQueued:
 		fmt.Println("  событие в очереди треда Codex, ход с ним не начат — это ещё не обработка")
+	case task.StateUnconfirmed:
+		fmt.Println("  событие, положенное codex queue без app-server, из очереди взято, а хода с его текстом" +
+			" не нашлось: прочитано ли, неизвестно; повторно не кладём")
 	case task.StateUndelivered:
 		if turnFailed(recs, id) {
 			fmt.Println("  ход треда с событием оборвался: повторно не кладём, чтобы не повторить сделанное —" +
@@ -460,19 +484,26 @@ func cmdDoctor(o opts) error {
 		add("журнал", true, "%d записей, ожидающих поручений %d", len(recs), len(task.Open(recs)))
 		lost := task.LostReports(recs)
 		live := task.LivePending(recs, time.Now())
-		var failedTurns int
+		var failedTurns, unconfirmed int
 		for _, l := range lost {
-			if l.Cause == task.CauseTurnFailed {
+			switch l.Cause {
+			case task.CauseTurnFailed:
 				failedTurns++
+			case task.CauseConsumedUnconfirmed:
+				unconfirmed++
 			}
 		}
 		if failedTurns > 0 {
 			add("ход треда оборвался", false,
 				"%d — событие могло остаться необработанным, повторно не кладём: claudex undelivered", failedTurns)
 		}
+		if unconfirmed > 0 {
+			add("обработка не подтверждена", false,
+				"%d — событие взято из очереди треда без app-server, хода с ним не видно: claudex undelivered", unconfirmed)
+		}
 		lost = lost[:0:0]
 		for _, l := range task.LostReports(recs) {
-			if l.Cause != task.CauseTurnFailed {
+			if !task.NoRetry(l.Cause) {
 				lost = append(lost, l)
 			}
 		}
@@ -605,22 +636,16 @@ func cmdArchive(o opts, args []string) error {
 
 // continueOrStart решает, продолжать ли уже идущую работу.
 //
-// Пустой идентификатор значит «завести новое». Отправить работнику, у которого
-// работа идёт, — это чаще всего продолжение: прежде каждая отправка заводила
-// отдельное поручение, и у одного исполнителя их накопилось 62, ни одно не
-// закрыто. Несколько незакрытых — отказ: какое продолжают, знает только человек.
-func continueOrStart(recs []journal.Record, session string, forceNew bool) (string, error) {
+// Пустой идентификатор значит «завести новое», why — почему не продолжение.
+// Отправить работнику, у которого работа идёт, — это чаще всего продолжение:
+// прежде каждая отправка заводила отдельное поручение, и у одного исполнителя
+// их накопилось 62, ни одно не закрыто. Продолжается только своё и не
+// брошенное; несколько своих или неизвестный отправитель — отказ.
+func continueOrStart(recs []journal.Record, session string, forceNew bool, sender task.Wake) (string, string, error) {
 	if forceNew {
-		return "", nil
+		return "", "", nil
 	}
-	switch open := task.OpenFor(recs, session); len(open) {
-	case 0:
-		return "", nil
-	case 1:
-		return open[0].Task, nil
-	default:
-		return "", &task.TooManyOpen{Who: session, Open: open}
-	}
+	return task.ContinueTarget(recs, session, sender, time.Now())
 }
 
 func turnFailed(recs []journal.Record, id string) bool {

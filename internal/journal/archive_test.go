@@ -2,8 +2,12 @@ package journal
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -126,5 +130,83 @@ func TestADayIsStillAllowed(t *testing.T) {
 	path := withTasks(t, map[string]time.Duration{"aaaaaaaa": 60 * 24 * time.Hour})
 	if _, err := Archive(path, MinArchiveAge, true); err != nil {
 		t.Fatalf("сутки принимаются, получено %v", err)
+	}
+}
+
+func TestAppendWaitsWhileArchiveHoldsTheJournal(t *testing.T) {
+	// R6: между чтением и rename дописанное в старый файл пропало бы.
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	done := make(chan error, 1)
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go withLock(path, syscall.LOCK_EX, func() error {
+		close(held)
+		<-release
+		return nil
+	})
+	<-held
+	go func() { done <- Open(path).Append(Record{Task: "cccccccc", Event: Started}) }()
+	select {
+	case err := <-done:
+		t.Fatalf("запись прошла мимо замка архивации: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecordsAppendedDuringArchiveSurvive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	j := Open(path)
+	old := time.Now().Add(-60 * 24 * time.Hour)
+	for i := 0; i < 5000; i++ {
+		j.Append(Record{Task: fmt.Sprintf("%08x", i), Event: Started, Time: old, Prompt: strings.Repeat("x", 200)})
+	}
+	// Писатели дописывают всё время, пока идёт архивация: окно между чтением
+	// и rename они застают наверняка.
+	const writers = 4
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	stop := make(chan struct{})
+	written := 0
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if Open(path).Append(Record{Task: fmt.Sprintf("f%03x%04x", w, i), Event: Started}) == nil {
+					mu.Lock()
+					written++
+					mu.Unlock()
+				}
+			}
+		}(w)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := Archive(path, 30*24*time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	recs, err := Open(path).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := 0
+	for _, r := range recs {
+		if strings.HasPrefix(r.Task, "f") {
+			fresh++
+		}
+	}
+	if fresh != written {
+		t.Fatalf("дописанное во время архивации цело: %d из %d", fresh, written)
 	}
 }

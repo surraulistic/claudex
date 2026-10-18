@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/surraulistic/claudex/internal/herdr"
+	"github.com/surraulistic/claudex/internal/herdr/herdrtest"
 	"github.com/surraulistic/claudex/internal/journal"
 	"github.com/surraulistic/claudex/internal/task"
 )
@@ -387,5 +389,76 @@ func TestArchivingFailureIsVisibleNotSwallowed(t *testing.T) {
 	}
 	if s.Status().Archived != 0 {
 		t.Fatalf("ничего не переносилось, получено %d", s.Status().Archived)
+	}
+}
+
+// silentPaneLeader — молчун, затеявший которого — панель с разговором
+// leader-s; herdr сейчас показывает в ней разговор in.
+func silentPaneLeader(t *testing.T, in string) (*herdrtest.Fake, *journal.Journal) {
+	t.Helper()
+	f := herdrtest.Start(t)
+	f.Reply("agent.get", `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p1","agent":"claude",`+
+		`"agent_status":"idle","agent_session":{"value":"`+in+`"}}}}`)
+	f.Reply("agent.prompt", `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p1","agent_status":"idle"}}}`)
+	f.Reply("notification.show", `{"id":"x","result":{"shown":true}}`)
+	j := newJournal(t)
+	now := time.Now()
+	for _, r := range []journal.Record{
+		{Task: "43bc6e11", Event: journal.Started, Pane: "wE:p37", PaneSession: "разговор",
+			Target: "wE:p1", TargetSession: "leader-s", TargetKind: task.KindPane, Time: now.Add(-time.Hour)},
+		{Task: "43bc6e11", Event: journal.Idle, PaneSession: "разговор",
+			Reason: "ветка запушена, тесты зелёные", Time: now.Add(-10 * time.Minute)},
+	} {
+		j.Append(r)
+	}
+	return f, j
+}
+
+func requested(f *herdrtest.Fake, method string) []string {
+	var out []string
+	for _, r := range f.Requests() {
+		if strings.Contains(r, `"method":"`+method+`"`) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestSilentWorkerWakesPaneLeaderInTheSameConversation(t *testing.T) {
+	// R1: «нужный разговор» панели — её разговор, а не id панели.
+	f, j := silentPaneLeader(t, "leader-s")
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Client: herdr.New(f.Path), Flush: spyFlush(true, &seen)})
+
+	got := s.Once(context.Background())
+	if len(got.Silent) != 1 || got.Silent[0] != "43bc6e11" {
+		t.Fatalf("ведущего-панель разбудили, получено %+v", got)
+	}
+	prompts := requested(f, "agent.prompt")
+	if len(prompts) != 1 || !strings.Contains(prompts[0], "ветка запушена") ||
+		!strings.Contains(prompts[0], "claudex task 43bc6e11") {
+		t.Fatalf("панель получила текст с последней репликой, а не пустую строку: %v", prompts)
+	}
+	if n := len(requested(f, "notification.show")); n != 0 {
+		t.Fatalf("дошло — человека не тревожим, уведомлений %d", n)
+	}
+}
+
+func TestSilentWorkerNeverTellsHumanWhenPaneHasAnotherConversation(t *testing.T) {
+	f, j := silentPaneLeader(t, "другой")
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Client: herdr.New(f.Path), Flush: spyFlush(true, &seen)})
+
+	for i := 0; i < 3; i++ {
+		s.next = map[string]time.Time{}
+		if got := s.Once(context.Background()); len(got.Silent) != 0 {
+			t.Fatalf("в панели чужой разговор — не будим: %+v", got)
+		}
+	}
+	if n := len(requested(f, "agent.prompt")); n != 0 {
+		t.Fatalf("в чужой разговор не пишем: %d", n)
+	}
+	if n := len(requested(f, "notification.show")); n != 0 {
+		t.Fatalf("про молчание человеку всплывашки на каждую попытку не идут: %d", n)
 	}
 }

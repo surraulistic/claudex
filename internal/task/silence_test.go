@@ -112,3 +112,22 @@ func TestFailedWakeIsRetried(t *testing.T) {
 		t.Fatalf("неудачу повторяем, получено %+v", got)
 	}
 }
+
+func TestTalkativeWorkerDoesNotStaySilentForeverAfterTheTerm(t *testing.T) {
+	// R8: разговор, который продолжает говорить, обновляет idle каждым ходом.
+	// Срок считается от заведения, а не от последней реплики.
+	now := time.Now()
+	recs := func(startedAgo time.Duration) []journal.Record {
+		return []journal.Record{
+			{Task: "aaaa0001", Event: journal.Started, PaneSession: "s", Time: now.Add(-startedAgo)},
+			{Task: "aaaa0001", Event: journal.Idle, PaneSession: "s", Reason: "ещё реплика",
+				Time: now.Add(-10 * time.Minute)},
+		}
+	}
+	if got := SilentTasks(recs(time.Hour), now, 0); len(got) != 1 {
+		t.Fatalf("свежее поручение — молчун, получено %+v", got)
+	}
+	if got := SilentTasks(recs(AbandonAfter+time.Hour), now, 0); len(got) != 0 {
+		t.Fatalf("старше срока от заведения — не будим, получено %+v", got)
+	}
+}

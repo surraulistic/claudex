@@ -178,7 +178,7 @@ func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assign
 	woken := map[string]bool{}
 	for _, r := range recs {
 		if r.Event == journal.Notified && r.Stage == StageReported &&
-			(ReachedLeader(r.Outcome) || r.Cause == CauseTurnFailed) {
+			(ReachedLeader(r.Outcome) || NoRetry(r.Cause)) {
 			woken[r.Task] = true
 		}
 	}

@@ -54,7 +54,11 @@ const (
 	HoldOpenElsewhere = "thread_open_elsewhere"
 	HoldEphemeral     = "thread_ephemeral"
 	HoldItemGone      = "queue_item_gone"
-	HoldNotStarted    = "turn_not_started"
+	// HoldConsumedUnconfirmed — запись, положенная `codex queue`, из очереди
+	// взята, а хода с её текстом в истории нет: прочитана ли — неизвестно.
+	// Повтор ничего не узнает, поэтому дальше не дожимается.
+	HoldConsumedUnconfirmed = "consumed_unconfirmed"
+	HoldNotStarted          = "turn_not_started"
 	// Загруженный тред: профиль не прочитан resume или его смена не
 	// подтверждена уведомлением сервера. Ничего не кладём.
 	HoldLoadedProfile = "loaded_thread_profile_unconfirmed"
@@ -96,6 +100,9 @@ type WakeRequest struct {
 	// Since — не позже первой попытки положить сообщение: ход с ним не может
 	// начаться раньше, и история треда глубже не листается.
 	Since time.Time
+	// QueuedHash — TextHash своей записи, положенной `codex queue`: её
+	// clientUserMessageId случаен, и ход узнаётся только по тексту.
+	QueuedHash string
 	// QueuedByCLI — что журнал клал в этот тред через `codex queue`. Только
 	// эти записи без своего clientUserMessageId не считаются чужими.
 	QueuedByCLI []CLIQueued
@@ -284,6 +291,20 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 	switch {
 	case queued:
 		res.Stage, res.QueueID, res.ClientID = StageAccepted, mine.ID, mine.ClientID
+	case req.Accepted && req.QueuedHash != "":
+		c, cancel = call()
+		t, id, found, err := findTurnByText(c, s, req.Thread, req.Since, req.QueuedHash)
+		cancel()
+		if err != nil {
+			return res, err
+		}
+		if found {
+			return turnResult(t, id), nil
+		}
+		res.Stage, res.Hold = StageAccepted, HoldConsumedUnconfirmed
+		res.Reason = "запись, положенная codex queue без app-server, из очереди взята, а хода с её текстом " +
+			"в истории треда нет: прочитана ли она, неизвестно; повторно не кладём"
+		return res, nil
 	case req.Accepted:
 		res.Stage, res.Hold = StageAccepted, HoldItemGone
 		res.Reason = "сообщение было принято, но в очереди его нет и хода с ним не видно: " +
@@ -498,7 +519,10 @@ func pollStart(ctx context.Context, s AppServer, req WakeRequest, res WakeResult
 }
 
 const (
-	turnPage     = 50
+	turnPage = 50
+	// turnPageFull меньше: ход целиком со всеми выводами инструментов, а
+	// сообщение app-server не больше 16 МиБ.
+	turnPageFull = 5
 	turnMaxPages = 40
 	// turnSlack — запас на расхождение часов claudex и демона.
 	turnSlack = 5 * time.Minute
@@ -508,35 +532,59 @@ const (
 // старым до since. Не долистали — ошибка, а не «хода нет»: иначе принятое
 // сообщение выглядело бы пропавшим.
 func findTurn(ctx context.Context, s AppServer, thread string, since time.Time, clientIDs ...string) (Turn, string, error) {
+	t, id, _, err := scanTurns(ctx, s, thread, since, ItemsSummary, func(it TurnItem) bool {
+		for _, want := range clientIDs {
+			if want != "" && it.ClientID == want {
+				return true
+			}
+		}
+		return false
+	})
+	return t, id, err
+}
+
+// findTurnByText ищет ход, начатый сообщением с этим TextHash. Текст сообщения
+// в истории есть только при itemsView=full. id — clientId найденного
+// сообщения, может быть пуст.
+func findTurnByText(ctx context.Context, s AppServer, thread string, since time.Time, hash string) (Turn, string, bool, error) {
+	return scanTurns(ctx, s, thread, since, ItemsFull, func(it TurnItem) bool {
+		return len(it.Content) > 0 && TextHash(it.Text()) == hash
+	})
+}
+
+func scanTurns(ctx context.Context, s AppServer, thread string, since time.Time, view string,
+	match func(TurnItem) bool) (Turn, string, bool, error) {
 	floor := int64(0)
 	if !since.IsZero() {
 		floor = since.Add(-turnSlack).Unix()
 	}
+	limit := turnPage
+	if view == ItemsFull {
+		limit = turnPageFull
+	}
 	cursor := ""
 	for page := 0; page < turnMaxPages; page++ {
-		turns, next, err := s.TurnsPage(ctx, thread, cursor, turnPage)
+		turns, next, err := s.TurnsPage(ctx, thread, cursor, limit, view)
 		if err != nil {
-			return Turn{}, "", err
+			return Turn{}, "", false, err
 		}
 		for _, t := range turns {
-			for _, id := range t.ClientIDs() {
-				for _, want := range clientIDs {
-					if want != "" && id == want {
-						return t, id, nil
-					}
+			for _, it := range t.Items {
+				if it.Type == "userMessage" && match(it) {
+					return t, it.ClientID, true, nil
 				}
 			}
 		}
 		if next == "" || len(turns) == 0 {
-			return Turn{}, "", nil
+			return Turn{}, "", false, nil
 		}
 		if last := turns[len(turns)-1].StartedAt; floor > 0 && last > 0 && last < floor {
-			return Turn{}, "", nil
+			return Turn{}, "", false, nil
 		}
 		cursor = next
 	}
-	return Turn{}, "", fmt.Errorf("история треда %s длиннее %d ходов: свой ход не найден и не исключён",
-		thread, turnPage*turnMaxPages)
+	return Turn{}, "", false, fmt.Errorf("история треда %s длиннее %d ходов: свой ход не найден и не исключён",
+		thread, limit*turnMaxPages)
 }
 
 func turnResult(t Turn, clientID string) WakeResult {

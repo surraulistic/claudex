@@ -122,7 +122,7 @@ func TestLifecycleStatesAreNamedInOnePlace(t *testing.T) {
 	for _, s := range []string{
 		task.StateCreated, task.StateSent, task.StateWorking, task.StateProgress,
 		task.StateNeedsInput, task.StateDone, task.StateFailed,
-		task.StateUndelivered, task.StateLost,
+		task.StateUndelivered, task.StateQueued, task.StateUnconfirmed, task.StateLost,
 	} {
 		if s == "" {
 			t.Fatal("состояние без имени")

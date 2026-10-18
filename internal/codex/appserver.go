@@ -97,6 +97,12 @@ type UserInput struct {
 	Text string `json:"text,omitempty"`
 }
 
+// Сколько подробностей хода отдаёт thread/turns/list.
+const (
+	ItemsSummary = "summary"
+	ItemsFull    = "full"
+)
+
 // Статусы хода.
 const (
 	TurnInProgress  = "inProgress"
@@ -116,17 +122,16 @@ type Turn struct {
 type TurnItem struct {
 	Type     string `json:"type"`
 	ClientID string `json:"clientId,omitempty"`
+	// Content приходит только при itemsView=full.
+	Content []UserInput `json:"content,omitempty"`
 }
 
-// ClientIDs — чьи сообщения начали этот ход.
-func (t Turn) ClientIDs() []string {
-	var out []string
-	for _, it := range t.Items {
-		if it.Type == "userMessage" && it.ClientID != "" {
-			out = append(out, it.ClientID)
-		}
+func (it TurnItem) Text() string {
+	var b strings.Builder
+	for _, in := range it.Content {
+		b.WriteString(in.Text)
 	}
-	return out
+	return b.String()
 }
 
 // AppServer — то, что пробуждению нужно от app-server. Интерфейс ради
@@ -150,7 +155,7 @@ type AppServer interface {
 	QueueStart(ctx context.Context, thread, queueID string) (Turn, error)
 	// TurnsPage — страница ходов, новые первыми; next пуст, когда ходов
 	// больше нет.
-	TurnsPage(ctx context.Context, thread, cursor string, limit int) (turns []Turn, next string, err error)
+	TurnsPage(ctx context.Context, thread, cursor string, limit int, view string) (turns []Turn, next string, err error)
 	Close() error
 }
 
@@ -444,12 +449,12 @@ func (c *client) QueueStart(ctx context.Context, thread, queueID string) (Turn, 
 	return r.Turn, err
 }
 
-func (c *client) TurnsPage(ctx context.Context, thread, cursor string, limit int) ([]Turn, string, error) {
+func (c *client) TurnsPage(ctx context.Context, thread, cursor string, limit int, view string) ([]Turn, string, error) {
 	var r struct {
 		Data       []Turn  `json:"data"`
 		NextCursor *string `json:"nextCursor"`
 	}
-	p := map[string]any{"threadId": thread, "limit": limit, "itemsView": "summary"}
+	p := map[string]any{"threadId": thread, "limit": limit, "itemsView": view}
 	if cursor != "" {
 		p["cursor"] = cursor
 	}

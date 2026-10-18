@@ -1470,8 +1470,14 @@ func cmdDelegate(o opts, tgt, prompt string) (err error) {
 		wake := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)
 		j.Append(journal.Record{Task: id, Event: journal.Started, Pane: p.ID,
 			Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
-			Prompt: prompt})
+			PaneSession: a.Session.Value, Prompt: prompt})
 		if _, err := client().Prompt(p.ID, prompt, nil, 0); err != nil {
+			// Без ожидания ответ herdr — только о приёме: отказ или недозвон
+			// значат, что текст не ушёл. Обрыв после запроса — неизвестно.
+			if herdr.CodeOf(err) != "" || herdr.Unreachable(err) {
+				j.Append(journal.Record{Task: id, Event: journal.LaunchFailed, Pane: p.ID,
+					Prompt: prompt, Outcome: "не отправлено", Reason: err.Error()})
+			}
 			return exitcode.Wrap(exitcode.BadCall, err)
 		}
 		// Отправка без ожидания тоже попадает в журнал: иначе `tasks` о ней
@@ -2179,7 +2185,7 @@ func undeliveredWakes(recs []journal.Record) []string {
 			order = append(order, k)
 		}
 		seen[k] = r.Outcome
-		if r.Outcome == task.WokeUp {
+		if task.ReachedLeader(r.Outcome) {
 			woken[k] = true
 		}
 	}

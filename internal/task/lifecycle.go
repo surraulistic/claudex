@@ -43,6 +43,10 @@ const (
 	// Не undelivered: сообщение цело и у адресата. И не delivered: его никто
 	// ещё не прочитал.
 	StateQueued = "queued"
+	// StateUnconfirmed — событие взято из очереди треда без app-server, а хода
+	// с ним не нашлось: прочитано ли, неизвестно. Не queued — в очереди его
+	// нет, и не delivered — доказательства нет. Не дожимается.
+	StateUnconfirmed = "unconfirmed"
 	// StateAbandoned — поручение висит без движения так долго, что ждать его
 	// больше незачем. Отдельно от sent потому, что смешивать их дорого во всех
 	// смыслах: список ожидающих распухает мёртвыми, и на вопрос «что сейчас»
@@ -69,6 +73,9 @@ type Lifecycle struct {
 	// или панель herdr. Наблюдателю он безразличен: будит он одинаково, а
 	// разница живёт в доставке.
 	CallerKind string `json:"caller_kind,omitempty"`
+	// CallerSession — разговор затеявшего. У панели адрес — место, и писать в
+	// неё можно, только если там всё тот же разговор.
+	CallerSession string `json:"caller_session,omitempty"`
 	// Delivery — чем затеявшего будили в последний раз и чем разбудят: событием
 	// или отчётом целиком. Видно, чтобы «почему мне прилетела сводка» имело
 	// ответ.
@@ -94,7 +101,7 @@ func StateOf(recs []journal.Record, id string) Lifecycle {
 func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 	l := Lifecycle{Task: id, State: StateCreated}
 	var started, reported, refused, launchFailed bool
-	var delivered, queued bool
+	var delivered, queued, unconfirmed bool
 	var sawNotify bool
 
 	var last time.Time
@@ -115,7 +122,7 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 		case journal.Started:
 			started = true
 			l.Since = r.Time
-			l.Caller, l.CallerKind = r.Target, r.TargetKind
+			l.Caller, l.CallerKind, l.CallerSession = r.Target, r.TargetKind, r.TargetSession
 			l.Executor = executorName(r)
 		case journal.Reported:
 			reported = true
@@ -137,9 +144,12 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 			if r.Stage == StageReported && r.Outcome == ThreadQueued {
 				queued = true
 			}
+			if r.Stage == StageReported && r.Cause == CauseConsumedUnconfirmed {
+				queued, unconfirmed = false, true
+			}
 			// Ход начался — событие из очереди уже взято, что бы ни было дальше.
 			if r.Stage == StageReported && rank(r.ThreadStage) >= rank(codex.StageStarted) {
-				queued = false
+				queued, unconfirmed = false, false
 			}
 		}
 	}
@@ -147,12 +157,12 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 	if launchFailed {
 		started = false
 	}
-	return settle(l, started, reported, refused || launchFailed, sawNotify, delivered, queued, last, now)
+	return settle(l, started, reported, refused || launchFailed, sawNotify, delivered, queued, unconfirmed, last, now)
 }
 
 // settle — правила, общие для обоих путей: одиночного разбора и прохода по
 // всему журналу. Держать их в двух местах значит гарантированно разойтись.
-func settle(l Lifecycle, started, reported, refused, notified, delivered, queued bool,
+func settle(l Lifecycle, started, reported, refused, notified, delivered, queued, unconfirmed bool,
 	last, now time.Time) Lifecycle {
 
 	if l.Delivery == "" && l.CallerKind != "" {
@@ -170,6 +180,9 @@ func settle(l Lifecycle, started, reported, refused, notified, delivered, queued
 			if queued {
 				l.State = StateQueued
 			}
+			if unconfirmed {
+				l.State = StateUnconfirmed
+			}
 		}
 	case started:
 		l.State = StateSent
@@ -180,7 +193,8 @@ func settle(l Lifecycle, started, reported, refused, notified, delivered, queued
 	// недоставленного цел и дослать его можно когда угодно — но в ответе на
 	// «что происходит сейчас» сентябрьскому отчёту места нет. Он никуда не
 	// делся: `--all`, `claudex task <id>` и дожим видят его по-прежнему.
-	if l.State == StateSent || l.State == StateUndelivered || l.State == StateQueued {
+	if l.State == StateSent || l.State == StateUndelivered || l.State == StateQueued ||
+		l.State == StateUnconfirmed {
 		if !last.IsZero() && now.Sub(last) > AbandonAfter {
 			l.State = StateAbandoned
 		}
@@ -262,7 +276,7 @@ func open(recs []journal.Record, now time.Time, withAbandoned bool) []Lifecycle 
 			continue
 		}
 		switch l.State {
-		case StateSent, StateUndelivered, StateQueued:
+		case StateSent, StateUndelivered, StateQueued, StateUnconfirmed:
 			out = append(out, l)
 		case StateAbandoned:
 			if withAbandoned {
@@ -279,7 +293,7 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 		l                                        Lifecycle
 		last                                     time.Time
 		started, reported, refused, launchFailed bool
-		notified, delivered, queued              bool
+		notified, delivered, queued, unconfirmed bool
 	}
 	all := map[string]*acc{}
 	for _, r := range recs {
@@ -301,7 +315,7 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 		case journal.Started:
 			a.started = true
 			a.l.Since = r.Time
-			a.l.Caller, a.l.CallerKind = r.Target, r.TargetKind
+			a.l.Caller, a.l.CallerKind, a.l.CallerSession = r.Target, r.TargetKind, r.TargetSession
 			a.l.Executor = executorName(r)
 		case journal.Reported:
 			a.reported = true
@@ -323,9 +337,12 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 			if r.Stage == StageReported && r.Outcome == ThreadQueued {
 				a.queued = true
 			}
+			if r.Stage == StageReported && r.Cause == CauseConsumedUnconfirmed {
+				a.queued, a.unconfirmed = false, true
+			}
 			// Ход начался — событие из очереди уже взято, что бы ни было дальше.
 			if r.Stage == StageReported && rank(r.ThreadStage) >= rank(codex.StageStarted) {
-				a.queued = false
+				a.queued, a.unconfirmed = false, false
 			}
 		}
 	}
@@ -334,7 +351,8 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 		if a.launchFailed {
 			a.started = false
 		}
-		out[id] = settle(a.l, a.started, a.reported, a.refused || a.launchFailed, a.notified, a.delivered, a.queued, a.last, now)
+		out[id] = settle(a.l, a.started, a.reported, a.refused || a.launchFailed, a.notified, a.delivered,
+			a.queued, a.unconfirmed, a.last, now)
 	}
 	return out
 }

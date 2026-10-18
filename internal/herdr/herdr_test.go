@@ -386,3 +386,16 @@ func TestNotifyReportsRefusal(t *testing.T) {
 		t.Fatalf("причина отказа доезжает, получено %q", reason)
 	}
 }
+
+func TestUnreachableMeansNothingWasSent(t *testing.T) {
+	_, err := New(filepath.Join(t.TempDir(), "нет.sock")).Prompt("wE:p1", "текст", nil, 0)
+	if err == nil || !Unreachable(err) || CodeOf(err) != "" {
+		t.Fatalf("недозвон опознаётся, получено %v", err)
+	}
+	if !strings.Contains(err.Error(), "herdr недоступен") {
+		t.Fatalf("текст ошибки прежний: %v", err)
+	}
+	if Unreachable(&Error{Method: "agent.prompt", Code: "timeout"}) {
+		t.Fatal("ответ herdr — не недозвон")
+	}
+}

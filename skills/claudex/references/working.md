@@ -29,17 +29,25 @@ reason to fork every substep into another session.
 
 ### Sending to someone already working continues their work
 
-If the worker has exactly one open assignment, your message **continues it**
-rather than opening a second one. It used to open a second one every time, and
-one worker accumulated 62 open assignments, none of them ever closed.
+If the worker has exactly one open assignment **that you started**, your
+message **continues it** rather than opening a second one. It used to open a
+second one every time, and one worker accumulated 62 open assignments, none of
+them ever closed.
+
+A continuation reports back to whoever started the original assignment, so
+someone else's open assignment is never continued: your message becomes a new
+tracked assignment that returns to you, and `send` says why. Abandoned
+assignments (no movement for 72 h) are not continued either. If claudex cannot
+tell who you are (no Codex thread, Claude Code conversation or herdr pane in
+the environment), it refuses instead of guessing.
 
 ```bash
 claudex send license "also check the stage config"   # continues the open work
 claudex send license --new "unrelated: audit deps"   # deliberately separate
 ```
 
-Several open assignments is a refusal listing them: which one you meant is
-something only you know.
+Several open assignments of yours is a refusal listing them: which one you
+meant is something only you know.
 
 `send` is tracked, asynchronous, and returns to its caller by default. The
 caller is whoever ran it — a Codex thread, a Claude Code conversation, or a

@@ -263,13 +263,22 @@ func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now 
 			continue
 		}
 		st := task.StateOf(recs, sl.Task)
-		w := task.WakeOf(st.CallerKind, st.Caller, st.Caller)
+		session := st.CallerSession
+		if session == "" && st.CallerKind != task.KindPane {
+			session = st.Caller
+		}
+		w := task.WakeOf(st.CallerKind, st.Caller, session)
 		if w.Target == "" {
 			continue
 		}
 		tried++
+		text := ""
+		if !task.WakeCapable(w.Kind) {
+			// Панель событие не читает: ей нужен текст, иначе уйдёт пустая реплика.
+			text = task.SilenceReport(sl, st.Executor)
+		}
 		d := task.Deliver(ctx, s.o.Client, s.o.Journal, sl.Task, w.Target,
-			"", task.DeliverOptions{
+			text, task.DeliverOptions{
 				Stage: task.StageReported, Kind: w.Kind, WantSession: w.Session,
 				HumanTold: true, Event: task.SilenceEvent(sl, st.Executor),
 				Deadline: silenceDeadline(w.Kind), Poll: time.Second,

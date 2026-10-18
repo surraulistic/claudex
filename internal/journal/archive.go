@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -57,6 +58,17 @@ func Archive(path string, older time.Duration, dry bool) (ArchiveResult, error) 
 		return res, fmt.Errorf("%w (%s): архивация меряется днями — похоже, единицы перепутаны",
 			ErrArchiveTooSoon, older)
 	}
+	// От чтения до rename никто не дописывает: дописанное между ними
+	// пропало бы вместе со старым файлом.
+	err := withLock(path, syscall.LOCK_EX, func() error {
+		var err error
+		res, err = archive(path, older, dry, res)
+		return err
+	})
+	return res, err
+}
+
+func archive(path string, older time.Duration, dry bool, res ArchiveResult) (ArchiveResult, error) {
 	j := Open(path)
 	recs, err := j.Read()
 	if err != nil {

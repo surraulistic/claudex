@@ -4,6 +4,7 @@ package headless
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,10 @@ import (
 )
 
 const startTimeout = 30 * time.Second
+
+// ErrNotListed — `claude --bg` отработал, а сессия в `claude agents --json`
+// ещё не видна: запуск удался, привязки пока нет.
+var ErrNotListed = errors.New("фоновая сессия запущена, но в claude agents --json пока не видна")
 
 type Session struct {
 	ID        string `json:"id"`
@@ -77,7 +82,11 @@ func Start(ctx context.Context, cwd, taskID, _sessionID, prompt string) (Session
 		}
 		return Session{}, fmt.Errorf("Claude Code не запустил фоновую сессию: %w", err)
 	}
-	return latestSession(ctx, bin, name, abs, "")
+	s, err := latestSession(ctx, bin, name, abs, "")
+	if err != nil {
+		return Session{Name: name, CWD: abs, Kind: "background"}, fmt.Errorf("%w: %v", ErrNotListed, err)
+	}
+	return s, nil
 }
 
 // Resume continues a tracked background session with another instruction.

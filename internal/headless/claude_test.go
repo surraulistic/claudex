@@ -2,8 +2,10 @@ package headless
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -89,5 +91,38 @@ func TestOversizedPromptIsRefusedBeforeLaunch(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("Claude Code не запускался")
+	}
+}
+
+// stubClaude — `claude --bg` отвечает кодом bgExit, а `claude agents --json`
+// сессию не показывает.
+func stubClaude(t *testing.T, bgExit int) string {
+	t.Helper()
+	bin := t.TempDir()
+	script := "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then printf '[]'; exit 0; fi\nexit " +
+		strconv.Itoa(bgExit) + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	return t.TempDir()
+}
+
+func TestLaunchedButNotYetListedIsNotALaunchFailure(t *testing.T) {
+	// R9: --bg вернул 0, а claude agents сессию за 3 с не показал.
+	project := stubClaude(t, 0)
+	s, err := Start(context.Background(), project, "abc12345", "", "задача")
+	if !errors.Is(err, ErrNotListed) {
+		t.Fatalf("запуск удался, привязки нет — это не отказ запуска, получено %v", err)
+	}
+	if s.Name != "claudex-abc12345" || s.CWD != project || s.SessionID != "" {
+		t.Fatalf("известное о запуске сохранено, идентификатор не выдуман: %+v", s)
+	}
+}
+
+func TestRefusedLaunchIsStillAFailure(t *testing.T) {
+	project := stubClaude(t, 3)
+	if _, err := Start(context.Background(), project, "abc12345", "", "задача"); err == nil || errors.Is(err, ErrNotListed) {
+		t.Fatalf("--bg отказал — отказ запуска, получено %v", err)
 	}
 }

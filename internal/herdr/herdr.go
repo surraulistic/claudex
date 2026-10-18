@@ -97,10 +97,17 @@ type envelope struct {
 func (c *Client) dial() (net.Conn, error) {
 	conn, err := net.DialTimeout("unix", c.Path, c.Timeout)
 	if err != nil {
-		return nil, fmt.Errorf("herdr недоступен по %s: %w", c.Path, err)
+		return nil, unreachable{fmt.Errorf("herdr недоступен по %s: %w", c.Path, err)}
 	}
 	return conn, nil
 }
+
+type unreachable struct{ error }
+
+func (u unreachable) Unwrap() error { return u.error }
+
+// Unreachable — до herdr не дозвонились: запрос заведомо не отправлен.
+func Unreachable(err error) bool { return errors.As(err, new(unreachable)) }
 
 func request(conn net.Conn, method string, params any) error {
 	if params == nil {

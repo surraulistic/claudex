@@ -416,8 +416,9 @@ func (f *Fake) reply(sess *session, method string, raw json.RawMessage) (any, st
 		// Как у сервера: новые первыми, страница не больше limit, cursor —
 		// непрозрачное продолжение после последнего отданного хода.
 		var q struct {
-			Limit  int    `json:"limit"`
-			Cursor string `json:"cursor"`
+			Limit     int    `json:"limit"`
+			Cursor    string `json:"cursor"`
+			ItemsView string `json:"itemsView"`
 		}
 		json.Unmarshal(raw, &q)
 		f.turnPages++
@@ -428,7 +429,7 @@ func (f *Fake) reply(sess *session, method string, raw json.RawMessage) (any, st
 		out := make([]codex.Turn, 0, len(th.Turns))
 		i := from
 		for ; i >= 0 && (q.Limit <= 0 || len(out) < q.Limit); i-- {
-			out = append(out, th.Turns[i])
+			out = append(out, view(th.Turns[i], q.ItemsView))
 		}
 		var next any
 		if i >= 0 {
@@ -564,7 +565,7 @@ func (f *Fake) drain(th *Thread) {
 func (f *Fake) start(th *Thread, it codex.QueuedItem) codex.Turn {
 	f.seq++
 	t := codex.Turn{ID: fmt.Sprintf("t%d", f.seq), Status: codex.TurnCompleted, StartedAt: time.Now().Unix(),
-		Items: []codex.TurnItem{{Type: "userMessage", ClientID: it.ClientID}}}
+		Items: []codex.TurnItem{{Type: "userMessage", ClientID: it.ClientID, Content: it.Input}}}
 	if th.EndStatus != "" {
 		t.Status = th.EndStatus
 	}
@@ -573,6 +574,19 @@ func (f *Fake) start(th *Thread, it codex.QueuedItem) codex.Turn {
 		th.Status = codex.ThreadStatus{Type: codex.StatusActive, ActiveFlags: []string{}}
 	}
 	th.Turns = append(th.Turns, t)
+	return t
+}
+
+// view — текст сообщений только при itemsView=full: что отдаёт summary,
+// вживую не сверялось, и подделка не обещает больше схемы.
+func view(t codex.Turn, items string) codex.Turn {
+	if items == codex.ItemsFull {
+		return t
+	}
+	t.Items = append([]codex.TurnItem(nil), t.Items...)
+	for i := range t.Items {
+		t.Items[i].Content = nil
+	}
 	return t
 }
 

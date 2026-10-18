@@ -142,8 +142,12 @@ App-server недоступен → `codex queue` и `queue_only`.
   для записи, сеть включена. Важно: сетевой профиль сам по себе не делает SSH
   read-only; удалённая запись требует отдельной read-only учётки/ключа.
 - `--full-report` кладёт в тред текст исполнителя целиком.
-- Запись, положенную `codex queue` и вычитанную до прихода claudex, нельзя
-  связать с ходом: стадия остаётся `queue_accepted` (`queue_item_gone`).
+- Запись, положенную `codex queue` и вычитанную до прихода claudex, связывается
+  с ходом по отпечатку текста (`TextHash` из журнала против `userMessage.content`
+  в `thread/turns/list` с `itemsView: full`; по схеме 0.163.0 текст есть только
+  в `full`, вживую не сверялось). Нет точного совпадения — `queue_accepted` +
+  `consumed_unconfirmed`, состояние `unconfirmed`, не дожимается (R7 ревью
+  b43800a).
 - Предпроверка `deliverThread` для не-live треда ждёт 2×Poll (было и раньше).
 
 ## Тесты `internal/task` под fail-closed (поручение d325a41f)

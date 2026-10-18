@@ -342,3 +342,91 @@ func TestTransientAppServerFailureIsRetriedWithoutDuplicate(t *testing.T) {
 		t.Fatalf("вторая попытка будит, сообщение одно: %+v %v", d, app.Calls())
 	}
 }
+
+// queuedByCLIThenConsumed — событие положено `codex queue` без app-server, а
+// потом человек открыл тред и очередь вычиталась: в истории ход, начатый
+// сообщением с этим текстом и случайным clientId.
+func queuedByCLIThenConsumed(t *testing.T, consumed func(queued string) string) (*journal.Journal, *codextest.Fake) {
+	t.Helper()
+	codexHome(t)
+	var queued string
+	prev := codex.Queue
+	codex.Queue = func(_ context.Context, _, text string) error { queued = text; return nil }
+	t.Cleanup(func() { codex.Queue = prev })
+	t.Setenv("CLAUDEX_CODEX_SOCKET", filepath.Join(t.TempDir(), "нет.sock"))
+	j := journal.Open(filepath.Join(t.TempDir(), "tasks.jsonl"))
+	seedThreadTask(t, j, "465a77fc", otherThread)
+	res, err := Report(context.Background(), "465a77fc", "готово", reportText, doneOpts(j))
+	if err != nil || res.Delivered == nil || res.Delivered.Transport != codex.TransportQueueOnly || queued == "" {
+		t.Fatalf("сначала принято codex queue: %+v %v", res.Delivered, err)
+	}
+
+	app := codextest.Start(t)
+	app.Add(otherThread, &codextest.Thread{Turns: []codex.Turn{{ID: "human1", Status: codex.TurnCompleted,
+		StartedAt: time.Now().Unix(), Items: []codex.TurnItem{{Type: "userMessage", ClientID: "random-uuid",
+			Content: []codex.UserInput{{Type: "text", Text: consumed(queued)}}}}}}})
+	return j, app
+}
+
+func TestQueueOnlyEventConsumedWithoutMatchingTurnIsUnconfirmedAndNotRetried(t *testing.T) {
+	j, app := queuedByCLIThenConsumed(t, func(string) string { return "человек пишет своё" })
+
+	for i := 0; i < 3; i++ {
+		Flush(context.Background(), FlushOptions{Journal: j})
+	}
+	if app.Count("thread/queue/add")+app.Count("thread/resume")+app.Count("thread/queue/start") != 0 {
+		t.Fatalf("неподтверждённое не кладётся снова и тред не будится: %v", app.Calls())
+	}
+	if n := app.Count("thread/read"); n != 1 {
+		t.Fatalf("после неподтверждения наблюдатель тред больше не трогает: thread/read %d раз", n)
+	}
+	recs, _ := j.Read()
+	st := StateOf(recs, "465a77fc")
+	if st.State != StateUnconfirmed {
+		t.Fatalf("не queued навсегда и не доставлено, а неподтверждено: %+v", st)
+	}
+	if all := statesAt(recs, time.Now()); all["465a77fc"].State != StateUnconfirmed {
+		t.Fatalf("обе сводки согласны: %+v", all["465a77fc"])
+	}
+	if l := LivePending(recs, time.Now()); len(l) != 0 {
+		t.Fatalf("дожимать нечего: %+v", l)
+	}
+	lost := LostReports(recs)
+	if len(lost) != 1 || lost[0].Cause != CauseConsumedUnconfirmed {
+		t.Fatalf("отсутствие подтверждения видно в undelivered: %+v", lost)
+	}
+	var marks int
+	for _, r := range recs {
+		if r.Cause == CauseConsumedUnconfirmed {
+			marks++
+			if ReachedLeader(r.Outcome) {
+				t.Fatalf("неподтверждённое не выдаётся за дошедшее: %+v", r)
+			}
+		}
+	}
+	if marks != 1 {
+		t.Fatalf("одна запись о неподтверждении, получено %d", marks)
+	}
+	if len(Open(recs)) != 1 {
+		t.Fatal("в task list поручение видно, пока не брошено")
+	}
+}
+
+func TestQueueOnlyEventConsumedByExactTextIsDelivered(t *testing.T) {
+	j, app := queuedByCLIThenConsumed(t, func(queued string) string { return queued })
+
+	f := Flush(context.Background(), FlushOptions{Journal: j})
+	if len(f) != 1 || !f[0].Ok {
+		t.Fatalf("ход узнан по отпечатку текста: %+v", f)
+	}
+	if app.Count("thread/queue/add")+app.Count("thread/resume") != 0 {
+		t.Fatalf("узнанный ход ничего не кладёт и не будит: %v", app.Calls())
+	}
+	recs, _ := j.Read()
+	if st := StateOf(recs, "465a77fc"); st.State != StateDone {
+		t.Fatalf("дошло, получено %+v", st)
+	}
+	if l := LostReports(recs); len(l) != 0 {
+		t.Fatalf("дожимать больше нечего: %+v", l)
+	}
+}

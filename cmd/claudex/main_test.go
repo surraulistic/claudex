@@ -148,6 +148,27 @@ func TestTasksNamesWhatWasNeverDelivered(t *testing.T) {
 	}
 }
 
+func TestTasksFooterCountsThreadWakesAsDelivered(t *testing.T) {
+	// R2: у треда исход не «разбужен», а «разбужен: ход треда начат».
+	recs := []journal.Record{
+		{Task: "начат", Event: journal.Notified, Stage: task.StageReported, Outcome: task.ThreadTurnStarted},
+		{Task: "завершён", Event: journal.Notified, Stage: task.StageReported, Outcome: task.ThreadTurnDone},
+		{Task: "в очереди", Event: journal.Notified, Stage: task.StageReported, Outcome: task.ThreadQueued},
+		{Task: "оборвался", Event: journal.Notified, Stage: task.StageReported, Outcome: task.ThreadTurnFailed},
+	}
+	got := strings.Join(undeliveredWakes(recs), " ")
+	for _, woken := range []string{"начат/", "завершён/"} {
+		if strings.Contains(got, woken) {
+			t.Fatalf("%q дошло до ведущего, а названо недоставленным: %s", woken, got)
+		}
+	}
+	for _, lost := range []string{"в очереди/", "оборвался/"} {
+		if !strings.Contains(got, lost) {
+			t.Fatalf("%q не дошло, а не названо: %s", lost, got)
+		}
+	}
+}
+
 func TestTasksSeparatesStagesOfTheSameTask(t *testing.T) {
 	// Исход по сроку и пришедший позже отчёт — разные события. Если считать их
 	// одним, доставленный таймаут скрывает недоставленный отчёт.

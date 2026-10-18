@@ -454,6 +454,65 @@ func TestItemQueuedByCLIIsRecognisedByText(t *testing.T) {
 	}
 }
 
+// consumedByHuman — тред вычитал запись `codex queue` и снова свободен: в
+// истории ход, начатый сообщением с этим текстом и случайным clientId.
+func consumedByHuman(f *codextest.Fake, text string) {
+	f.Set(th, func(t *codextest.Thread) {
+		t.Status = codex.ThreadStatus{Type: codex.StatusIdle}
+		t.Turns = append(t.Turns, codex.Turn{ID: "human1", Status: codex.TurnCompleted,
+			StartedAt: time.Now().Unix(), Items: []codex.TurnItem{{Type: "userMessage",
+				ClientID: "random-uuid", Content: []codex.UserInput{{Type: "text", Text: text}}}}})
+	})
+}
+
+func queueOnlyAccepted() codex.WakeRequest {
+	q := req()
+	q.Accepted = true
+	q.QueuedHash = codex.TextHash(q.Text)
+	q.QueuedByCLI = []codex.CLIQueued{{Task: q.Task, Hash: q.QueuedHash}}
+	return q
+}
+
+func TestConsumedQueueOnlyItemIsConfirmedByExactText(t *testing.T) {
+	f := codextest.Start(t)
+	f.Add(th, &codextest.Thread{})
+	consumedByHuman(f, req().Text)
+	r, err := codex.Wake(context.Background(), queueOnlyAccepted())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Stage != codex.StageCompleted || r.TurnID != "human1" || r.ClientID != "random-uuid" {
+		t.Fatalf("ход узнан по отпечатку текста, получено %+v", r)
+	}
+	if f.Count("thread/queue/add") != 0 || f.Count("thread/resume") != 0 {
+		t.Fatalf("узнанный ход ничего не кладёт и не будит: %v", f.Calls())
+	}
+}
+
+func TestConsumedQueueOnlyItemWithoutMatchingTurnIsUnconfirmed(t *testing.T) {
+	for name, text := range map[string]string{
+		"чужой ход":            "человек пишет своё",
+		"текст отличается":     req().Text + ".",
+		"ход без текста вовсе": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := codextest.Start(t)
+			f.Add(th, &codextest.Thread{})
+			consumedByHuman(f, text)
+			r, err := codex.Wake(context.Background(), queueOnlyAccepted())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Started() || r.Stage != codex.StageAccepted || r.Hold != codex.HoldConsumedUnconfirmed {
+				t.Fatalf("обработка не доказана — так и сказано, получено %+v", r)
+			}
+			if f.Count("thread/queue/add") != 0 || f.Count("thread/resume") != 0 {
+				t.Fatalf("неподтверждённое не кладётся снова и тред не будится: %v", f.Calls())
+			}
+		})
+	}
+}
+
 func TestAppServerDownFallsBackToQueueOnlyAndSaysSo(t *testing.T) {
 	n := stubQueue(t)
 	t.Setenv("CLAUDEX_CODEX_SOCKET", filepath.Join(t.TempDir(), "нет.sock"))
@@ -691,5 +750,16 @@ func TestClientRefusesSettingsUpdateWithoutProfile(t *testing.T) {
 	}
 	if f.Count("thread/settings/update") != 0 {
 		t.Fatalf("на провод не ушло: %v", f.Calls())
+	}
+}
+
+func TestTextSearchPagesPastLaterTurns(t *testing.T) {
+	f := codextest.Start(t)
+	f.Add(th, &codextest.Thread{})
+	consumedByHuman(f, req().Text)
+	f.AddTurns(th, 12)
+	r, err := codex.Wake(context.Background(), queueOnlyAccepted())
+	if err != nil || r.TurnID != "human1" {
+		t.Fatalf("свой ход найден и под дюжиной чужих, получено %+v %v", r, err)
 	}
 }

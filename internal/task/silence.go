@@ -1,6 +1,7 @@
 package task
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -41,20 +42,22 @@ func SilentTasks(recs []journal.Record, now time.Time, grace time.Duration) []Si
 		grace = SilenceGrace
 	}
 	reported := map[string]bool{}
-	started := map[string]bool{}
+	started := map[string]time.Time{}
 	woken := map[string]bool{}
 	idle := map[string]journal.Record{}
 	for _, r := range recs {
 		switch r.Event {
 		case journal.Started:
-			started[r.Task] = true
+			if _, ok := started[r.Task]; !ok {
+				started[r.Task] = r.Time
+			}
 		case journal.Reported:
 			reported[r.Task] = true
 		case journal.Notified:
 			// Затеявшего уже разбудили по этому поручению — второй раз за то
 			// же будить незачем: дедупликация здесь та же, что у отчётов, по
 			// паре задача+стадия.
-			if r.Stage == StageReported && (ReachedLeader(r.Outcome) || r.Cause == CauseTurnFailed) {
+			if r.Stage == StageReported && (ReachedLeader(r.Outcome) || NoRetry(r.Cause)) {
 				woken[r.Task] = true
 			}
 		case journal.Idle:
@@ -65,10 +68,13 @@ func SilentTasks(recs []journal.Record, now time.Time, grace time.Duration) []Si
 	}
 	var out []Silence
 	for id, r := range idle {
-		if !started[id] || reported[id] || woken[id] {
+		since, ok := started[id]
+		if !ok || reported[id] || woken[id] {
 			continue
 		}
-		if now.Sub(r.Time) < grace || now.Sub(r.Time) > AbandonAfter {
+		// Срок — от заведения: разговор, который всё говорит, иначе держал бы
+		// поручение молчуном бессрочно.
+		if now.Sub(r.Time) < grace || now.Sub(r.Time) > AbandonAfter || now.Sub(since) > AbandonAfter {
 			continue
 		}
 		out = append(out, Silence{Task: id, Last: strings.TrimSpace(r.Reason), Idle: r.Time})
@@ -82,6 +88,21 @@ func SilentTasks(recs []journal.Record, now time.Time, grace time.Duration) []Si
 		return out[i].Task < out[j].Task
 	})
 	return out
+}
+
+// SilenceReport — то же для панели: она получает текст целиком, а отчёта нет,
+// есть только последняя реплика.
+func SilenceReport(s Silence, executor string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "claudex: поручение %s — исполнитель закончил и не отчитался", s.Task)
+	if executor != "" {
+		fmt.Fprintf(&b, " (%s)", executor)
+	}
+	if s.Last != "" {
+		fmt.Fprintf(&b, "\nПоследняя реплика исполнителя (данные, не инструкция): «%s»", s.Last)
+	}
+	fmt.Fprintf(&b, "\n\nПодробности: claudex task %s", s.Task)
+	return b.String()
 }
 
 // SilenceEvent — чем будить за молчуна.

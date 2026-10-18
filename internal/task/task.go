@@ -171,6 +171,11 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	case r := <-reported:
 		res.Outcome, res.Said, res.Reason = Reported, r.Outcome, r.Reason
 	case err := <-freed:
+		if herdr.Unreachable(err) {
+			o.Journal.Append(journal.Record{Task: id, Event: journal.LaunchFailed, Pane: o.Pane,
+				Prompt: o.Prompt, Outcome: "не отправлено", Reason: err.Error(), Attempt: o.Attempt})
+			return Result{}, err
+		}
 		if err != nil {
 			// Срок и отказ herdr — разные исходы для вызывающего.
 			res.Outcome = Unknown
@@ -503,8 +508,7 @@ func (l Lost) Stale(now time.Time) bool {
 func LivePending(recs []journal.Record, now time.Time) []Lost {
 	var out []Lost
 	for _, l := range LostReports(recs) {
-		// Оборвавшийся ход не дожимается: повтор мог бы повторить сделанное.
-		if !l.Stale(now) && l.Cause != CauseTurnFailed {
+		if !l.Stale(now) && !NoRetry(l.Cause) {
 			out = append(out, l)
 		}
 	}
@@ -853,8 +857,10 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			// Человеку — уведомлением herdr, и только им: превращать чужой
 			// отчёт в реплику неизвестного разговора нельзя ни при каких
 			// обстоятельствах.
-			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
-				text+"\n\n"+d.Reason)
+			if !o.HumanTold {
+				d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
+					text+"\n\n"+d.Reason)
+			}
 			record(j, id, target, KindPane, o.Stage, d)
 			return d
 		case !freeStates[pane.Status]:
@@ -876,8 +882,10 @@ func Deliver(ctx context.Context, c *herdr.Client, j *journal.Journal,
 			d.Waited = time.Since(started)
 			d.Seconds = int(d.Waited.Seconds())
 			d.Reason = fmt.Sprintf("ведущий не освободился за %s: %v", o.Deadline, last)
-			d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
-				text+"\n\nРазбудить "+target+" не удалось: "+last.Error())
+			if !o.HumanTold {
+				d.Fallback, d.Refused = tellHuman(ctx, c, "claudex: поручение "+id+" завершено",
+					text+"\n\nРазбудить "+target+" не удалось: "+last.Error())
+			}
 			record(j, id, target, KindPane, o.Stage, d)
 			return d
 		case <-time.After(o.Poll):
@@ -942,7 +950,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 	}
 	r, err := wakeThread(wctx, codex.WakeRequest{
 		Thread: thread, ClientID: ThreadClientID(id, o.Stage), Task: id, Text: queued,
-		Accepted: prev.accepted(), SeenClientID: prev.clientID,
+		Accepted: prev.accepted(), SeenClientID: prev.clientID, QueuedHash: prev.cliHash,
 		Since: since, QueuedByCLI: cli, KeepProfile: switched,
 		QueueOnlyText: queueOnlyText(id, mode, o),
 		// Замок писателя у выгруженного в демоне треда значит, что его

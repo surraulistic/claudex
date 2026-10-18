@@ -83,6 +83,8 @@ func orState(s string) string {
 		return "отчёт есть, доставить не удавалось"
 	case StateQueued:
 		return "отчёт в очереди треда, ход не начат"
+	case StateUnconfirmed:
+		return "событие взято из очереди треда, обработка не подтверждена"
 	case StateLost:
 		return "закончило молча"
 	case "":

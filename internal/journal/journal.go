@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -142,16 +143,33 @@ func (j *Journal) Append(r Record) error {
 	if len(line) > maxLine {
 		return fmt.Errorf("%w: %d байт при пределе %d", ErrTooLarge, len(line), maxLine)
 	}
-	if err := os.MkdirAll(filepath.Dir(j.Path), 0o755); err != nil {
+	return withLock(j.Path, syscall.LOCK_SH, func() error {
+		f, err := os.OpenFile(j.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = f.Write(append(line, '\n'))
+		return err
+	})
+}
+
+// withLock держит замок рядом с журналом, а не на нём самом: Archive подменяет
+// файл через rename, и дописанное в старый inode пропало бы.
+func withLock(path string, how int, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(j.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	l, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.Write(append(line, '\n'))
-	return err
+	defer l.Close()
+	if err := syscall.Flock(int(l.Fd()), how); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(l.Fd()), syscall.LOCK_UN)
+	return fn()
 }
 
 // Разобранный журнал держится в памяти процесса.

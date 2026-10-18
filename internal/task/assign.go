@@ -134,6 +134,16 @@ func Resolve(recs []journal.Record, pane, claimed string) (Resolution, error) {
 	if cause == "" {
 		return Resolution{Task: claimed, Claimed: claimed}, nil
 	}
+	// Без исполнителя «единственное активное» — единственное во всей системе,
+	// то есть чужое: исправлять на него нельзя.
+	if pane == "" {
+		if cause == ClaimClosed && startedHere(recs, pane, claimed) {
+			return Resolution{Task: claimed, Claimed: claimed}, nil
+		}
+		return Resolution{}, fmt.Errorf(
+			"%s, а исполнитель не определён (нет CLAUDE_CODE_SESSION_ID и HERDR_PANE_ID) — "+
+				"исправлять не на что; назовите идентификатор активного поручения: claudex tasks", cause)
+	}
 	if len(active) == 1 {
 		a := active[0]
 		r := Resolution{Task: a.Task, Claimed: claimed, Corrected: true, Cause: cause}

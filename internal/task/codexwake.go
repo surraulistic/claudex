@@ -25,6 +25,16 @@ const (
 // CauseTurnFailed — ход с событием кончился failed или interrupted.
 const CauseTurnFailed = codex.HoldTurnFailed
 
+// CauseConsumedUnconfirmed — запись `codex queue` из очереди взята, а хода с
+// её текстом не нашлось: прочитана ли она, неизвестно.
+const CauseConsumedUnconfirmed = codex.HoldConsumedUnconfirmed
+
+// NoRetry — повтор доставки с такой причиной бесполезен или опасен: ход мог
+// повторить сделанное, а неподтверждённое повтор не подтвердит.
+func NoRetry(cause string) bool {
+	return cause == CauseTurnFailed || cause == CauseConsumedUnconfirmed
+}
+
 // ThreadClientID — постоянный идентификатор сообщения для пары
 // поручение+стадия. По нему повтор находит уже положенное.
 func ThreadClientID(task, stage string) string {
@@ -38,6 +48,8 @@ type threadProgress struct {
 	thread   string
 	turn     string
 	clientID string
+	// cliHash — TextHash своей записи, положенной `codex queue`.
+	cliHash string
 	// seen — какие пары стадия+причина уже записаны: мерцание причины
 	// туда-обратно журнал не растит.
 	seen  map[string]bool
@@ -66,6 +78,9 @@ func progressOf(recs []journal.Record, id, stage string) threadProgress {
 		}
 		if r.ThreadClientID != "" {
 			p.clientID = r.ThreadClientID
+		}
+		if r.Transport == codex.TransportQueueOnly && r.QueuedTextHash != "" {
+			p.cliHash = r.QueuedTextHash
 		}
 	}
 	return p
