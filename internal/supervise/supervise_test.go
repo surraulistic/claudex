@@ -501,6 +501,13 @@ func TestDoneAfterSilenceWakeStillReachesTheLeader(t *testing.T) {
 	if lost := task.LostReports(recs); len(lost) != 0 {
 		t.Fatalf("ничего не потеряно, получено %+v", lost)
 	}
+	// Это первый исход поручения, а не пересмотр прежнего: пробуждение за
+	// молчуна исходом не было.
+	for _, r := range recs {
+		if r.Event == journal.Notified && task.IsReportStage(r.Stage) && r.Stage != task.StageReported {
+			t.Fatalf("отчёт ушёл как пересмотр исхода (%s)", r.Stage)
+		}
+	}
 }
 
 func TestNewOutcomeIsANewMessageInTheThread(t *testing.T) {
