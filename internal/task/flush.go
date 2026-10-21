@@ -2,6 +2,8 @@ package task
 
 import (
 	"context"
+	"errors"
+	"syscall"
 	"time"
 
 	"github.com/surraulistic/claudex/internal/claudesess"
@@ -85,15 +87,25 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 	// Безнадёжные сюда не попадают: адрес, молчавший неделю, не ответит и
 	// сегодня, а место в пределе за проход он занимает.
 	pending := LivePending(recs, time.Now())
-	if len(pending) == 0 {
+	orphans := OrphanReports(recs, time.Now())
+	if len(pending) == 0 && len(orphans) == 0 {
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, o.Budget)
 	defer cancel()
 
-	home := codex.Home()
 	var out []Flushed
+	for _, r := range orphans {
+		if len(out) >= o.Max || ctx.Err() != nil {
+			break
+		}
+		if !o.Skip[r.Task] {
+			out = append(out, adoptOrphan(ctx, o, r))
+		}
+	}
+
+	home := codex.Home()
 	for _, l := range pending {
 		if len(out) >= o.Max || ctx.Err() != nil {
 			break
@@ -169,4 +181,77 @@ func flushText(l Lost) string {
 		return head
 	}
 	return head + "\n\n" + l.Report
+}
+
+// OrphanAfter — сколько ждать finished после отчёта, прежде чем проверять,
+// жив ли ожидавший процесс. Живой пишет его за доли секунды.
+const OrphanAfter = time.Minute
+
+// waiterAlive подменяется в тестах. Переиспользованный pid выглядит живым —
+// тогда отчёт остаётся ждать, как и прежде, а не уходит дважды.
+var waiterAlive = func(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// OrphanReports — отчёты, чей ожидавший процесс умер, не записав finished
+// (SIGKILL, падение машины). Report такие не доставляет — «наблюдатель ещё
+// ждёт», — а ни дожим, ни молчание их не видели: notified нет, отчёт есть.
+func OrphanReports(recs []journal.Record, now time.Time) []journal.Record {
+	waiter := map[string]int{}
+	finished := map[string]bool{}
+	last := map[string]journal.Record{}
+	var order []string
+	for _, r := range recs {
+		switch r.Event {
+		case journal.Started:
+			if r.WaiterPID > 0 {
+				waiter[r.Task] = r.WaiterPID
+			}
+		case journal.Finished:
+			finished[r.Task] = true
+		case journal.Reported:
+			if _, ok := last[r.Task]; !ok {
+				order = append(order, r.Task)
+			}
+			last[r.Task] = r
+		}
+	}
+	var out []journal.Record
+	for _, id := range order {
+		r, pid := last[id], waiter[id]
+		if pid == 0 || finished[id] || now.Sub(r.Time) < OrphanAfter || now.Sub(r.Time) > AbandonAfter ||
+			waiterAlive(pid) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// adoptOrphan записывает за пропавший процесс итог ожидания и отдаёт отчёт
+// тем же путём, что поздний done.
+func adoptOrphan(ctx context.Context, o FlushOptions, r journal.Record) Flushed {
+	f := Flushed{Task: r.Task, Stage: StageReported}
+	if err := o.Journal.Append(journal.Record{Task: r.Task, Event: journal.Finished, Outcome: Reported,
+		Reason: "процесс ожидания пропал, не записав итог; отчёт отдаёт дожим"}); err != nil {
+		f.Reason = err.Error()
+		return f
+	}
+	recs, err := o.Journal.Read()
+	if err != nil {
+		f.Reason = err.Error()
+		return f
+	}
+	st := stateOf(recs, r.Task)
+	f.Target = st.target
+	res, _ := deliverLate(ctx, st, r.Task, r.Pane, r.Outcome, r.Reason, ReportOptions{
+		Client: o.Client, Journal: o.Journal, Compose: o.Compose, FullReport: o.FullReport,
+		Deadline: flushThreadDeadline, Poll: 200 * time.Millisecond,
+	}, ReportResult{Task: r.Task})
+	f.Skipped = res.Skipped
+	if res.Delivered != nil {
+		f.Ok, f.Reason = res.Delivered.Reached(), res.Delivered.Reason
+	}
+	return f
 }

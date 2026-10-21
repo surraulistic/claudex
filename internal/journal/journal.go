@@ -98,6 +98,9 @@ type Record struct {
 	TargetState string    `json:"target_state,omitempty"`
 	TargetSeen  time.Time `json:"target_seen,omitempty"`
 	Attempt     int       `json:"attempt,omitempty"`
+	// WaiterPID — процесс, который ждёт отчёт и запишет finished. Убитый
+	// между reported и finished, он оставлял отчёт недоставленным навсегда.
+	WaiterPID int `json:"waiter_pid,omitempty"`
 	// ThreadStage, Transport, QueueID, TurnID — доставка в тред Codex по
 	// стадиям: принято в очередь, ход начат, ход завершён.
 	ThreadStage string `json:"thread_stage,omitempty"`

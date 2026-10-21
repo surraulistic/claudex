@@ -178,7 +178,8 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	// Считаем то, что дожимаем. Брошенное видно в `claudex undelivered`, а
 	// здесь оно создавало бы впечатление очереди, которая не двигается.
 	lost := task.LivePending(recs, now)
-	t.Pending = len(lost)
+	orphans := len(task.OrphanReports(recs, now))
+	t.Pending = len(lost) + orphans
 
 	// Отложенные считаются и пропускаются: адрес отказал недавно, и повторять
 	// попытку сейчас незачем.
@@ -199,7 +200,7 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	// посреди функции — не невнимательность, а форма, которая к этому
 	// располагает; поэтому дожим отделён, а обязательное идёт после него
 	// безусловно.
-	if t.Deferred < len(lost) {
+	if t.Deferred < len(lost) || orphans > 0 {
 		s.flushPending(ctx, &t, skip, now)
 	}
 	t.TurnsDone = s.o.Follow(ctx, s.o.Journal, s.o.MaxPerTick)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,6 +162,10 @@ func TestJournalKeepsStartAndFinish(t *testing.T) {
 			started = true
 			if r.Prompt == "" || r.Pane == "" {
 				t.Fatalf("начало записано с заданием и панелью, получено %+v", r)
+			}
+			// F10: по нему дожим узнаёт, что ожидающий пропал.
+			if r.WaiterPID != os.Getpid() {
+				t.Fatalf("записан ожидающий процесс, получено %d", r.WaiterPID)
 			}
 		case journal.Finished:
 			finished = true

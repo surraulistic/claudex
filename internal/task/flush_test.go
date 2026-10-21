@@ -3,6 +3,8 @@ package task
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +245,62 @@ func TestFlushLeavesHopelessReportsAlone(t *testing.T) {
 	recs, _ := j.Read()
 	if len(LostReports(recs)) != 1 {
 		t.Fatal("отчёт по-прежнему виден в недоставленном")
+	}
+}
+
+func orphan(t *testing.T, j *journal.Journal, pid int, reportedAgo time.Duration) {
+	t.Helper()
+	now := time.Now()
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
+		Target: "wE:p17", TargetSession: leaderSession, WaiterPID: pid, Time: now.Add(-time.Hour)})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Reported, Pane: "wE:p13",
+		Outcome: "готово", Reason: "каталог опубликован", Time: now.Add(-reportedAgo)})
+}
+
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd.Process.Pid
+}
+
+func TestOrphanedReportIsDeliveredAfterTheWaiterDied(t *testing.T) {
+	// F10: процесс ожидания убит между reported и finished. Report такой
+	// отчёт отдавал «наблюдателю», а наблюдателя уже нет.
+	f, j, c := delivery(t, "idle")
+	orphan(t, j, deadPID(t), 5*time.Minute)
+
+	got := Flush(context.Background(), FlushOptions{Journal: j, Client: c})
+	if len(got) != 1 || !got[0].Ok || got[0].Task != "11111111" {
+		t.Fatalf("сиротский отчёт доставлен, получено %+v", got)
+	}
+	body, _ := f.LastRequest("agent.prompt")["params"].(map[string]any)["text"].(string)
+	if !strings.Contains(body, "каталог опубликован") {
+		t.Fatalf("ведущему ушёл сам отчёт, получено %q", body)
+	}
+	recs, _ := j.Read()
+	if len(OrphanReports(recs, time.Now())) != 0 {
+		t.Fatal("итог ожидания записан, сиротой отчёт больше не считается")
+	}
+	if got := Flush(context.Background(), FlushOptions{Journal: j, Client: c}); len(got) != 0 {
+		t.Fatalf("второй раз не доставляется, получено %+v", got)
+	}
+}
+
+func TestReportOfALiveOrFreshWaiterIsLeftToIt(t *testing.T) {
+	_, j, _ := delivery(t, "idle")
+	orphan(t, j, os.Getpid(), 5*time.Minute)
+	recs, _ := j.Read()
+	if n := len(OrphanReports(recs, time.Now())); n != 0 {
+		t.Fatalf("живой ожидающий доставит сам, сирот %d", n)
+	}
+
+	_, j, _ = delivery(t, "idle")
+	orphan(t, j, deadPID(t), time.Second)
+	recs, _ = j.Read()
+	if n := len(OrphanReports(recs, time.Now())); n != 0 {
+		t.Fatalf("свежий отчёт ожидающий ещё не успел подхватить, сирот %d", n)
 	}
 }

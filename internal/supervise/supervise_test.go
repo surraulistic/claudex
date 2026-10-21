@@ -8,6 +8,7 @@ import (
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/codex/codextest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -617,5 +618,23 @@ func TestCollectionSkipsWhatWakeSilentOwnsAndDefersRefusals(t *testing.T) {
 	}
 	if calls[0].Skip["aaaaaaaa"] || !calls[1].Skip["aaaaaaaa"] {
 		t.Fatalf("отказавшее откладывается до следующего раза: %+v / %+v", calls[0].Skip, calls[1].Skip)
+	}
+}
+
+func TestOrphanedReportGetsAFlushEvenWithNothingLost(t *testing.T) {
+	// F10: дожим вызывается, даже если недоставленного нет, — сирота есть.
+	j := newJournal(t)
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
+		Target: "тред", TargetKind: task.KindThread, WaiterPID: cmd.Process.Pid, Time: time.Now().Add(-time.Hour)})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Reported, Outcome: "готово",
+		Time: time.Now().Add(-10 * time.Minute)})
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Flush: spyFlush(true, &seen)})
+	if got := s.Once(context.Background()); got.Pending != 1 || len(seen) != 1 {
+		t.Fatalf("сирота считается ждущим и дожим вызван, получено %+v, вызовов %d", got, len(seen))
 	}
 }

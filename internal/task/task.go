@@ -139,7 +139,7 @@ func Delegate(ctx context.Context, o Options) (Result, error) {
 	rec := journal.Record{
 		Task: id, Event: journal.Started, Pane: o.Pane,
 		Target: wake.Target, TargetSession: wake.Session, TargetKind: wake.Kind,
-		Prompt: o.Prompt, Attempt: o.Attempt,
+		Prompt: o.Prompt, Attempt: o.Attempt, WaiterPID: os.Getpid(),
 	}
 	if wake.Kind == KindThread {
 		rec.TargetState = codex.State(codex.Home(), wake.Target)
@@ -306,7 +306,13 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 		return res, err
 	}
 
-	st := stateOf(before, id)
+	return deliverLate(ctx, stateOf(before, id), id, pane, outcome, reason, o, res)
+}
+
+// deliverLate отдаёт ведущему отчёт, пришедший, когда ожидавший его процесс
+// уже закончил.
+func deliverLate(ctx context.Context, st taskState, id, pane, outcome, reason string,
+	o ReportOptions, res ReportResult) (ReportResult, error) {
 	stage := st.reportStageFor(canonOutcome(outcome))
 	switch {
 	case !st.finished:
