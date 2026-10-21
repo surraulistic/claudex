@@ -177,7 +177,14 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 
 	// Считаем то, что дожимаем. Брошенное видно в `claudex undelivered`, а
 	// здесь оно создавало бы впечатление очереди, которая не двигается.
-	lost := task.LivePending(recs, now)
+	// Ведущему-панели не дожимает никто: в ждущих он создавал бы видимость
+	// очереди, которая не двинется.
+	var lost []task.Lost
+	for _, l := range task.LivePending(recs, now) {
+		if task.Pushable(recs, l.Task) {
+			lost = append(lost, l)
+		}
+	}
 	orphans := len(task.OrphanReports(recs, now))
 	t.Pending = len(lost) + orphans
 

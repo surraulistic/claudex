@@ -513,9 +513,23 @@ func cmdDoctor(o opts) error {
 				lost = append(lost, l)
 			}
 		}
+		var pushable, panes int
+		for _, l := range live {
+			if task.Pushable(recs, l.Task) {
+				pushable++
+			} else {
+				panes++
+			}
+		}
+		if panes > 0 {
+			add("недоставленные ведущему-панели", false,
+				"%d — не досылаются никем: панель успевает сменить разговор; текст цел: claudex undelivered", panes)
+		}
 		switch {
-		case len(live) > 0:
-			add("недоставленные отчёты", false, "%d — досылает наблюдатель", len(live))
+		case pushable > 0:
+			add("недоставленные отчёты", false, "%d — досылает наблюдатель", pushable)
+		case panes > 0:
+			add("недоставленные отчёты", true, "в тред или разговор — нет")
 		case len(lost) > 0:
 			// Попытки прекращены, но отчёты целы: это не «всё хорошо», а
 			// «дальше бесполезно».

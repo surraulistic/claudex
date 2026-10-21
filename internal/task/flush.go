@@ -56,6 +56,14 @@ type FlushOptions struct {
 	Compose func(summary, task string, from, to time.Time, pane string) string
 }
 
+// Pushable — дожимается ли отчёт этому ведущему вообще. Тред и разговор —
+// да: адрес и есть разговор. Панель — нет: за час она успевает сменить
+// разговор, и единственная попытка — в момент done.
+func Pushable(recs []journal.Record, id string) bool {
+	k := stateOf(recs, id).kind
+	return k == KindThread || k == KindSession
+}
+
 // Flushed — что удалось дожать.
 type Flushed struct {
 	Task    string `json:"task"`

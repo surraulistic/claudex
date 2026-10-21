@@ -638,3 +638,17 @@ func TestOrphanedReportGetsAFlushEvenWithNothingLost(t *testing.T) {
 		t.Fatalf("сирота считается ждущим и дожим вызван, получено %+v, вызовов %d", got, len(seen))
 	}
 }
+
+func TestPaneLeaderLossIsNotCountedAsPending(t *testing.T) {
+	// F12: панель не дожимается, и в ждущих её быть не должно.
+	j := newJournal(t)
+	j.Append(journal.Record{Task: "aaaaaaaa", Event: journal.Started, Target: "wE:p17", TargetKind: task.KindPane})
+	j.Append(journal.Record{Task: "aaaaaaaa", Event: journal.Reported, Outcome: "готово"})
+	j.Append(journal.Record{Task: "aaaaaaaa", Event: journal.Notified, Target: "wE:p17", TargetKind: task.KindPane,
+		Stage: task.StageReported, Outcome: task.ToldHuman})
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Flush: spyFlush(true, &seen)})
+	if got := s.Once(context.Background()); got.Pending != 0 || len(seen) != 0 {
+		t.Fatalf("панель в ждущих не числится и дожим не зовётся, получено %+v, вызовов %d", got, len(seen))
+	}
+}

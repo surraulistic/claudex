@@ -92,7 +92,11 @@ leaves no assignment, so nothing can report on it and nothing can be recovered
 when it goes missing.
 
 `flush`, `reconcile` and `undelivered` are manual repair. The supervisor does
-the flushing part on its own, and `claudex doctor` says whether it is running.
+the flushing part on its own for Codex threads and Claude Code conversations,
+and `claudex doctor` says whether it is running. A report to a herdr-pane
+leader is never re-sent by anyone — the pane may be running another
+conversation by then — so its only attempt is at `done`; afterwards it waits in
+`claudex undelivered`.
 
 ### When the worker forgets to report
 
