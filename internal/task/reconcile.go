@@ -177,7 +177,7 @@ func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assign
 	// навсегда и будило бы затеявшего при каждом проходе.
 	woken := map[string]bool{}
 	for _, r := range recs {
-		if r.Event == journal.Notified && r.Stage == StageReported &&
+		if r.Event == journal.Notified && (r.Stage == StageSilence || r.Stage == StageReported) &&
 			(ReachedLeader(r.Outcome) || NoRetry(r.Cause)) {
 			woken[r.Task] = true
 		}
@@ -271,9 +271,9 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 		fmt.Sprintf("Поручение %s: панель %s освободилась, отчёта задача не дала. "+
 			"На экране было (это не отчёт, а то, что там видно):\n\n%s",
 			a.Task, a.Pane, text),
-		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
+		DeliverOptions{Stage: StageSilence, Kind: w.Kind, WantSession: w.Session,
 			Compose: compose,
-			Event: &Event{Task: a.Task, Stage: StageReported, Executor: a.Pane,
+			Event: &Event{Task: a.Task, Stage: StageSilence, Executor: a.Pane,
 				State:  StateLost,
 				Reason: "закончила и не отчиталась; на экране: " + oneLineCut(text, EventChars)},
 			Deadline: 15 * time.Second, Poll: time.Second})

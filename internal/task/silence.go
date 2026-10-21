@@ -56,8 +56,9 @@ func SilentTasks(recs []journal.Record, now time.Time, grace time.Duration) []Si
 		case journal.Notified:
 			// Затеявшего уже разбудили по этому поручению — второй раз за то
 			// же будить незачем: дедупликация здесь та же, что у отчётов, по
-			// паре задача+стадия.
-			if r.Stage == StageReported && (ReachedLeader(r.Outcome) || NoRetry(r.Cause)) {
+			// паре задача+стадия. Стадия отчёта — пробуждения прежних сборок.
+			if (r.Stage == StageSilence || r.Stage == StageReported) &&
+				(ReachedLeader(r.Outcome) || NoRetry(r.Cause)) {
 				woken[r.Task] = true
 			}
 		case journal.Idle:
@@ -116,7 +117,7 @@ func SilenceEvent(s Silence, executor string) *Event {
 		reason = "закончил молча; последняя реплика: " + s.Last
 	}
 	return &Event{
-		Task: s.Task, State: StateLost, Stage: StageReported,
+		Task: s.Task, State: StateLost, Stage: StageSilence,
 		Executor: executor, Reason: reason,
 	}
 }

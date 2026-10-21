@@ -526,6 +526,11 @@ func LostReports(recs []journal.Record) []Lost {
 		switch r.Event {
 		case journal.Reported:
 			report[r.Task] = strings.TrimSpace(r.Outcome + " " + r.Reason)
+			// Отчёт отменяет недоставленное «закончил молча»: дослать его после
+			// отчёта значило бы сообщить устаревшее.
+			if k := (key{r.Task, StageSilence}); state[k] != nil {
+				state[k] = nil
+			}
 		case journal.Notified:
 			k := key{r.Task, orElse(r.Stage, StageFinished)}
 			if _, ok := state[k]; !ok {
@@ -708,6 +713,10 @@ const (
 const (
 	StageFinished = "finished" // исход, известный наблюдателю, в том числе по сроку
 	StageReported = "reported" // настоящий отчёт задачи, пришедший позже
+	// StageSilence — пробуждение за молчуна. Это наблюдение, а не отчёт: под
+	// стадией отчёта оно считалось бы его доставкой, и настоящий done после
+	// него не уходил.
+	StageSilence = "silence"
 )
 
 // sessionOf — какой разговор сейчас живёт в панели. Пусто значит, что герой

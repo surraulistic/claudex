@@ -130,6 +130,9 @@ func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
 			l.State = stateOfOutcome(r.Outcome)
 			l.Reason = r.Reason
 		case journal.Notified:
+			if r.Stage == StageSilence {
+				break
+			}
 			sawNotify = true
 			if r.Delivery != "" {
 				l.Delivery = r.Delivery
@@ -323,6 +326,9 @@ func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
 			a.l.State = stateOfOutcome(r.Outcome)
 			a.l.Reason = r.Reason
 		case journal.Notified:
+			if r.Stage == StageSilence {
+				break
+			}
 			a.notified = true
 			if r.Delivery != "" {
 				a.l.Delivery = r.Delivery

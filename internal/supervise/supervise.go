@@ -279,7 +279,7 @@ func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now 
 		}
 		d := task.Deliver(ctx, s.o.Client, s.o.Journal, sl.Task, w.Target,
 			text, task.DeliverOptions{
-				Stage: task.StageReported, Kind: w.Kind, WantSession: w.Session,
+				Stage: task.StageSilence, Kind: w.Kind, WantSession: w.Session,
 				HumanTold: true, Event: task.SilenceEvent(sl, st.Executor),
 				Deadline: silenceDeadline(w.Kind), Poll: time.Second,
 			})

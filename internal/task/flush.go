@@ -134,13 +134,16 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 				return o.Compose(summary, task, from, time.Now(), pane)
 			}
 		}
+		state, why := StateOf(recs, l.Task).State, "отчёт был готов, но сразу не доставился ("+l.Reason+")"
+		if l.Stage == StageSilence {
+			state, why = StateLost, "исполнитель закончил и не отчитался; разбудить сразу не вышло ("+l.Reason+")"
+		}
 		d := Deliver(ctx, o.Client, o.Journal, l.Task, l.Target,
 			flushText(l),
 			DeliverOptions{Stage: l.Stage, Kind: st.kind, WantSession: l.Target,
 				Compose: compose, HumanTold: true, FullReport: o.FullReport,
 				Event: &Event{Task: l.Task, Stage: l.Stage, Executor: st.pane,
-					State:  StateOf(recs, l.Task).State,
-					Reason: "отчёт был готов, но сразу не доставился (" + l.Reason + ")"},
+					State: state, Reason: why},
 				Deadline: deadline, Poll: 200 * time.Millisecond})
 
 		// Принятое в очередь, но не начатое — ещё не дошло: наблюдатель
@@ -156,6 +159,10 @@ func Flush(ctx context.Context, o FlushOptions) []Flushed {
 // flushText — то, что уедет в разговор. Отчёт идёт целиком: ведущий его ещё не
 // видел, и сокращать пересказом нечего.
 func flushText(l Lost) string {
+	if l.Stage == StageSilence {
+		return "Поручение " + l.Task + ": исполнитель закончил и не отчитался; разбудить сразу не вышло (" +
+			l.Reason + "), досылаем. Подробности: claudex task " + l.Task
+	}
 	head := "Отложенный отчёт по поручению " + l.Task +
 		": доставить сразу не вышло (" + l.Reason + "), разговор открылся — досылаем."
 	if l.Report == "" {

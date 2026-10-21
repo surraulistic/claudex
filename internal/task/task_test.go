@@ -873,3 +873,53 @@ func TestWaitFreeGivesUpAndStillKeepsTheText(t *testing.T) {
 		t.Fatalf("текст цел и после неудачного ожидания, получено %+v", got)
 	}
 }
+
+func TestDoneAfterSilenceWakeIsNotTakenForDelivered(t *testing.T) {
+	// F1: запись пробуждения за молчуна не блокирует настоящий отчёт.
+	f, j, c := delivery(t, "idle")
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
+		Target: "wE:p17", TargetSession: leaderSession})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Outcome: SentNoWait})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Idle, Reason: "удалять старую миграцию?"})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Notified, Target: "wE:p17",
+		Stage: StageSilence, Outcome: WokeUp})
+
+	res, err := Report(context.Background(), "11111111", "готово", "миграция удалена",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Late || res.Delivered == nil || !res.Delivered.OK {
+		t.Fatalf("done после пробуждения доставлен, получено %+v", res)
+	}
+	body, _ := f.LastRequest("agent.prompt")["params"].(map[string]any)["text"].(string)
+	if !strings.Contains(body, "миграция удалена") {
+		t.Fatalf("ведущему ушёл сам отчёт, получено %q", body)
+	}
+	recs, _ := j.Read()
+	if st := StateOf(recs, "11111111").State; st != StateDone {
+		t.Fatalf("состояние done, получено %q", st)
+	}
+}
+
+func TestReportSupersedesAnUndeliveredSilenceWake(t *testing.T) {
+	// Недоставленное «закончил молча» после настоящего отчёта не досылается.
+	_, j, c := delivery(t, "idle")
+	j.Append(journal.Record{Task: "11111111", Event: journal.Started, Pane: "wE:p13",
+		Target: "wE:p17", TargetSession: leaderSession})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Finished, Outcome: SentNoWait})
+	j.Append(journal.Record{Task: "11111111", Event: journal.Notified, Target: "wE:p17",
+		Stage: StageSilence, Outcome: NotDelivered, Cause: CauseLeaderBusy})
+	recs, _ := j.Read()
+	if l := LostReports(recs); len(l) != 1 || l[0].Stage != StageSilence {
+		t.Fatalf("неудачное пробуждение видно в канале вытягивания, получено %+v", l)
+	}
+	if _, err := Report(context.Background(), "11111111", "готово", "сделано",
+		ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: 10 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ = j.Read()
+	if l := LostReports(recs); len(l) != 0 {
+		t.Fatalf("после отчёта пробуждение за молчуна не досылается, получено %+v", l)
+	}
+}

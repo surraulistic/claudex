@@ -462,3 +462,36 @@ func TestSilentWorkerNeverTellsHumanWhenPaneHasAnotherConversation(t *testing.T)
 		t.Fatalf("про молчание человеку всплывашки на каждую попытку не идут: %d", n)
 	}
 }
+
+func TestDoneAfterSilenceWakeStillReachesTheLeader(t *testing.T) {
+	// F1: пробуждение за молчуна — не доставка отчёта. Ведущий ответил на
+	// вопрос, исполнитель доделал и вызвал done — этот done должен дойти.
+	const th = "01a0a268-ca14-7441-844b-8fcd24cd2e45"
+	sent := wakeableThread(t, th)
+	j := newJournal(t)
+	silentAssignment(t, j, "43bc6e11", th, 10*time.Minute)
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Flush: spyFlush(true, &seen)})
+	if got := s.Once(context.Background()); len(got.Silent) != 1 {
+		t.Fatalf("за молчуна разбудили, получено %+v", got)
+	}
+
+	res, err := task.Report(context.Background(), "43bc6e11", "готово", "миграция удалена",
+		task.ReportOptions{Journal: j, Pane: "wE:p37", Deadline: 5 * time.Second, Poll: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Skipped != "" || res.Delivered == nil || !res.Delivered.Reached() {
+		t.Fatalf("настоящий done после пробуждения доставлен, получено %+v", res)
+	}
+	if len(*sent) != 2 {
+		t.Fatalf("в тред ушли и пробуждение, и отчёт, получено %d", len(*sent))
+	}
+	recs, _ := j.Read()
+	if st := task.StateOf(recs, "43bc6e11").State; st != task.StateDone {
+		t.Fatalf("состояние — исход задачи, получено %q", st)
+	}
+	if lost := task.LostReports(recs); len(lost) != 0 {
+		t.Fatalf("ничего не потеряно, получено %+v", lost)
+	}
+}
