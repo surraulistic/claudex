@@ -45,8 +45,8 @@ const (
 	DefaultBudget = 20 * time.Second
 	// BackoffBase и BackoffMax — насколько отложить адрес, который только что
 	// отказал. Без этого наблюдатель долбится в закрытый разговор каждый тик.
-	BackoffBase = 2 * time.Minute
-	BackoffMax  = 30 * time.Minute
+	BackoffBase = task.RetryBase
+	BackoffMax  = task.RetryMax
 )
 
 type Options struct {
@@ -57,9 +57,10 @@ type Options struct {
 	Interval   time.Duration
 	MaxPerTick int
 	Budget     time.Duration
-	// Reconcile включает сборку отчётов за молчунов. По умолчанию выключена:
-	// сборка читает живые экраны и трогает куда больше поручений, чем дожим,
-	// поэтому сперва она должна пожить под присмотром.
+	// Reconcile включает сборку за молчунов: экран панели, которая
+	// освободилась без отчёта, уходит ведущему доказательством. По умолчанию
+	// выключена: сборка читает живые экраны и трогает куда больше поручений,
+	// чем дожим. Пока она выключена здесь, её попутно делают send и delegate.
 	Reconcile bool
 	// SilenceGrace — сколько ждать после окончания хода, прежде чем считать
 	// молчание окончательным.
@@ -78,6 +79,8 @@ type Options struct {
 	// Follow отмечает завершение ходов, начатых в тредах Codex. Настоящий —
 	// task.FollowTurns: только читает app-server.
 	Follow func(context.Context, *journal.Journal, int) []task.FollowedTurn
+	// Collect — сборка за молчунов. Настоящая — task.Reconcile.
+	Collect func(context.Context, task.ReconcileOptions) []task.Reconciled
 }
 
 // Status — то, что наблюдатель оставляет о себе на диске.
@@ -91,6 +94,7 @@ type Status struct {
 	Pending     int       `json:"pending"`
 	Deferred    int       `json:"deferred"`
 	Woken       int       `json:"woken"`
+	Collected   int       `json:"collected"`
 	TurnsDone   int       `json:"turns_done"`
 	Archived    int       `json:"archived"`
 	ArchiveNote string    `json:"archive_note,omitempty"`
@@ -106,6 +110,8 @@ type Tick struct {
 	Deferred  int      `json:"deferred"`
 	// Silent — за кого разбудили по молчанию, без отчёта от самой задачи.
 	Silent []string `json:"silent,omitempty"`
+	// Collected — за кого разбудили сборкой с экрана панели.
+	Collected []string `json:"collected,omitempty"`
 	// TurnsDone — ходы в тредах Codex, чьё завершение замечено за проход.
 	TurnsDone []task.FollowedTurn `json:"turns_done,omitempty"`
 }
@@ -139,6 +145,9 @@ func New(o Options) *Supervisor {
 	if o.Follow == nil {
 		o.Follow = task.FollowTurns
 	}
+	if o.Collect == nil {
+		o.Collect = task.Reconcile
+	}
 	return &Supervisor{
 		o: o, next: map[string]time.Time{}, wait: map[string]time.Duration{},
 		stat: Status{PID: os.Getpid(), StartedAt: o.Now(),
@@ -162,6 +171,9 @@ func (s *Supervisor) Once(ctx context.Context) Tick {
 	// выполнялась вовсе — поймано тестом.
 	silent := map[string]bool{}
 	t.Silent = s.wakeSilent(ctx, recs, now, silent)
+	if s.o.Reconcile {
+		t.Collected = s.collect(ctx, now, silent)
+	}
 
 	// Считаем то, что дожимаем. Брошенное видно в `claudex undelivered`, а
 	// здесь оно создавало бы впечатление очереди, которая не двигается.
@@ -294,6 +306,42 @@ func (s *Supervisor) wakeSilent(ctx context.Context, recs []journal.Record, now 
 	return out
 }
 
+// collect — сборка за молчунов, которых wakeSilent не ведёт: у них нет
+// отметки хука, есть только экран панели. Отказ любого рода откладывает
+// поручение, чтобы занятые панели не держали голову очереди каждый тик.
+func (s *Supervisor) collect(ctx context.Context, now time.Time, owned map[string]bool) []string {
+	ctx, cancel := context.WithTimeout(ctx, s.o.Budget)
+	defer cancel()
+	skip := map[string]bool{}
+	for id := range owned {
+		skip[id] = true
+	}
+	for k, until := range s.next {
+		if id, ok := strings.CutPrefix(k, "сборка:"); ok && now.Before(until) {
+			skip[id] = true
+		}
+	}
+	var out []string
+	for _, r := range s.o.Collect(ctx, task.ReconcileOptions{
+		Journal: s.o.Journal, Client: s.o.Client, Max: s.o.MaxPerTick,
+		MinAge: s.o.SilenceGrace, Now: now, Skip: skip,
+	}) {
+		if r.Task == "" {
+			continue
+		}
+		// Дожим того же тика этот адрес не трогает: попытка уже была.
+		owned[r.Task] = true
+		if r.Delivered {
+			out = append(out, r.Task)
+			delete(s.next, "сборка:"+r.Task)
+			delete(s.wait, "сборка:"+r.Task)
+			continue
+		}
+		s.defer_("сборка:"+r.Task, now)
+	}
+	return out
+}
+
 // silenceDeadline — сколько ждать одно пробуждение: панель ждём недолго, а
 // пробуждение треда — цепочка вызовов app-server.
 func silenceDeadline(kind string) time.Duration {
@@ -325,6 +373,7 @@ func (s *Supervisor) record(now time.Time, t Tick) {
 	s.stat.Failed += len(t.Failed)
 	s.stat.Pending, s.stat.Deferred = t.Pending, t.Deferred
 	s.stat.Woken += len(t.Silent)
+	s.stat.Collected += len(t.Collected)
 	s.stat.TurnsDone += len(t.TurnsDone)
 	s.writeStatus()
 }

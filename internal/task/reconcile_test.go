@@ -298,3 +298,56 @@ func TestCollectedReportGoesThroughTheSameAddressCheck(t *testing.T) {
 		t.Fatal("собранный отчёт ждёт в канале вытягивания")
 	}
 }
+
+func TestInlineCollectionDoesNotNagOnEveryCall(t *testing.T) {
+	// F7: сборка идёт при каждом send. Ведущий-панель сменил разговор —
+	// доставить нельзя; повторять попытку на каждом вызове, писать по записи в
+	// журнал и всплывашку человеку каждый раз — шум.
+	f, j, c := executor(t, "idle", execSession)
+	when := time.Now().Add(-2 * time.Hour)
+	j.Append(journal.Record{Task: silentTask, Event: journal.Started, Pane: silentPane, Time: when,
+		Target: "wE:p17", TargetSession: leaderSession, TargetKind: KindPane, PaneSession: execSession})
+	j.Append(journal.Record{Task: silentTask, Event: journal.Finished, Pane: silentPane, Time: when,
+		Outcome: SentNoWait})
+
+	now := time.Now()
+	for _, at := range []time.Duration{0, time.Second, time.Minute} {
+		o := reconcileOpts(j, c, finalText)
+		o.Now = now.Add(at)
+		Reconcile(context.Background(), o)
+	}
+	recs, _ := j.Read()
+	if n := notifiesOf(recs, silentTask); n != 1 {
+		t.Fatalf("за три вызова в пределах отсрочки одна попытка, записей %d", n)
+	}
+	if n := len(requestsOf(f, "notification.show")); n != 1 {
+		t.Fatalf("человеку сказано один раз, уведомлений %d", n)
+	}
+
+	o := reconcileOpts(j, c, finalText)
+	o.Now = now.Add(RetryBase + time.Second)
+	Reconcile(context.Background(), o)
+	recs, _ = j.Read()
+	if n := notifiesOf(recs, silentTask); n != 2 {
+		t.Fatalf("после отсрочки попытка повторяется, записей %d", n)
+	}
+	if n := len(requestsOf(f, "notification.show")); n != 1 {
+		t.Fatalf("повтор человека не тревожит, уведомлений %d", n)
+	}
+	o.Now = now.Add(RetryBase + 2*time.Minute)
+	Reconcile(context.Background(), o)
+	recs, _ = j.Read()
+	if n := notifiesOf(recs, silentTask); n != 2 {
+		t.Fatalf("отсрочка растёт вдвое, записей %d", n)
+	}
+}
+
+func notifiesOf(recs []journal.Record, id string) int {
+	n := 0
+	for _, r := range recs {
+		if r.Task == id && r.Event == journal.Notified {
+			n++
+		}
+	}
+	return n
+}

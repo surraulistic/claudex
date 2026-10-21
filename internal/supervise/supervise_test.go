@@ -559,3 +559,63 @@ func TestHeldDoesNotOverwriteTheHolderPID(t *testing.T) {
 		t.Fatalf("проверка замка его не переписывает, получено %q", b)
 	}
 }
+
+func TestReconcileFlagReallyCollects(t *testing.T) {
+	// F2: --reconcile обещает сборку за молчунов — тик её и делает. Панель
+	// освободилась без отчёта и без отметки хука: видно только экран.
+	const th = "01a0a268-ca14-7441-844b-8fcd24cd2e45"
+	sent := wakeableThread(t, th)
+	f := herdrtest.Start(t)
+	f.Reply("agent.get", `{"id":"x","result":{"type":"agent","agent":{"pane_id":"wE:p37","agent":"claude",`+
+		`"agent_status":"idle","agent_session":{"value":"разговор"}}}}`)
+	f.Reply("agent.read", `{"id":"x","result":{"read":{"text":"Готово: миграции применены на dev и stage, тесты зелёные, ветка запушена."}}}`)
+	j := newJournal(t)
+	when := time.Now().Add(-time.Hour)
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Started, Pane: "wE:p37", PaneSession: "разговор",
+		Target: th, TargetSession: th, TargetKind: task.KindThread, Time: when})
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Finished, Outcome: task.SentNoWait, Time: when})
+	var seen []task.FlushOptions
+
+	off := New(Options{Journal: j, Client: herdr.New(f.Path), Flush: spyFlush(true, &seen)})
+	if got := off.Once(context.Background()); len(got.Collected) != 0 || len(*sent) != 0 {
+		t.Fatalf("без флага сборки нет, получено %+v", got)
+	}
+	on := New(Options{Journal: j, Client: herdr.New(f.Path), Reconcile: true, Flush: spyFlush(true, &seen)})
+	got := on.Once(context.Background())
+	if len(got.Collected) != 1 || got.Collected[0] != "43bc6e11" || len(*sent) != 1 {
+		t.Fatalf("с флагом наблюдатель собрал и разбудил, получено %+v, сообщений %d", got, len(*sent))
+	}
+	if !strings.Contains((*sent)[0].message, "43bc6e11") {
+		t.Fatalf("в тред ушло событие о поручении, получено %q", (*sent)[0].message)
+	}
+	if on.Status().Collected != 1 || !on.Status().Reconciling {
+		t.Fatalf("состояние говорит правду, получено %+v", on.Status())
+	}
+	on.Once(context.Background())
+	if len(*sent) != 1 {
+		t.Fatalf("собранное второй раз не будит, сообщений %d", len(*sent))
+	}
+}
+
+func TestCollectionSkipsWhatWakeSilentOwnsAndDefersRefusals(t *testing.T) {
+	j := newJournal(t)
+	silentAssignment(t, j, "43bc6e11", "тред", 10*time.Minute)
+	var calls []task.ReconcileOptions
+	var seen []task.FlushOptions
+	s := New(Options{Journal: j, Reconcile: true, Flush: spyFlush(true, &seen),
+		Collect: func(_ context.Context, o task.ReconcileOptions) []task.Reconciled {
+			calls = append(calls, o)
+			return []task.Reconciled{{Task: "aaaaaaaa", Cause: task.CauseExecutorBusy}}
+		}})
+	s.Once(context.Background())
+	s.Once(context.Background())
+	if len(calls) != 2 {
+		t.Fatalf("сборка на каждом тике, вызовов %d", len(calls))
+	}
+	if !calls[0].Skip["43bc6e11"] {
+		t.Fatalf("молчуна с отметкой хука будит wakeSilent, сборка его не трогает: %+v", calls[0].Skip)
+	}
+	if calls[0].Skip["aaaaaaaa"] || !calls[1].Skip["aaaaaaaa"] {
+		t.Fatalf("отказавшее откладывается до следующего раза: %+v / %+v", calls[0].Skip, calls[1].Skip)
+	}
+}

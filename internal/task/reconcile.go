@@ -60,6 +60,9 @@ type ReconcileOptions struct {
 	MinAge  time.Duration
 	Now     time.Time
 	Compose func(summary, task string, from, to time.Time, pane string) string
+	// Skip — поручения, которые на этот раз не трогать: наблюдатель держит
+	// здесь тех, за кого будит сам, и недавно отказавших.
+	Skip map[string]bool
 }
 
 type Reconciled struct {
@@ -110,6 +113,9 @@ func Reconcile(ctx context.Context, o ReconcileOptions) []Reconciled {
 	var conv, panes []Assignment
 	var hopeless int
 	for _, a := range silent(recs, o.Now, o.MinAge) {
+		if o.Skip[a.Task] {
+			continue
+		}
 		// Безнадёжные не занимают предел. У поручений, заведённых до записи
 		// разговора панели, привязку доказать нечем и уже не будет чем: они
 		// отказывают всегда. Пока они стояли в голове очереди, до остальных
@@ -169,6 +175,43 @@ func Reconcile(ctx context.Context, o ReconcileOptions) []Reconciled {
 // CauseNotExamined — до поручения не дошла очередь за этот вызов.
 const CauseNotExamined = "not_examined"
 
+// RetryBase и RetryMax — отсрочка повторного пробуждения за молчуна, вдвое
+// дальше после каждого отказа. Считается по журналу: сборка идёт и при
+// каждом send, и без отсрочки каждый вызов читал экран, писал в журнал и
+// показывал человеку уведомление.
+const (
+	RetryBase = 2 * time.Minute
+	RetryMax  = 30 * time.Minute
+)
+
+// silenceRetryDue — пора ли снова будить за молчуна после прошлых отказов.
+func silenceRetryDue(recs []journal.Record, id string, now time.Time) bool {
+	var failed int
+	var last time.Time
+	for _, r := range recs {
+		if r.Task != id || r.Event != journal.Notified || r.Stage != StageSilence {
+			continue
+		}
+		if ReachedLeader(r.Outcome) {
+			failed, last = 0, time.Time{}
+			continue
+		}
+		failed++
+		last = r.Time
+	}
+	if failed == 0 {
+		return true
+	}
+	wait := RetryBase
+	for i := 1; i < failed && wait < RetryMax; i++ {
+		wait *= 2
+	}
+	if wait > RetryMax {
+		wait = RetryMax
+	}
+	return now.Sub(last) >= wait
+}
+
 // silent — поручения, у которых есть начало и нет отчёта, и с начала прошло
 // достаточно, чтобы молчание считать окончательным.
 func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assignment {
@@ -184,7 +227,7 @@ func silent(recs []journal.Record, now time.Time, minAge time.Duration) []Assign
 	}
 	var out []Assignment
 	for _, a := range ActiveFor(recs, "") {
-		if woken[a.Task] {
+		if woken[a.Task] || !silenceRetryDue(recs, a.Task, now) {
 			continue
 		}
 		if now.Sub(a.Started) < minAge {
@@ -272,7 +315,7 @@ func reconcileOne(ctx context.Context, recs []journal.Record, a Assignment, o Re
 			"На экране было (это не отчёт, а то, что там видно):\n\n%s",
 			a.Task, a.Pane, text),
 		DeliverOptions{Stage: StageSilence, Kind: w.Kind, WantSession: w.Session,
-			Compose: compose,
+			Compose: compose, HumanTold: st.toldHuman[StageSilence],
 			Event: &Event{Task: a.Task, Stage: StageSilence, Executor: a.Pane,
 				State:  StateLost,
 				Reason: "закончила и не отчиталась; на экране: " + oneLineCut(text, EventChars)},

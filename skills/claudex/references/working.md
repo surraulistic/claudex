@@ -184,6 +184,9 @@ pass, and an address that just refused is deferred — doubling each time up to
 half an hour — instead of being retried every tick. Delivery is deduplicated
 through the journal, so a report that landed is never sent twice.
 
-Collecting reports for silent workers (`reconcile`) is behind `--reconcile` and
-off by default: it reads live screens and touches far more assignments than
-flushing does, so it should run under supervision before it runs unattended.
+Collecting for silent panes (`reconcile`) is behind `--reconcile` and off by
+default: it reads live screens and touches far more assignments than flushing
+does, so it should run under supervision before it runs unattended. With the
+flag the supervisor does it every pass; without it, `send` and `delegate` do it
+on the way. Either way a refused wake is retried with the same doubling backoff
+(read from the journal), and the human is told once, not on every call.
