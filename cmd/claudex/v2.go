@@ -144,7 +144,9 @@ func sendContinuation(o opts, id string, recs []journal.Record, prompt string) (
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), claudesess.SendTimeout)
 	defer cancel()
-	if err := claudesess.Send(ctx, s, prompt); err != nil {
+	// Приписка та же, что у первичной отправки: разговор за часы компактится,
+	// и без неё продолжение приходит без идентификатора и команды done.
+	if err := claudesess.Send(ctx, s, task.WithReport(prompt, "", id)); err != nil {
 		sendErr = err
 		return exitcode.Wrap(exitcode.Fail, err)
 	}

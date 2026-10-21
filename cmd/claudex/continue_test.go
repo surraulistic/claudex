@@ -30,6 +30,12 @@ func isolatedWorker(t *testing.T, listening bool) *journal.Journal {
 // isolatedSession — то же без заведённого поручения.
 func isolatedSession(t *testing.T, listening bool) *journal.Journal {
 	t.Helper()
+	return isolatedSessionInto(t, listening, nil)
+}
+
+// isolatedSessionInto — то же, и всё, что пришло в сокет, уходит в got.
+func isolatedSessionInto(t *testing.T, listening bool, got chan<- string) *journal.Journal {
+	t.Helper()
 	for _, k := range []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
 		"CLAUDE_CODE_MESSAGING_TOKEN", "HERDR_PANE_ID", "CODEX_THREAD_ID"} {
 		t.Setenv(k, "")
@@ -56,7 +62,13 @@ func isolatedSession(t *testing.T, listening bool) *journal.Journal {
 					return
 				}
 				buf := make([]byte, 64<<10)
-				c.Read(buf)
+				n, _ := c.Read(buf)
+				if got != nil {
+					select {
+					case got <- string(buf[:n]):
+					default:
+					}
+				}
 				c.Close()
 			}
 		}()
@@ -208,5 +220,26 @@ func TestDoneWithEnglishOutcomeIsRecordedAsFailure(t *testing.T) {
 	st := task.StateOf(recs, "465a77fc")
 	if st.State != task.StateFailed || st.Reason != "tests red" {
 		t.Fatalf("провал с причиной «tests red», получено %+v", st)
+	}
+}
+
+func TestContinuationCarriesTheReportInstruction(t *testing.T) {
+	// F6: продолжение в живой разговор несёт идентификатор и команду done,
+	// как первичная отправка и продолжение headless.
+	got := make(chan string, 1)
+	j := isolatedSessionInto(t, true, got)
+	j.Append(journal.Record{Task: "465a77fc", Event: journal.Started,
+		PaneSession: workerSession, Prompt: "исходное поручение"})
+	recs, _ := j.Read()
+	if err := sendContinuation(opts{}, "465a77fc", recs, "ещё: обнови README"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-got:
+		if !strings.Contains(msg, "обнови README") || !strings.Contains(msg, "done 465a77fc") {
+			t.Fatalf("в разговор ушли текст и приписка с done, получено %q", msg)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("в разговор ничего не пришло")
 	}
 }
