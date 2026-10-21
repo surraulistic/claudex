@@ -929,3 +929,85 @@ func TestReportSupersedesAnUndeliveredSilenceWake(t *testing.T) {
 		t.Fatalf("после отчёта пробуждение за молчуна не досылается, получено %+v", l)
 	}
 }
+
+func TestDoneWithANewOutcomeReachesTheLeaderAgain(t *testing.T) {
+	// F8: ведущий не остаётся с устаревшим исходом, а одинаковый повтор
+	// по-прежнему не будит второй раз.
+	f, j, c := delivery(t, "idle")
+	timedOut(t, j, "wE:p17")
+	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: time.Second, Poll: 10 * time.Millisecond}
+
+	if res, _ := Report(context.Background(), "11111111", "готово", "миграция применена", o); !res.Late {
+		t.Fatal("первый отчёт доставлен")
+	}
+	res, _ := Report(context.Background(), "11111111", "провал", "миграция откатилась", o)
+	if res.Skipped != "" || res.Delivered == nil || !res.Delivered.OK {
+		t.Fatalf("отчёт с другим исходом доставлен, получено %+v", res)
+	}
+	body, _ := f.LastRequest("agent.prompt")["params"].(map[string]any)["text"].(string)
+	if !strings.Contains(body, "миграция откатилась") {
+		t.Fatalf("ведущему ушёл новый исход, получено %q", body)
+	}
+	prompts := len(requestsOf(f, "agent.prompt"))
+	if res, _ := Report(context.Background(), "11111111", "failed", "ещё раз", o); res.Skipped == "" {
+		t.Fatalf("повтор того же исхода не будит, получено %+v", res)
+	}
+	if n := len(requestsOf(f, "agent.prompt")); n != prompts {
+		t.Fatalf("повтор не писал в панель, было %d, стало %d", prompts, n)
+	}
+	recs, _ := j.Read()
+	if st := StateOf(recs, "11111111").State; st != StateFailed {
+		t.Fatalf("состояние — последний исход, получено %q", st)
+	}
+	if lost := LostReports(recs); len(lost) != 0 {
+		t.Fatalf("ничего не потеряно, получено %+v", lost)
+	}
+}
+
+func TestNewOutcomeReplacesAnUndeliveredOne(t *testing.T) {
+	// Не дошли ни прежний, ни новый исход — досылать нужно только новый.
+	_, j, c := delivery(t, "working")
+	timedOut(t, j, "wE:p17")
+	o := ReportOptions{Client: c, Journal: j, Pane: "wE:p13", Deadline: 20 * time.Millisecond, Poll: 5 * time.Millisecond}
+	Report(context.Background(), "11111111", "готово", "первый", o)
+	Report(context.Background(), "11111111", "провал", "второй", o)
+	recs, _ := j.Read()
+	lost := LostReports(recs)
+	if len(lost) != 1 || lost[0].Stage != reportStage(2) || !strings.Contains(lost[0].Report, "второй") {
+		t.Fatalf("в канале вытягивания только новый исход, получено %+v", lost)
+	}
+	if st := StateOf(recs, "11111111").State; st != StateUndelivered {
+		t.Fatalf("новый исход не дошёл — undelivered, получено %q", st)
+	}
+}
+
+func TestReportDeliveredByTheWaiterIsNotUndelivered(t *testing.T) {
+	// Итог ожидания с --notify несёт отчёт: отдельной стадии отчёта нет, а
+	// до ведущего он дошёл.
+	now := time.Now()
+	recs := []journal.Record{
+		{Task: "aaaaaaaa", Event: journal.Started, Time: now, Target: "wE:p17", TargetKind: KindPane},
+		{Task: "aaaaaaaa", Event: journal.Reported, Time: now, Outcome: "готово"},
+		{Task: "aaaaaaaa", Event: journal.Finished, Time: now, Outcome: Reported},
+		{Task: "aaaaaaaa", Event: journal.Notified, Time: now, Stage: StageFinished, Outcome: WokeUp},
+	}
+	if st := StateAt(recs, "aaaaaaaa", now).State; st != StateDone {
+		t.Fatalf("отчёт отдан итогом ожидания — done, получено %q", st)
+	}
+	if st := statesAt(recs, now)["aaaaaaaa"].State; st != StateDone {
+		t.Fatalf("общий проход говорит то же, получено %q", st)
+	}
+	if stage := stateOf(recs, "aaaaaaaa").reportStageFor("готово"); stage != "" {
+		t.Fatalf("тот же исход повторно не шлём, получено %q", stage)
+	}
+}
+
+func requestsOf(f *herdrtest.Fake, method string) []string {
+	var out []string
+	for _, r := range f.Requests() {
+		if strings.Contains(r, `"method":"`+method+`"`) {
+			out = append(out, r)
+		}
+	}
+	return out
+}

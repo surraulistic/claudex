@@ -495,3 +495,30 @@ func TestDoneAfterSilenceWakeStillReachesTheLeader(t *testing.T) {
 		t.Fatalf("ничего не потеряно, получено %+v", lost)
 	}
 }
+
+func TestNewOutcomeIsANewMessageInTheThread(t *testing.T) {
+	// F8: повтор done с другим исходом — новое сообщение треда, а не прежнее,
+	// которое тред узнал бы по clientUserMessageId.
+	const th = "01a0a268-ca14-7441-844b-8fcd24cd2e45"
+	sent := wakeableThread(t, th)
+	j := newJournal(t)
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Started, Pane: "wE:p37",
+		Target: th, TargetSession: th, TargetKind: task.KindThread})
+	j.Append(journal.Record{Task: "43bc6e11", Event: journal.Finished, Outcome: task.SentNoWait})
+	o := task.ReportOptions{Journal: j, Pane: "wE:p37", Deadline: 5 * time.Second, Poll: 10 * time.Millisecond}
+	for i, c := range []struct {
+		outcome string
+		want    int
+	}{{"готово", 1}, {"провал", 2}, {"провал", 2}} {
+		if _, err := task.Report(context.Background(), "43bc6e11", c.outcome, "попытка", o); err != nil {
+			t.Fatal(err)
+		}
+		if len(*sent) != c.want {
+			t.Fatalf("шаг %d (%s): сообщений в треде %d, ждали %d", i, c.outcome, len(*sent), c.want)
+		}
+	}
+	recs, _ := j.Read()
+	if st := task.StateOf(recs, "43bc6e11").State; st != task.StateFailed {
+		t.Fatalf("состояние — последний исход, получено %q", st)
+	}
+}

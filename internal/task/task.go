@@ -307,11 +307,12 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	}
 
 	st := stateOf(before, id)
+	stage := st.reportStageFor(canonOutcome(outcome))
 	switch {
 	case !st.finished:
 		res.Skipped = "наблюдатель ещё ждёт — он и доставит"
 		return res, nil
-	case st.delivered[StageReported]:
+	case stage == "":
 		res.Skipped = "поздний отчёт уже доставлен"
 		return res, nil
 	case st.target == "":
@@ -339,10 +340,10 @@ func Report(ctx context.Context, id, outcome, reason string, o ReportOptions) (R
 	}
 	d := Deliver(ctx, o.Client, o.Journal, id, w.Target,
 		fmt.Sprintf("Поручение %s завершилось после срока наблюдения: %s %s", id, outcome, reason),
-		DeliverOptions{Stage: StageReported, Kind: w.Kind, WantSession: w.Session,
-			Compose: compose, HumanTold: st.toldHuman[StageReported],
+		DeliverOptions{Stage: stage, Kind: w.Kind, WantSession: w.Session,
+			Compose: compose, HumanTold: st.toldHuman[stage],
 			FullReport: o.FullReport,
-			Event: &Event{Task: id, Stage: StageReported, Executor: pane,
+			Event: &Event{Task: id, Stage: stage, Executor: pane,
 				State: stateOfOutcome(outcome), Reason: reason},
 			Deadline: o.Deadline, Poll: o.Poll,
 			// done идёт внутри хода задачи: не начавшийся сразу ход дожмёт
@@ -536,6 +537,15 @@ func LostReports(recs []journal.Record) []Lost {
 			if _, ok := state[k]; !ok {
 				order = append(order, k)
 			}
+			// Отчёт с новым исходом заменяет недоставленный прежний: дослать
+			// оба значило бы отдать ведущему и устаревший.
+			if IsReportStage(k.stage) {
+				for _, o := range order {
+					if o.task == k.task && o != k && IsReportStage(o.stage) {
+						state[o] = nil
+					}
+				}
+			}
 			if ReachedLeader(r.Outcome) {
 				state[k] = nil
 				continue
@@ -573,18 +583,28 @@ type taskState struct {
 	// toldHuman — человеку про эту стадию уже показывали. Повторять доставку
 	// ведущему нужно, а всплывашку человеку на каждый повтор — нет.
 	toldHuman map[string]bool
+	// lastReport — последняя попытка отдать отчёт: стадия и исход, с которым
+	// она шла. reportStages — сколько стадий отчёта уже заведено.
+	lastReport   *reportAttempt
+	reportStages int
 }
+
+type reportAttempt struct{ stage, outcome string }
 
 // stateOf собирает по журналу то, что нужно решить о поздней доставке.
 // Стадия считается доставленной, только если кого-то действительно достигли:
 // провалившуюся попытку повторить стоит, удавшуюся — нет.
 func stateOf(recs []journal.Record, id string) taskState {
 	st := taskState{delivered: map[string]bool{}, toldHuman: map[string]bool{}}
+	outcome := ""
+	stageOutcome := map[string]string{}
 	for _, r := range recs {
 		if r.Task != id {
 			continue
 		}
 		switch r.Event {
+		case journal.Reported:
+			outcome = canonOutcome(r.Outcome)
 		case journal.Started:
 			if st.started.IsZero() {
 				st.started = r.Time
@@ -612,9 +632,45 @@ func stateOf(recs []journal.Record, id string) taskState {
 			if strings.HasPrefix(r.Outcome, ToldHuman) {
 				st.toldHuman[orElse(r.Stage, StageFinished)] = true
 			}
+			switch stage := orElse(r.Stage, StageFinished); {
+			case IsReportStage(stage):
+				if _, ok := stageOutcome[stage]; !ok {
+					stageOutcome[stage] = outcome
+					st.reportStages++
+				}
+				st.lastReport = &reportAttempt{stage, stageOutcome[stage]}
+			case stage == StageFinished && outcome != "" && ReachedLeader(r.Outcome):
+				// Итог ожидания после отчёта уже отдал этот отчёт.
+				st.lastReport = &reportAttempt{stage, outcome}
+			}
 		}
 	}
 	return st
+}
+
+// canonOutcome — исход отчёта без причины: им различаются повторы done.
+func canonOutcome(outcome string) string {
+	w := first(outcome)
+	if o, ok := OutcomeWord(w); ok {
+		return o
+	}
+	return w
+}
+
+// reportStageFor — под какой стадией отдавать отчёт с этим исходом; пусто —
+// он уже доставлен. Повтор с тем же исходом не будит ведущего второй раз, с
+// другим — будит: иначе ведущий остался бы с устаревшим исходом.
+func (st taskState) reportStageFor(outcome string) string {
+	last := st.lastReport
+	switch {
+	case last == nil:
+		return StageReported
+	case last.outcome == outcome && st.delivered[last.stage]:
+		return ""
+	case last.outcome == outcome && IsReportStage(last.stage):
+		return last.stage
+	}
+	return reportStage(st.reportStages + 1)
 }
 
 // claimedIfDiffers — что назвали, если это не то, подо что легло.
@@ -720,6 +776,21 @@ const (
 	// него не уходил.
 	StageSilence = "silence"
 )
+
+// IsReportStage — стадия отчёта: первая или повтор done с другим исходом.
+func IsReportStage(stage string) bool {
+	return stage == StageReported || strings.HasPrefix(stage, StageReported+"-")
+}
+
+// reportStage — стадия n-го исхода, отданного ведущему. Своя у каждого
+// исхода: под общей стадией повтор считался бы уже доставленным, а тред
+// узнал бы в нём прежнее сообщение.
+func reportStage(n int) string {
+	if n <= 1 {
+		return StageReported
+	}
+	return fmt.Sprintf("%s-%d", StageReported, n)
+}
 
 // sessionOf — какой разговор сейчас живёт в панели. Пусто значит, что герой
 // его не сообщает: тогда привязки нет и проверять нечего.

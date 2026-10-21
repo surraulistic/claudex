@@ -100,68 +100,103 @@ func StateOf(recs []journal.Record, id string) Lifecycle {
 // StateAt — то же, но на названный момент. Отдельно ради проверяемости:
 // правило про давность иначе не проверить, не двигая системные часы.
 func StateAt(recs []journal.Record, id string, now time.Time) Lifecycle {
-	l := Lifecycle{Task: id, State: StateCreated}
-	var started, reported, refused, launchFailed bool
-	var delivered, queued, unconfirmed bool
-	var sawNotify bool
-
-	var last time.Time
+	a := newLifeAcc(id)
 	for _, r := range recs {
-		if r.Task != id {
-			continue
-		}
-		if r.Time.After(last) {
-			last = r.Time
-		}
-		switch r.Event {
-		case journal.Refused:
-			refused = true
-			l.Since, l.Reason = r.Time, r.Reason
-		case journal.LaunchFailed:
-			launchFailed = true
-			l.Since, l.Reason = r.Time, r.Reason
-		case journal.Started:
-			started = true
-			l.Since = r.Time
-			l.Caller, l.CallerKind, l.CallerSession = r.Target, r.TargetKind, r.TargetSession
-			l.Executor = executorName(r)
-		case journal.Reported:
-			reported = true
-			l.Since = r.Time
-			l.State = stateOfOutcome(r.Outcome)
-			l.Reason = r.Reason
-		case journal.Notified:
-			if r.Stage == StageSilence {
-				break
-			}
-			sawNotify = true
-			if r.Delivery != "" {
-				l.Delivery = r.Delivery
-			}
-			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
-				delivered = true
-			}
-			// Начатый ход, который потом оборвался, до ведущего не дошёл.
-			if r.Stage == StageReported && r.Cause == CauseTurnFailed {
-				delivered = false
-			}
-			if r.Stage == StageReported && r.Outcome == ThreadQueued {
-				queued = true
-			}
-			if r.Stage == StageReported && r.Cause == CauseConsumedUnconfirmed {
-				queued, unconfirmed = false, true
-			}
-			// Ход начался — событие из очереди уже взято, что бы ни было дальше.
-			if r.Stage == StageReported && rank(r.ThreadStage) >= rank(codex.StageStarted) {
-				queued, unconfirmed = false, false
-			}
+		if r.Task == id {
+			a.add(r)
 		}
 	}
+	return a.result(now)
+}
 
-	if launchFailed {
-		started = false
+// lifeAcc — состояние одного поручения, собираемое по записям. Одно на оба
+// пути, одиночный и по всему журналу: два почти одинаковых прохода
+// расходились при каждой новой стадии.
+type lifeAcc struct {
+	l                                        Lifecycle
+	last                                     time.Time
+	started, reported, refused, launchFailed bool
+	notified                                 bool
+	// cur — стадия последней попытки отдать отчёт: повтор done с другим
+	// исходом заводит новую, и дошло ли до ведущего, решает последняя.
+	cur    string
+	stages map[string]*reportFlags
+}
+
+type reportFlags struct{ delivered, queued, unconfirmed bool }
+
+func newLifeAcc(id string) *lifeAcc {
+	return &lifeAcc{l: Lifecycle{Task: id, State: StateCreated}, stages: map[string]*reportFlags{}}
+}
+
+func (a *lifeAcc) add(r journal.Record) {
+	if r.Time.After(a.last) {
+		a.last = r.Time
 	}
-	return settle(l, started, reported, refused || launchFailed, sawNotify, delivered, queued, unconfirmed, last, now)
+	switch r.Event {
+	case journal.Refused:
+		a.refused = true
+		a.l.Since, a.l.Reason = r.Time, r.Reason
+	case journal.LaunchFailed:
+		a.launchFailed = true
+		a.l.Since, a.l.Reason = r.Time, r.Reason
+	case journal.Started:
+		a.started = true
+		a.l.Since = r.Time
+		a.l.Caller, a.l.CallerKind, a.l.CallerSession = r.Target, r.TargetKind, r.TargetSession
+		a.l.Executor = executorName(r)
+	case journal.Reported:
+		a.reported = true
+		a.l.Since = r.Time
+		a.l.State = stateOfOutcome(r.Outcome)
+		a.l.Reason = r.Reason
+	case journal.Notified:
+		if r.Stage == StageSilence {
+			break
+		}
+		a.notified = true
+		if r.Delivery != "" {
+			a.l.Delivery = r.Delivery
+		}
+		// Итог ожидания, доставленный после отчёта, этот отчёт и несёт.
+		stage := orElse(r.Stage, StageFinished)
+		if !IsReportStage(stage) && !(stage == StageFinished && a.reported) {
+			break
+		}
+		f := a.stages[stage]
+		if f == nil {
+			f = &reportFlags{}
+			a.stages[stage] = f
+		}
+		a.cur = stage
+		if ReachedLeader(r.Outcome) {
+			f.delivered = true
+		}
+		// Начатый ход, который потом оборвался, до ведущего не дошёл.
+		if r.Cause == CauseTurnFailed {
+			f.delivered = false
+		}
+		if r.Outcome == ThreadQueued {
+			f.queued = true
+		}
+		if r.Cause == CauseConsumedUnconfirmed {
+			f.queued, f.unconfirmed = false, true
+		}
+		// Ход начался — событие из очереди уже взято, что бы ни было дальше.
+		if rank(r.ThreadStage) >= rank(codex.StageStarted) {
+			f.queued, f.unconfirmed = false, false
+		}
+	}
+}
+
+func (a *lifeAcc) result(now time.Time) Lifecycle {
+	started := a.started && !a.launchFailed
+	f := a.stages[a.cur]
+	if f == nil {
+		f = &reportFlags{}
+	}
+	return settle(a.l, started, a.reported, a.refused || a.launchFailed, a.notified,
+		f.delivered, f.queued, f.unconfirmed, a.last, now)
 }
 
 // settle — правила, общие для обоих путей: одиночного разбора и прохода по
@@ -326,73 +361,18 @@ func open(recs []journal.Record, now time.Time, withAbandoned bool) []Lifecycle 
 
 // statesAt — состояния всех поручений за один проход.
 func statesAt(recs []journal.Record, now time.Time) map[string]Lifecycle {
-	type acc struct {
-		l                                        Lifecycle
-		last                                     time.Time
-		started, reported, refused, launchFailed bool
-		notified, delivered, queued, unconfirmed bool
-	}
-	all := map[string]*acc{}
+	all := map[string]*lifeAcc{}
 	for _, r := range recs {
 		a := all[r.Task]
 		if a == nil {
-			a = &acc{l: Lifecycle{Task: r.Task, State: StateCreated}}
+			a = newLifeAcc(r.Task)
 			all[r.Task] = a
 		}
-		if r.Time.After(a.last) {
-			a.last = r.Time
-		}
-		switch r.Event {
-		case journal.Refused:
-			a.refused = true
-			a.l.Since, a.l.Reason = r.Time, r.Reason
-		case journal.LaunchFailed:
-			a.launchFailed = true
-			a.l.Since, a.l.Reason = r.Time, r.Reason
-		case journal.Started:
-			a.started = true
-			a.l.Since = r.Time
-			a.l.Caller, a.l.CallerKind, a.l.CallerSession = r.Target, r.TargetKind, r.TargetSession
-			a.l.Executor = executorName(r)
-		case journal.Reported:
-			a.reported = true
-			a.l.Since = r.Time
-			a.l.State = stateOfOutcome(r.Outcome)
-			a.l.Reason = r.Reason
-		case journal.Notified:
-			if r.Stage == StageSilence {
-				break
-			}
-			a.notified = true
-			if r.Delivery != "" {
-				a.l.Delivery = r.Delivery
-			}
-			if r.Stage == StageReported && ReachedLeader(r.Outcome) {
-				a.delivered = true
-			}
-			// Начатый ход, который потом оборвался, до ведущего не дошёл.
-			if r.Stage == StageReported && r.Cause == CauseTurnFailed {
-				a.delivered = false
-			}
-			if r.Stage == StageReported && r.Outcome == ThreadQueued {
-				a.queued = true
-			}
-			if r.Stage == StageReported && r.Cause == CauseConsumedUnconfirmed {
-				a.queued, a.unconfirmed = false, true
-			}
-			// Ход начался — событие из очереди уже взято, что бы ни было дальше.
-			if r.Stage == StageReported && rank(r.ThreadStage) >= rank(codex.StageStarted) {
-				a.queued, a.unconfirmed = false, false
-			}
-		}
+		a.add(r)
 	}
 	out := make(map[string]Lifecycle, len(all))
 	for id, a := range all {
-		if a.launchFailed {
-			a.started = false
-		}
-		out[id] = settle(a.l, a.started, a.reported, a.refused || a.launchFailed, a.notified, a.delivered,
-			a.queued, a.unconfirmed, a.last, now)
+		out[id] = a.result(now)
 	}
 	return out
 }
