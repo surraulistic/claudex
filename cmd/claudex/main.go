@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/surraulistic/claudex/internal/cass"
+	"github.com/surraulistic/claudex/internal/claudesess"
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/digest"
 	"github.com/surraulistic/claudex/internal/exitcode"
@@ -185,6 +186,9 @@ func run() error {
 	aa, err := parseDays(o.archiveRaw)
 	if err != nil {
 		return exitcode.Wrap(exitcode.BadCall, err)
+	}
+	if err := resolveNotifySession(&o); err != nil {
+		return err
 	}
 	o.archiveAfter = aa
 	d, err := parseTimeout(o.timeoutRaw)
@@ -1494,16 +1498,16 @@ func cmdDelegate(o opts, tgt, prompt string) (err error) {
 		//
 		// Тред Codex здесь предпочтительнее панели: очередь треда не зависит
 		// от связи «родитель-потомок», которую --detach как раз и рвёт.
-		if o.notify == "" && o.notifyThread == "" {
+		if o.notify == "" && o.notifyThread == "" && o.notifySession == "" {
 			if t := codex.ThreadID(); t != "" {
 				o.notifyThread = t
 			} else {
 				o.notify = os.Getenv("HERDR_PANE_ID")
 			}
 		}
-		if o.notify == "" && o.notifyThread == "" {
+		if o.notify == "" && o.notifyThread == "" && o.notifySession == "" {
 			return exitcode.Errorf(exitcode.BadCall,
-				"--detach без --notify, без --notify-thread и вне панели herdr: результат некому прочитать")
+				"--detach без --notify, --notify-thread, --notify-session и вне панели herdr: результат некому прочитать")
 		}
 		return detach(o, p.ID, prompt)
 	}
@@ -1513,7 +1517,7 @@ func cmdDelegate(o opts, tgt, prompt string) (err error) {
 	res, err := task.Delegate(ctx, task.Options{
 		Client: client(), Journal: j, Pane: p.ID, Prompt: prompt,
 		Timeout: o.timeout, Force: o.force, WaitFree: o.waitFree,
-		Notify: o.notify, NotifyThread: o.notifyThread,
+		Notify: o.notify, NotifyThread: o.notifyThread, NotifySession: o.notifySession,
 	})
 	if err != nil {
 		if errors.Is(err, task.ErrBusy) {
@@ -1535,7 +1539,7 @@ func cmdDelegate(o opts, tgt, prompt string) (err error) {
 	// Пробуждение — только по прямой просьбе. Адрес, снятый из окружения,
 	// записывается для позднего отчёта, но сам ход не будит: вызывающий и так
 	// ждёт этот процесс своим харнессом, и вторая доставка была бы дублем.
-	if o.notify != "" || o.notifyThread != "" {
+	if o.notify != "" || o.notifyThread != "" || o.notifySession != "" {
 		text := fmt.Sprintf("Поручение %s на панели %s: %s. %s %s",
 			res.Task, p.ID, res.Outcome, res.Said, res.Reason)
 		out["notified"] = task.Deliver(ctx, client(), j, res.Task, res.WakeTarget, text,
@@ -1566,24 +1570,7 @@ func detach(o opts, pane, prompt string) error {
 	// в свой лог, которого никто не читает.
 	// Ждать освобождения — смысл самого флага: отсоединённый процесс для того и
 	// заводится. Без этого потомок отказывал в свой лог, а текст исчезал.
-	waitFree := o.waitFreeRaw
-	if waitFree == "" || waitFree == "0" {
-		waitFree = o.timeoutRaw
-	}
-	args := []string{"delegate", pane, prompt, "--timeout", o.timeoutRaw,
-		"--wait-free", waitFree, "--db-path", o.db}
-	if o.notify != "" {
-		args = append(args, "--notify", o.notify, "--notify-timeout", o.notifyWaitRaw)
-	}
-	// Тред передаётся прямо, а не через окружение: потомок живёт своей группой
-	// процессов и переживает вызывающего, а CODEX_THREAD_ID у него к тому
-	// времени может уже ничего не значить.
-	if o.notifyThread != "" {
-		args = append(args, "--notify-thread", o.notifyThread, "--notify-timeout", o.notifyWaitRaw)
-	}
-	if o.force {
-		args = append(args, "--force")
-	}
+	args := detachArgs(o, pane, prompt)
 	// Каталог заводится здесь же: журнал поручений и индекс создают его сами,
 	// а до первого из них --detach падал на «no such file or directory».
 	if err := os.MkdirAll(filepath.Dir(detachLog()), 0o755); err != nil {
@@ -1606,6 +1593,47 @@ func detach(o opts, pane, prompt string) error {
 	return emit(o, map[string]any{
 		"pane": pane, "detached": true, "pid": pid, "log": detachLog(),
 	})
+}
+
+// resolveNotifySession заменяет имя разговора в --notify-session его
+// идентификатором: в журнал адресом ложится разговор, а не имя, которое
+// завтра может носить другой.
+func resolveNotifySession(o *opts) error {
+	if o.notifySession == "" {
+		return nil
+	}
+	s, err := claudesess.Lookup(claudesess.Home(), o.notifySession)
+	if err != nil {
+		return exitcode.Errorf(exitcode.BadCall, "--notify-session %q: %v", o.notifySession, err)
+	}
+	o.notifySession = s.ID
+	return nil
+}
+
+// detachArgs — доводы потомка --detach.
+func detachArgs(o opts, pane, prompt string) []string {
+	waitFree := o.waitFreeRaw
+	if waitFree == "" || waitFree == "0" {
+		waitFree = o.timeoutRaw
+	}
+	args := []string{"delegate", pane, prompt, "--panel", "--timeout", o.timeoutRaw,
+		"--wait-free", waitFree, "--db-path", o.db}
+	if o.notify != "" {
+		args = append(args, "--notify", o.notify, "--notify-timeout", o.notifyWaitRaw)
+	}
+	// Тред и разговор передаются прямо, а не через окружение: потомок живёт
+	// своей группой процессов и переживает вызывающего, а CODEX_THREAD_ID у
+	// него к тому времени может уже ничего не значить.
+	if o.notifyThread != "" {
+		args = append(args, "--notify-thread", o.notifyThread, "--notify-timeout", o.notifyWaitRaw)
+	}
+	if o.notifySession != "" {
+		args = append(args, "--notify-session", o.notifySession, "--notify-timeout", o.notifyWaitRaw)
+	}
+	if o.force {
+		args = append(args, "--force")
+	}
+	return args
 }
 
 // sessionOfPane — разговор, живущий сейчас в панели.
@@ -1640,6 +1668,17 @@ func wakeIsPossible(j *journal.Journal, o opts) error {
 		if v := task.MayQueue(wake.Target, codex.State(codex.Home(), wake.Target)); !v.OK() {
 			return exitcode.Errorf(exitcode.BadCall,
 				"результат будет некуда доставить: %s.", v.Reason())
+		}
+		return nil
+	}
+
+	if wake.Kind == task.KindSession {
+		if o.notifySession == "" && !o.detach {
+			return nil
+		}
+		if _, err := claudesess.Lookup(claudesess.Home(), wake.Target); err != nil {
+			return exitcode.Errorf(exitcode.BadCall,
+				"результат будет некуда доставить: разговор %s недоступен: %v", wake.Target, err)
 		}
 		return nil
 	}
