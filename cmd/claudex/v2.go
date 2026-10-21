@@ -88,6 +88,10 @@ func cmdSend(o opts, tgt, prompt string) (err error) {
 		}
 		return delegateToConversation(o, a.Session, "", prompt)
 	case task.AddrTask:
+		sender := task.ResolveWake(client(), o.notify, o.notifyThread, o.notifySession)
+		if err := task.MayContinue(recs, a.Task, sender); err != nil {
+			return exitcode.Wrap(exitcode.BadCall, err)
+		}
 		return sendContinuation(o, a.Task, recs, prompt)
 	default:
 		return cmdDelegate(o, tgt, prompt)

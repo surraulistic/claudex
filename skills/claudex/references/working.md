@@ -49,6 +49,12 @@ claudex send license --new "unrelated: audit deps"   # deliberately separate
 Several open assignments of yours is a refusal listing them: which one you
 meant is something only you know.
 
+Naming the task id (`claudex send <task id> "…"`) follows the same rule: from
+a Codex thread, Claude Code conversation or herdr pane you can continue only
+an assignment you started; someone else's is refused and nothing is sent.
+From an unidentified sender (a plain terminal, a script) the named task is
+continued, and its result still returns to whoever started it.
+
 `send` is tracked, asynchronous, and returns to its caller by default. The
 caller is whoever ran it — a Codex thread, a Claude Code conversation, or a
 herdr pane — resolved from the environment in that order. There is no

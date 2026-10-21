@@ -122,3 +122,24 @@ func TestExecutorOfTaskIsTakenFromTheRecord(t *testing.T) {
 		t.Fatal("чужого не выдумываем")
 	}
 }
+
+func TestContinuingByTaskIDIsOnlyForItsCaller(t *testing.T) {
+	// F11: явный идентификатор не обходит правило «продолжать только своё».
+	recs := []journal.Record{{Task: "465a77fc", Event: journal.Started, PaneSession: "исполнитель",
+		Target: "01a0a268-ca14-7441-844b-8fcd24cd2e45", TargetSession: "01a0a268-ca14-7441-844b-8fcd24cd2e45",
+		TargetKind: KindThread}}
+	own := Wake{Kind: KindThread, Target: "01a0a268-ca14-7441-844b-8fcd24cd2e45",
+		Session: "01a0a268-ca14-7441-844b-8fcd24cd2e45"}
+	if err := MayContinue(recs, "465a77fc", own); err != nil {
+		t.Fatalf("своё продолжается, получено %v", err)
+	}
+	other := Wake{Kind: KindSession, Target: "81fad209-733a-4b55-b5f2-6a8b9cc14eed",
+		Session: "81fad209-733a-4b55-b5f2-6a8b9cc14eed"}
+	var foreign *ForeignTask
+	if err := MayContinue(recs, "465a77fc", other); !errors.As(err, &foreign) {
+		t.Fatalf("чужое — отказ, получено %v", err)
+	}
+	if err := MayContinue(recs, "465a77fc", Wake{}); err != nil {
+		t.Fatalf("отправитель не определён — названное поручение продолжается, получено %v", err)
+	}
+}

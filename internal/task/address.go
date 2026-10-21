@@ -188,6 +188,40 @@ func ContinueTarget(recs []journal.Record, executor string, sender Wake, now tim
 		short(executor), live[0].Task, short(live[0].Target)), nil
 }
 
+// MayContinue — можно ли sender продолжить названное поручение.
+//
+// Явный идентификатор — явное намерение, но результат продолжения уходит
+// тому, кто поручение затеял. Поэтому известный отправитель продолжает только
+// своё. Отправитель не определён (человек из терминала, скрипт) — продолжение
+// разрешено: он назвал поручение сам, а ответ вернётся прежнему ведущему.
+func MayContinue(recs []journal.Record, id string, sender Wake) error {
+	if sender.Empty() {
+		return nil
+	}
+	var a Assignment
+	for _, r := range recs {
+		if r.Task == id && r.Event == journal.Started {
+			a = Assignment{Task: id, Target: r.Target, Kind: r.TargetKind, Session: r.TargetSession}
+		}
+	}
+	if a.Target == "" || sameCaller(a, sender) {
+		return nil
+	}
+	return &ForeignTask{Task: id, Caller: a.Target}
+}
+
+// ForeignTask — поручение затеял другой ведущий: продолжение увело бы ответ
+// ему.
+type ForeignTask struct {
+	Task, Caller string
+}
+
+func (e *ForeignTask) Error() string {
+	return fmt.Sprintf("поручение %s затеял другой ведущий (%s): результат продолжения вернётся ему, а не вам.\n"+
+		"  своё поручение тому же исполнителю: claudex send <разговор> --new \"…\"",
+		e.Task, short(e.Caller))
+}
+
 // sameCaller — тот ли это ведущий. У панели адрес — место, а не разговор,
 // поэтому нужен ещё и тот же разговор в ней.
 func sameCaller(a Assignment, w Wake) bool {

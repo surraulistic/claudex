@@ -243,3 +243,35 @@ func TestContinuationCarriesTheReportInstruction(t *testing.T) {
 		t.Fatal("в разговор ничего не пришло")
 	}
 }
+
+// F11 сквозь send: «send <id поручения>» от чужого ведущего — отказ без
+// отправки, от своего и от неопределённого отправителя — продолжение.
+func TestSendByTaskIDContinuesOnlyForItsCaller(t *testing.T) {
+	j := isolatedSession(t, true)
+	t.Setenv("HERDR_SOCKET_PATH", t.TempDir()+"/нет.sock")
+	t.Setenv("CLAUDEX_NO_AUTOSUPERVISOR", "1")
+	j.Append(journal.Record{Task: "465a77fc", Event: journal.Started, PaneSession: workerSession,
+		Target: leaderA.Target, TargetSession: leaderA.Session, TargetKind: leaderA.Kind, Prompt: "исходное"})
+
+	t.Setenv("CLAUDE_CODE_SESSION_ID", leaderB.Target)
+	if err := cmdSend(opts{}, "465a77fc", "чужое"); err == nil || !strings.Contains(err.Error(), "другой ведущий") {
+		t.Fatalf("чужой ведущий получает отказ с причиной, получено %v", err)
+	}
+	recs, _ := j.Read()
+	if cs := task.Continuations(recs, "465a77fc"); len(cs) != 0 {
+		t.Fatalf("при отказе ничего не отправлено: %+v", cs)
+	}
+
+	t.Setenv("CLAUDE_CODE_SESSION_ID", leaderA.Target)
+	if err := cmdSend(opts{}, "465a77fc", "своё"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	if err := cmdSend(opts{}, "465a77fc", "из терминала"); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ = j.Read()
+	if cs := task.Continuations(recs, "465a77fc"); len(cs) != 2 {
+		t.Fatalf("своё и названное из терминала продолжены: %+v", cs)
+	}
+}
