@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -76,6 +79,9 @@ func cmdSupervisor(o opts, args []string) error {
 		return nil
 	}
 
+	if err := saveSupervisorArgs(supervisorFlags(o)); err != nil {
+		fmt.Fprintf(os.Stderr, "claudex: флаги наблюдателя не сохранены, автоподъём пойдёт с умолчаниями: %v\n", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fmt.Fprintf(os.Stderr,
@@ -131,7 +137,7 @@ func ensureSupervisor(_ opts) error {
 		return err
 	}
 	defer log.Close()
-	cmd := exec.Command(self, "supervisor")
+	cmd := exec.Command(self, append([]string{"supervisor"}, loadSupervisorArgs()...)...)
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -191,4 +197,69 @@ func supervisorStop() error {
 	}
 	fmt.Printf("остановлен (pid %d)\n", pid)
 	return nil
+}
+
+// Флаги наблюдателя переживают его самого: автоподъём после падения шёл с
+// умолчаниями, и наблюдатель, запущенный с --silence-grace 20m, воскресал с
+// пятью минутами и будил ведущих посреди работы. Последний явный запуск
+// определяет, с чем поднимается следующий.
+
+func supervisorArgsPath() string {
+	return filepath.Join(filepath.Dir(supervise.StatusPath()), "supervisor-args.json")
+}
+
+func supervisorFlags(o opts) []string {
+	args := []string{"--interval", o.intervalRaw, "--silence-grace", o.silenceRaw,
+		"--max-per-tick", strconv.Itoa(o.maxPerTick), "--archive-after", o.archiveRaw}
+	if o.reconcile {
+		args = append(args, "--reconcile")
+	}
+	return args
+}
+
+func saveSupervisorArgs(args []string) error {
+	if supervise.StatusPath() == "" {
+		return errors.New("каталог состояния неизвестен")
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	path := supervisorArgsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// supervisorValue — какие значения флагов принимаются из файла: файл
+// становится argv, и всё непохожее на число со сроком отбрасывается целиком.
+var supervisorValue = regexp.MustCompile(`^([0-9]+(\.[0-9]+)?(ms|s|m|h|d)?)+$`)
+
+func loadSupervisorArgs() []string {
+	b, err := os.ReadFile(supervisorArgsPath())
+	if err != nil {
+		return nil
+	}
+	var args []string
+	if json.Unmarshal(b, &args) != nil {
+		return nil
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--reconcile":
+		case "--interval", "--silence-grace", "--max-per-tick", "--archive-after":
+			if i+1 >= len(args) || !supervisorValue.MatchString(args[i+1]) {
+				return nil
+			}
+			i++
+		default:
+			return nil
+		}
+	}
+	return args
 }

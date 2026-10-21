@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -62,5 +64,46 @@ func TestSupervisorStartsDespiteAStaleStatusWithALivePID(t *testing.T) {
 	st, _ := supervise.Read(supervise.StatusPath())
 	if st.PID != os.Getpid() || st.Ticks != 1 {
 		t.Fatalf("проход сделан и записан своим pid, получено %+v", st)
+	}
+}
+
+func TestAutostartKeepsTheFlagsOfTheLastExplicitStart(t *testing.T) {
+	// F9: наблюдатель, запущенный с --silence-grace 20m --archive-after 30,
+	// после падения поднимается с теми же флагами, а не с умолчаниями.
+	t.Setenv("HOME", t.TempDir())
+	if got := loadSupervisorArgs(); got != nil {
+		t.Fatalf("без явного запуска — умолчания, получено %v", got)
+	}
+	o := opts{intervalRaw: "60", silenceRaw: "1h30m", maxPerTick: 5, archiveRaw: "30", reconcile: true}
+	if err := saveSupervisorArgs(supervisorFlags(o)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--interval", "60", "--silence-grace", "1h30m", "--max-per-tick", "5",
+		"--archive-after", "30", "--reconcile"}
+	if got := loadSupervisorArgs(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("автоподъём берёт сохранённое, получено %v", got)
+	}
+	// Флаги действительно разбираются так же, как в командной строке.
+	var back opts
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	registerFlags(fs, &back)
+	if err := fs.Parse(want); err != nil || back.silenceRaw != "1h30m" || !back.reconcile || back.maxPerTick != 5 {
+		t.Fatalf("сохранённое — корректные флаги, получено %+v %v", back, err)
+	}
+}
+
+func TestTamperedSupervisorArgsAreIgnored(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, bad := range [][]string{
+		{"--interval", "30; rm -rf ~"},
+		{"--journal", "/tmp/x"},
+		{"--interval"},
+	} {
+		if err := saveSupervisorArgs(bad); err != nil {
+			t.Fatal(err)
+		}
+		if got := loadSupervisorArgs(); got != nil {
+			t.Fatalf("%v не становится argv, получено %v", bad, got)
+		}
 	}
 }
