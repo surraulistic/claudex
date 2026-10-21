@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"context"
+	"fmt"
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/codex/codextest"
 	"os"
@@ -186,13 +187,18 @@ func TestStatusIsWrittenAndReadBack(t *testing.T) {
 	j := newJournal(t)
 	pending(t, j, "e5704090", "тред")
 	path := filepath.Join(t.TempDir(), "supervisor.json")
+	release, err := Acquire(lockNear(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
 	var seen []task.FlushOptions
 	s := New(Options{Journal: j, StatusPath: path, Flush: spyFlush(true, &seen)})
 	s.Once(context.Background())
 
 	st, alive := Read(path)
 	if !alive {
-		t.Fatal("наш же процесс считается живым")
+		t.Fatal("держатель замка считается живым")
 	}
 	if st.PID != os.Getpid() || st.Ticks != 1 || st.Delivered != 1 {
 		t.Fatalf("состояние записано, получено %+v", st)
@@ -520,5 +526,36 @@ func TestNewOutcomeIsANewMessageInTheThread(t *testing.T) {
 	recs, _ := j.Read()
 	if st := task.StateOf(recs, "43bc6e11").State; st != task.StateFailed {
 		t.Fatalf("состояние — последний исход, получено %q", st)
+	}
+}
+
+func TestStatusNamingAForeignLivePIDIsNotTrusted(t *testing.T) {
+	// F4: после kill -9 или перезагрузки pid из файла достаётся живому чужому
+	// процессу. Живость — только замок.
+	path := filepath.Join(t.TempDir(), "supervisor.json")
+	os.WriteFile(path, []byte(fmt.Sprintf(`{"pid":%d,"ticks":7639}`, os.Getppid())), 0o644)
+	if _, alive := Read(path); alive {
+		t.Fatal("живой чужой pid без замка — наблюдатель не работает")
+	}
+	release, err := Acquire(lockNear(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	st, alive := Read(path)
+	if !alive || st.PID != os.Getpid() || st.Ticks != 0 {
+		t.Fatalf("замок держит другой процесс: он и назван, чужая статистика не выдаётся, получено %+v %v", st, alive)
+	}
+}
+
+func TestHeldDoesNotOverwriteTheHolderPID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locks", "supervisor.lock")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte("4242"), 0o644)
+	if Held(path) {
+		t.Fatal("замок свободен")
+	}
+	if b, _ := os.ReadFile(path); string(b) != "4242" {
+		t.Fatalf("проверка замка его не переписывает, получено %q", b)
 	}
 }

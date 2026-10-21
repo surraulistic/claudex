@@ -43,3 +43,24 @@ func TestLockRecordsItsHolder(t *testing.T) {
 		t.Fatalf("замок называет держателя, получено %d %v", pid, held)
 	}
 }
+
+func TestSupervisorStartsDespiteAStaleStatusWithALivePID(t *testing.T) {
+	// F4: файл состояния называет живой чужой процесс, замок свободен —
+	// наблюдатель обязан подняться, а автоподъём — не считать его работающим.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(t.TempDir(), "нет.sock"))
+	b, _ := json.Marshal(supervise.Status{PID: os.Getppid(), Ticks: 7639})
+	os.MkdirAll(filepath.Dir(supervise.StatusPath()), 0o755)
+	os.WriteFile(supervise.StatusPath(), b, 0o644)
+
+	if supervisorRunning() {
+		t.Fatal("без замка наблюдатель не работает, какой бы pid ни был в файле")
+	}
+	if err := cmdSupervisor(opts{once: true}, nil); err != nil {
+		t.Fatalf("наблюдатель поднимается, получено %v", err)
+	}
+	st, _ := supervise.Read(supervise.StatusPath())
+	if st.PID != os.Getpid() || st.Ticks != 1 {
+		t.Fatalf("проход сделан и записан своим pid, получено %+v", st)
+	}
+}

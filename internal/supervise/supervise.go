@@ -386,26 +386,31 @@ func StatusPath() string {
 
 // Read — состояние наблюдателя и работает ли он.
 //
-// Живость проверяется по процессу, а не по файлу: файл переживает убитый
-// процесс, и doctor, доверившись ему, сказал бы «всё под присмотром» там, где
-// присмотра нет.
+// Живость — только замок рядом с файлом. Файл переживает убитый процесс, а
+// его pid после перезагрузки достаётся кому угодно: живой чужой процесс
+// выдавал мёртвого наблюдателя за работающего, и тот больше не поднимался.
+// Файл остаётся статистикой; если замок держит не тот, кто его писал, она
+// чужая и не возвращается.
 func Read(path string) (Status, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return Status{}, false
-	}
 	var st Status
-	if json.Unmarshal(b, &st) != nil || st.PID == 0 {
-		return Status{}, false
+	if b, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(b, &st)
 	}
-	p, err := os.FindProcess(st.PID)
-	if err != nil {
+	pid, held := Holder(lockNear(path))
+	if !held {
 		return st, false
 	}
-	if err := p.Signal(syscall.Signal(0)); err != nil {
-		return st, false
+	if pid > 0 && pid != st.PID {
+		return Status{PID: pid}, true
 	}
 	return st, true
+}
+
+func lockNear(statusPath string) string {
+	if statusPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(statusPath), "locks", "supervisor.lock")
 }
 
 // ErrRunning — замок наблюдателя уже держит другой процесс.
@@ -413,13 +418,7 @@ var ErrRunning = errors.New("наблюдатель уже работает")
 
 // LockPath — замок единственного наблюдателя. Файл состояния для этого не
 // годится: два процесса, запущенных разом, оба видят его пустым.
-func LockPath() string {
-	p := StatusPath()
-	if p == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(p), "locks", "supervisor.lock")
-}
+func LockPath() string { return lockNear(StatusPath()) }
 
 // Acquire берёт замок на всё время жизни процесса; ОС снимает его и при
 // аварийном выходе.
@@ -465,12 +464,19 @@ func Holder(path string) (int, bool) {
 }
 
 // Held — держит ли кто-нибудь замок. Надёжнее проверки по PID из файла
-// состояния: номер процесса переиспользуется.
+// состояния: номер процесса переиспользуется. Pid в замке не переписывает.
 func Held(path string) bool {
-	release, err := Acquire(path)
-	if err != nil {
-		return errors.Is(err, ErrRunning)
+	if path == "" {
+		return false
 	}
-	release()
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.Is(err, syscall.EWOULDBLOCK)
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return false
 }

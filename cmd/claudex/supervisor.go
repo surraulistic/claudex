@@ -38,17 +38,20 @@ func cmdSupervisor(o opts, args []string) error {
 		}
 	}
 
-	if st, alive := supervise.Read(supervise.StatusPath()); alive {
-		return exitcode.Errorf(exitcode.Busy,
-			"наблюдатель уже работает (pid %d, тиков %d): второй будет дублировать доставку",
-			st.PID, st.Ticks)
-	}
+	// Сначала замок, потом файл: файл переживает упавший процесс, и отказ по
+	// нему не давал наблюдателю подняться вовсе.
 	// Несколько попыток: ensureSupervisor проверяет замок, на миг беря его
 	// сам, и стартующий наблюдатель может попасть ровно в этот миг.
 	release, err := supervise.Acquire(supervise.LockPath())
 	for i := 0; errors.Is(err, supervise.ErrRunning) && i < 10; i++ {
 		time.Sleep(30 * time.Millisecond)
 		release, err = supervise.Acquire(supervise.LockPath())
+	}
+	if errors.Is(err, supervise.ErrRunning) {
+		st, _ := supervise.Read(supervise.StatusPath())
+		return exitcode.Errorf(exitcode.Busy,
+			"наблюдатель уже работает (pid %d, тиков %d): второй будет дублировать доставку",
+			st.PID, st.Ticks)
 	}
 	if err != nil {
 		return exitcode.Errorf(exitcode.Busy,
@@ -145,15 +148,8 @@ func ensureSupervisor(_ opts) error {
 	return fmt.Errorf("наблюдатель не подтвердил запуск; подробности в %s", logPath)
 }
 
-// supervisorRunning — замок или, для наблюдателя прежней сборки без замка,
-// живой процесс из файла состояния.
-func supervisorRunning() bool {
-	if supervise.Held(supervise.LockPath()) {
-		return true
-	}
-	_, alive := supervise.Read(supervise.StatusPath())
-	return alive
-}
+// supervisorRunning — держит ли кто-нибудь замок наблюдателя.
+func supervisorRunning() bool { return supervise.Held(supervise.LockPath()) }
 
 // autoSupervise поднимает наблюдателя для любого отслеживаемого send и done:
 // без него отчёт, принятый в очередь треда, так и не превратится в ход.
@@ -172,10 +168,10 @@ func autoSupervise() {
 func supervisorStop() error {
 	pid, held := supervise.Holder(supervise.LockPath())
 	if !held {
-		if st, alive := supervise.Read(supervise.StatusPath()); alive {
+		if st, _ := supervise.Read(supervise.StatusPath()); st.PID != 0 {
 			return exitcode.Errorf(exitcode.Fail,
-				"в %s записан pid %d, но замок наблюдателя никто не держит: это может быть уже "+
-					"другой процесс — не останавливаю; проверьте его сами (ps -p %d)",
+				"наблюдатель не работает: в %s остался pid %d, но замок никто не держит — это может быть уже "+
+					"другой процесс, не останавливаю; проверьте его сами (ps -p %d)",
 				supervise.StatusPath(), st.PID, st.PID)
 		}
 		fmt.Println("наблюдатель не работает")
