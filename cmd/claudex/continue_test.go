@@ -195,3 +195,18 @@ func TestHeadlessLaunchWithoutListingStaysActiveAndBindsLater(t *testing.T) {
 		t.Fatalf("Stop-хук сессии привязал поручение: %+v", a)
 	}
 }
+
+func TestDoneWithEnglishOutcomeIsRecordedAsFailure(t *testing.T) {
+	// F3: «claudex done <id> failed: tests red» — провал, а не готово.
+	j := isolatedWorker(t, true)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", workerSession)
+	t.Setenv("CLAUDEX_NO_AUTOSUPERVISOR", "1")
+	if err := cmdDone(opts{}, []string{"465a77fc", "failed:", "tests", "red"}); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ := j.Read()
+	st := task.StateOf(recs, "465a77fc")
+	if st.State != task.StateFailed || st.Reason != "tests red" {
+		t.Fatalf("провал с причиной «tests red», получено %+v", st)
+	}
+}

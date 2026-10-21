@@ -244,3 +244,32 @@ func TestTaskOwnWordStillDecides(t *testing.T) {
 		}
 	}
 }
+
+func TestDoneOutcomeWordsInBothLanguages(t *testing.T) {
+	// F3: скилл учит исполнителя английским словам исхода.
+	for _, c := range []struct{ in, outcome, reason, state string }{
+		{"failed: tests red", "провал", "tests red", StateFailed},
+		{"FAILED tests red", "провал", "tests red", StateFailed},
+		{"failed:tests red", "провал", "tests red", StateFailed},
+		{"blocked: нужен доступ", "заблокировано", "нужен доступ", StateNeedsInput},
+		{"Partial: half done", "частично", "half done", StateDone},
+		{"done: всё", "готово", "всё", StateDone},
+		{"провал", "провал", "", StateFailed},
+		{"Провал: тесты", "провал", "тесты", StateFailed},
+		{"заблокировано ждём ревью", "заблокировано", "ждём ревью", StateNeedsInput},
+		{"миграция готова", "готово", "миграция готова", StateDone},
+		{"failure analysis written", "готово", "failure analysis written", StateDone},
+	} {
+		o, r := SplitOutcome(c.in)
+		if o != c.outcome || r != c.reason {
+			t.Errorf("%q → (%q, %q), ждали (%q, %q)", c.in, o, r, c.outcome, c.reason)
+		}
+		if st := stateOfOutcome(o); st != c.state {
+			t.Errorf("%q → состояние %q, ждали %q", c.in, st, c.state)
+		}
+	}
+	// Записи, где слово исхода уже стоит по-английски, читаются так же.
+	if st := stateOfOutcome("failed"); st != StateFailed {
+		t.Errorf("failed в журнале — провал, получено %q", st)
+	}
+}

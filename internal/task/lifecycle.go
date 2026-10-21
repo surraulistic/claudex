@@ -3,6 +3,7 @@ package task
 import (
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/surraulistic/claudex/internal/codex"
 	"github.com/surraulistic/claudex/internal/journal"
@@ -215,7 +216,11 @@ func settle(l Lifecycle, started, reported, refused, notified, delivered, queued
 const OutcomeUnreported = "без отчёта"
 
 func stateOfOutcome(outcome string) string {
-	switch first(outcome) {
+	w := first(outcome)
+	if o, ok := OutcomeWord(w); ok {
+		w = o
+	}
+	switch w {
 	case "провал":
 		return StateFailed
 	case "заблокировано":
@@ -226,6 +231,35 @@ func stateOfOutcome(outcome string) string {
 	default:
 		return StateDone
 	}
+}
+
+// outcomeWords — слова исхода, которые принимает done. Английские — те, что
+// называет скилл исполнителю; в журнал пишется русское.
+var outcomeWords = map[string]string{
+	"готово": "готово", "провал": "провал", "частично": "частично", "заблокировано": "заблокировано",
+	"done": "готово", "failed": "провал", "partial": "частично", "blocked": "заблокировано",
+}
+
+// OutcomeWord — слово исхода в журнальном виде, без учёта регистра и
+// завершающего двоеточия.
+func OutcomeWord(w string) (string, bool) {
+	o, ok := outcomeWords[strings.ToLower(strings.TrimRight(strings.TrimSpace(w), ":"))]
+	return o, ok
+}
+
+// SplitOutcome отделяет от текста done первое слово, если оно — исход:
+// «failed: tests red» — провал с причиной «tests red». Без слова исхода
+// весь текст — причина, а исход — готово.
+func SplitOutcome(text string) (outcome, reason string) {
+	text = strings.TrimSpace(text)
+	end := strings.IndexFunc(text, func(r rune) bool { return unicode.IsSpace(r) || r == ':' })
+	if end < 0 {
+		end = len(text)
+	}
+	if o, ok := OutcomeWord(text[:end]); ok {
+		return o, strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(text[end:]), ":"))
+	}
+	return "готово", text
 }
 
 func first(s string) string {

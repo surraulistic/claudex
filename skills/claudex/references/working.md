@@ -91,7 +91,10 @@ the flushing part on its own, and `claudex doctor` says whether it is running.
 ### When the worker forgets to report
 
 `claudex done` is how a task states its own outcome — done, failed, partial,
-blocked. That is a judgement, and only whoever did the work can make it.
+blocked. That is a judgement, and only whoever did the work can make it. The
+outcome is the first word of the line, any case, colon optional:
+`claudex done <id> failed: tests red`. The Russian words готово, провал,
+частично, заблокировано mean the same; a line without one is done.
 
 It is also something a model has to remember, and measurement says it remembers
 six times out of ten: of 424 assignments, 168 ended in silence.

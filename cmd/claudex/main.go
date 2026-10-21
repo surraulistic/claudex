@@ -2060,11 +2060,7 @@ func cmdDone(o opts, args []string) error {
 	if len(args) > 0 && task.IsTaskID(args[0]) {
 		id, args = args[0], args[1:]
 	}
-	reason := strings.Join(args, " ")
-	outcome := "готово"
-	if i := strings.IndexByte(reason, ' '); i > 0 && isOutcomeWord(reason[:i]) {
-		outcome, reason = reason[:i], strings.TrimSpace(reason[i+1:])
-	}
+	outcome, reason := task.SplitOutcome(strings.Join(args, " "))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	j := journal.Open(defaultJournal())
@@ -2087,14 +2083,6 @@ func cmdDone(o opts, args []string) error {
 	}
 	autoSupervise()
 	return emit(opts{}, res)
-}
-
-func isOutcomeWord(w string) bool {
-	switch strings.ToLower(w) {
-	case "готово", "провал", "частично", "заблокировано":
-		return true
-	}
-	return false
 }
 
 func cmdIndex(o opts) error {

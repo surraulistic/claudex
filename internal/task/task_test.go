@@ -57,6 +57,12 @@ func TestPromptCarriesReportInstructionWithTaskID(t *testing.T) {
 			if !strings.Contains(text, "/путь/к/claudex done ") {
 				t.Fatalf("в задание вписан отчёт своим бинарём, получено %q", text)
 			}
+			// F3: исполнитель знает, какими словами назвать неудачу.
+			for _, w := range []string{"провал", "заблокировано", "failed", "blocked"} {
+				if !strings.Contains(text, w) {
+					t.Fatalf("приписка называет слово исхода %q, получено %q", w, text)
+				}
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

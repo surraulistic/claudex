@@ -634,7 +634,9 @@ func orElse(v, def string) string {
 
 func withReportInstruction(prompt, self, id string) string {
 	return prompt + fmt.Sprintf(
-		"\n\nКогда закончишь, последним действием выполни ровно это:\n  %s done %s «одной строкой, что вышло»", self, id)
+		"\n\nКогда закончишь, последним действием выполни ровно это:\n  %s done %s «одной строкой, что вышло»"+
+			"\nНе вышло — начни строку со слова исхода: провал, частично или заблокировано "+
+			"(failed, partial, blocked); без него исход — готово.", self, id)
 }
 
 func selfPath() string {
