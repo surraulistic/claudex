@@ -1041,9 +1041,7 @@ func deliverThread(ctx context.Context, c *herdr.Client, j *journal.Journal,
 		Accepted: prev.accepted(), SeenClientID: prev.clientID, QueuedHash: prev.cliHash,
 		Since: since, QueuedByCLI: cli, KeepProfile: switched,
 		QueueOnlyText: queueOnlyText(id, mode, o),
-		// Замок писателя у выгруженного в демоне треда значит, что его
-		// держит другой процесс.
-		OpenElsewhere: func() bool { return codex.State(home, thread) == codex.Live },
+		Owner:         func() codex.Owner { return codex.ThreadOwner(home, thread) },
 		StartWait:     o.StartWait,
 	}, o)
 	d.Waited = time.Since(started)

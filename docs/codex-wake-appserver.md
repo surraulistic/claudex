@@ -274,3 +274,86 @@ resume; клиент получает уведомление только пос
 Происхождение бинаря — `claudex version` (штамп Go во вложенном worktree врёт).
 Схема установленного 0.163.0 содержит все используемые поля; вживую 0.163.0 не
 проверялся.
+
+## Маршрут по владельцу треда (поручение 0124064d)
+
+База — `origin/main` 167e1e0 (ветка `codex-wake-appserver` в него уже влита),
+ветка `worktree-codex-owner-routing`. Не запушено, не установлено.
+
+Симптом: при открытом ChatGPT Desktop отчёты в его треды уходили в
+`not_queued` / `thread_open_elsewhere` (последние — 08.11 13:31 и 14:01).
+
+Диагностика (только чтение, Codex 0.167.0, Desktop 26.1103, его CodexCLI
+0.167.0-alpha.3.2):
+
+- Два сокета в `/private/tmp/codex-daemon-501/` — не два app-server. `e2a5…` —
+  managed daemon (`codex app-server --remote-control --listen unix://
+  --managed-daemon`, pid в `~/.codex/app-server-daemon/app-server.pid`), на него
+  ведёт `app-server-control.sock`. `d71a…` — `app-server-updater.sock` процесса
+  `codex app-server daemon pid-update-loop`; замков тредов он не держит.
+- Desktop поднимает свой runtime так (`app.asar`, `.vite/build`):
+  `codex -c features.code_mode_host=true app-server --analytics-default-enabled`
+  — транспорт по умолчанию stdio, сокета нет. `~/.codex/ipc/ipc.sock` — приватный
+  IPC Electron (кадры с длиной + JSON), не API Codex; не используется.
+- Лог демона за 12:02–13:05Z: `thread-store conflict: thread … already has an
+  active writer` — демон сам не может поднять тред, который держит Desktop.
+- Исходник `rust-v0.167.0`: `ext/queue/src/service.rs`,
+  `watch_external_messages` — каждый app-server раз в 10 с сверяет
+  `change_version` общей очереди и для загруженных у себя свободных тредов
+  стартует ход (`start_turn_if_idle`, `turn_trigger: "queue"`) с настройками
+  треда. Строки этого кода есть в обоих бинарях. `thread/queue/add` у
+  незагруженного треда только пишет в очередь (`wake_if_loaded` — ничего).
+  `codex queue` — тот же `thread/queue/add` через демон или встроенный сервер.
+- `thread_processor.rs`, `normalize_thread_turns_status`: читатель, у которого
+  тред не загружен, переписывает `inProgress` в `interrupted`. Вживую: пока
+  владелец видел `inProgress`, демон отдавал `interrupted`, `completedAt=0`;
+  через 3 с оба — `completed`. У настоящего обрыва (`TurnAborted`) `completedAt`
+  есть.
+
+Решение: замок есть, демон говорит `notLoaded` → `codex.ThreadOwner` (lsof по
+файлу замка, ps по держателю). Другой `codex app-server` без подкоманды →
+`thread/queue/add` через демон с `QueueOnlyText` (событие, не отчёт), без
+`permissionProfile/list`, resume, `settings/update`, `queue/start`; ход ищется в
+общей истории по `clientUserMessageId`. Замок у самого демона (pid за сокетом —
+`LOCAL_PEERPID`/`SO_PEERCRED`) или pid неизвестен, держателя нет, их несколько,
+lsof/ps не ответили → `thread_owner_unknown`. Не app-server → прежний
+`thread_open_elsewhere`. `interrupted` без `completedAt` — начатый ход.
+Выключатель — `CLAUDEX_CODEX_OWNER_QUEUE=off`.
+
+Живой smoke (`go test -tags codexlive -run TestLive ./internal/codex`,
+`CLAUDEX_SMOKE_DIR` — пустой каталог; только одноразовые треды, после —
+`thread/archive`; рабочие треды не трогались):
+
+- Владелец — та же команда, что у Desktop, тем же CodexCLI из ChatGPT.app
+  (Desktop при этом закрыт). `ThreadOwner` → `app_server`, «ChatGPT Desktop».
+  `Wake` через демон: `queue_accepted` → `turn_started` (`owner_queue`) за
+  7.2 с → `turn_completed`. Демон тред не загружал (`notLoaded` до конца).
+- Тред, загруженный в демоне (режим remote-control): `resume_loaded` с
+  `claudex-work` → `turn_started` → `turn_completed`.
+
+Ограничения:
+
+- Ход в треде Desktop идёт с правами, которые там выставил человек (в
+  `.codex-global-state.json` у Desktop `agent-mode: full-access`). Сменить их
+  снаружи нечем: у Desktop нет внешнего endpoint, а демон тред не держит.
+  Поэтому туда идёт только событие, а `CLAUDEX_CODEX_OWNER_QUEUE=off`
+  возвращает прежний отказ.
+- Ход начнётся, только когда тред у владельца свободен: занят, ждёт одобрения,
+  Desktop закрыли — `queue_accepted`/`owner_turn_pending`, пока хода не видно.
+  Закрыли Desktop — тред освобождается, и следующий дожим идёт холодным resume
+  в демоне под `claudex-work`; своё сообщение он находит в очереди и второй раз
+  не кладёт.
+- Живой Desktop с этим кодом не проверялся (на время работы он был закрыт);
+  проверена его команда и его бинарь. Доставка через установленный `claudex`
+  тоже не проверена: бинарь не ставился.
+- Настоящий обрыв без `completedAt` (старые rollout) будет считаться начатым,
+  а не `turn_failed`.
+- Сообщение, которое человек удалил из очереди Desktop, неотличимо от
+  забранного владельцем: `owner_turn_pending` до конца окна дожима (72 ч).
+- Владелец определяется через `/usr/sbin/lsof` и `/bin/ps` (≈0.3 с на
+  попытку); на Linux pid за сокетом — `SO_PEERCRED`, на прочих ОС он
+  неизвестен, и маршрут владельца там всегда `thread_owner_unknown`.
+
+Следующий шаг: ревью, мерж, `make install`, перезапуск наблюдателя; затем с
+открытым Desktop — `claudex send` в одноразовый тред Desktop и
+`claudex task log <id>`: ждать `owner_queue` → `turn_started`.

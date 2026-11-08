@@ -252,8 +252,11 @@ func ThreadTimeline(recs []journal.Record, id string) []string {
 		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s  %s", r.Time.Format("02.01 15:04:05"), stageWords(r.ThreadStage))
-		if r.Transport == codex.TransportQueueOnly {
+		switch r.Transport {
+		case codex.TransportQueueOnly:
 			b.WriteString(" (codex queue, без app-server)")
+		case codex.TransportOwnerQueue:
+			b.WriteString(" (очередь владельца треда, ход начинает он)")
 		}
 		if r.TurnID != "" {
 			fmt.Fprintf(&b, " · ход %s", short(r.TurnID))

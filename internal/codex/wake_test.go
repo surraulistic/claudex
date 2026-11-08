@@ -378,7 +378,7 @@ func TestThreadHeldByAnotherProcessIsNotResumed(t *testing.T) {
 	f := codextest.Start(t)
 	f.Add(th, &codextest.Thread{})
 	q := req()
-	q.OpenElsewhere = func() bool { return true }
+	q.Owner = func() codex.Owner { return codex.Owner{Kind: codex.OwnerForeign, PID: 4242} }
 	r, _ := codex.Wake(context.Background(), q)
 	if r.Hold != codex.HoldOpenElsewhere || r.Stage != codex.StageNotQueued {
 		t.Fatalf("второй писатель недопустим: %+v %v", r, f.Calls())
@@ -386,16 +386,13 @@ func TestThreadHeldByAnotherProcessIsNotResumed(t *testing.T) {
 	untouched(t, f, touching...)
 }
 
-func TestForeignQueueStopsColdWakeBeforeOpenElsewhereAndProfile(t *testing.T) {
+func TestForeignQueueStopsColdWakeBeforeProfile(t *testing.T) {
 	f := codextest.Start(t)
 	f.Add(th, &codextest.Thread{Queue: []codex.QueuedItem{{ID: "u1", ClientID: "app-123",
 		Input: []codex.UserInput{{Type: "text", Text: "сообщение человека"}}}}})
-	asked := false
-	q := req()
-	q.OpenElsewhere = func() bool { asked = true; return false }
-	r, _ := codex.Wake(context.Background(), q)
-	if r.Hold != codex.HoldForeignQueue || r.Stage != codex.StageNotQueued || asked {
-		t.Fatalf("чужая очередь — отказ сразу: %+v asked=%v", r, asked)
+	r, _ := codex.Wake(context.Background(), req())
+	if r.Hold != codex.HoldForeignQueue || r.Stage != codex.StageNotQueued {
+		t.Fatalf("чужая очередь — отказ сразу: %+v", r)
 	}
 	untouched(t, f, touching...)
 }

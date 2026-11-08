@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -37,6 +38,9 @@ const (
 const (
 	TransportAppServer = "app_server"
 	TransportQueueOnly = "queue_only"
+	// TransportOwnerQueue — тред держит другой app-server: claudex только кладёт
+	// в общую очередь через демон, ход начинает владелец.
+	TransportOwnerQueue = "owner_queue"
 )
 
 // WakePermissionProfile restricts woken Codex threads (cold-resumed or loaded
@@ -52,8 +56,13 @@ const (
 	HoldSystemError   = "thread_system_error"
 	HoldForeignQueue  = "foreign_queue_items"
 	HoldOpenElsewhere = "thread_open_elsewhere"
-	HoldEphemeral     = "thread_ephemeral"
-	HoldItemGone      = "queue_item_gone"
+	// HoldOwnerUnknown — замок писателя есть, а кто его держит, не доказано.
+	HoldOwnerUnknown = "thread_owner_unknown"
+	// HoldOwnerPending — сообщение в очереди треда, который держит другой
+	// app-server; хода с ним пока не видно.
+	HoldOwnerPending = "owner_turn_pending"
+	HoldEphemeral    = "thread_ephemeral"
+	HoldItemGone     = "queue_item_gone"
 	// HoldConsumedUnconfirmed — запись, положенная `codex queue`, из очереди
 	// взята, а хода с её текстом в истории нет: прочитана ли — неизвестно.
 	// Повтор ничего не узнает, поэтому дальше не дожимается.
@@ -106,17 +115,18 @@ type WakeRequest struct {
 	// QueuedByCLI — что журнал клал в этот тред через `codex queue`. Только
 	// эти записи без своего clientUserMessageId не считаются чужими.
 	QueuedByCLI []CLIQueued
-	// QueueOnlyText — что класть через `codex queue`, когда app-server
-	// недоступен: ход тогда начнётся с правами того, кто откроет тред.
+	// QueueOnlyText — что класть, когда ход начнёт не claudex, а тот, кто
+	// откроет тред, или его нынешний владелец, — с их правами: через `codex
+	// queue` без app-server и в очередь чужого владельца.
 	QueueOnlyText string
 	// KeepProfile — права этого треда claudex уже менял: другой профиль
 	// сейчас значит, что их вернули, и повторно не переключаем.
 	KeepProfile bool
-	// OpenElsewhere — держит ли тред писатель вне демона. Вызывается только
-	// для выгруженного треда.
-	OpenElsewhere func() bool
-	StartWait     time.Duration
-	Poll          time.Duration
+	// Owner — кто держит замок писателя. Вызывается только для треда,
+	// выгруженного в демоне.
+	Owner     func() Owner
+	StartWait time.Duration
+	Poll      time.Duration
 	// Each — предел на один вызов app-server.
 	Each time.Duration
 }
@@ -219,8 +229,8 @@ func defaults(r *WakeRequest) {
 	if r.Each <= 0 {
 		r.Each = 10 * time.Second
 	}
-	if r.OpenElsewhere == nil {
-		r.OpenElsewhere = func() bool { return false }
+	if r.Owner == nil {
+		r.Owner = func() Owner { return Owner{Kind: OwnerNone} }
 	}
 }
 
@@ -281,6 +291,11 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 		return turnResult(t, id), nil
 	}
 
+	owner := Owner{Kind: OwnerNone}
+	if th.Status.Type == StatusNotLoaded {
+		owner = req.Owner()
+	}
+
 	c, cancel = call()
 	queue, err := s.QueueList(c, req.Thread)
 	cancel()
@@ -305,6 +320,12 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 		res.Reason = "запись, положенная codex queue без app-server, из очереди взята, а хода с её текстом " +
 			"в истории треда нет: прочитана ли она, неизвестно; повторно не кладём"
 		return res, nil
+	case req.Accepted && owner.Kind == OwnerAppServer:
+		// Владелец вычитал очередь, а ход в общей истории ещё не записан.
+		res.Stage, res.Hold = StageAccepted, HoldOwnerPending
+		res.Reason = fmt.Sprintf("сообщение из очереди забрал владелец треда (%s), хода с ним в истории "+
+			"пока не видно; повторно не кладём", owner)
+		return res, nil
 	case req.Accepted:
 		res.Stage, res.Hold = StageAccepted, HoldItemGone
 		res.Reason = "сообщение было принято, но в очереди его нет и хода с ним не видно: " +
@@ -320,15 +341,14 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 		return held(res, hold, why), nil
 	}
 	loaded := th.Status.Type == StatusIdle
+	if !loaded && owner.Kind != OwnerNone {
+		return viaOwner(ctx, s, req, res, queued, owner)
+	}
 	// И resume, и загруженный тред вычитывают всю очередь, поэтому чужие
 	// сообщения в ней — запрет: запускать их не нам.
 	if foreign(queue, req) {
 		return held(res, HoldForeignQueue,
 			"в очереди треда есть сообщения не от claudex: тред запустил бы и их"), nil
-	}
-	if !loaded && req.OpenElsewhere() {
-		return held(res, HoldOpenElsewhere,
-			"тред выгружен в демоне, но его держит другой процесс: второй писатель недопустим"), nil
 	}
 	c, cancel = call()
 	profiles, err := s.PermissionProfiles(c, th.Cwd)
@@ -419,6 +439,70 @@ func wake(ctx context.Context, s AppServer, req WakeRequest) (WakeResult, error)
 	r := turnResult(turn, res.ClientID)
 	r.QueueID, r.ProfileSet, r.ProfileFrom = res.QueueID, res.ProfileSet, res.ProfileFrom
 	return r, nil
+}
+
+// viaOwner — тред выгружен в демоне, а замок писателя держит другой процесс.
+// Ни resume, ни queue/start, ни смены прав: всё это сделал бы второй писатель.
+// Если владелец — app-server Codex, остаётся общая очередь: он вычитает её сам,
+// когда тред у него свободен, и начнёт ход со своими правами. Поэтому в неё идёт
+// только QueueOnlyText. Чужие сообщения в очереди тут не запрет: запускает их
+// не claudex.
+func viaOwner(ctx context.Context, s AppServer, req WakeRequest, res WakeResult,
+	queued bool, o Owner) (WakeResult, error) {
+	switch o.Kind {
+	case OwnerAppServer:
+	case OwnerForeign:
+		return held(res, HoldOpenElsewhere, fmt.Sprintf(
+			"тред держит другой процесс (%s): %s; очередь он не читает, второй писатель недопустим", o, o.Why)), nil
+	default:
+		return held(res, HoldOwnerUnknown,
+			"у треда есть замок писателя, а владелец не установлен: "+o.Why+"; ничего не кладём"), nil
+	}
+	switch peer := s.PeerPID(); {
+	case peer == 0:
+		return held(res, HoldOwnerUnknown, fmt.Sprintf(
+			"замок держит app-server (%s), а pid демона за сокетом неизвестен: не отличить "+
+				"владельца от демона, который называет тред выгруженным; ничего не кладём", o)), nil
+	case peer == o.PID:
+		return held(res, HoldOwnerUnknown, fmt.Sprintf(
+			"замок держит сам демон (%s), а называет тред выгруженным: состояние не сходится; ничего не кладём", o)), nil
+	}
+	if ownerQueueOff() {
+		return held(res, HoldOpenElsewhere, fmt.Sprintf(
+			"тред держит другой app-server (%s), а очередь владельца выключена %s=off", o, ownerQueueEnv)), nil
+	}
+	res.Transport = TransportOwnerQueue
+	if !queued {
+		text := req.Text
+		if req.QueueOnlyText != "" {
+			text = req.QueueOnlyText
+		}
+		c, cancel := context.WithTimeout(ctx, req.Each)
+		mine, err := s.QueueAdd(c, req.Thread, req.ClientID, text)
+		cancel()
+		if err != nil {
+			return res, err
+		}
+		res.Stage, res.QueueID, res.ClientID = StageAccepted, mine.ID, mine.ClientID
+	}
+	r, done := pollStart(ctx, s, req, res)
+	r.Transport = TransportOwnerQueue
+	if done {
+		return r, nil
+	}
+	return held(r, HoldOwnerPending, fmt.Sprintf(
+		"принято в очередь треда; ход начнёт его владелец (%s), когда тред у него свободен, "+
+			"со своими правами — claudex их не менял", o)), nil
+}
+
+const ownerQueueEnv = "CLAUDEX_CODEX_OWNER_QUEUE"
+
+func ownerQueueOff() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ownerQueueEnv))) {
+	case "off", "0", "false", "no":
+		return true
+	}
+	return false
 }
 
 // confirmLoaded переводит загруженный тред на claudex-work. thread/settings/updated
@@ -590,9 +674,13 @@ func scanTurns(ctx context.Context, s AppServer, thread string, since time.Time,
 func turnResult(t Turn, clientID string) WakeResult {
 	r := WakeResult{Stage: StageStarted, Transport: TransportAppServer, TurnID: t.ID,
 		TurnStatus: t.Status, ClientID: clientID}
-	switch t.Status {
-	case "", TurnInProgress:
-	case TurnCompleted:
+	switch {
+	case t.Status == "" || t.Status == TurnInProgress:
+	// Демон, у которого тред не загружен, показывает чужой незаконченный ход
+	// как interrupted (normalize_thread_turns_status); у настоящего обрыва
+	// есть completedAt.
+	case t.Status == TurnInterrupted && t.CompletedAt == 0:
+	case t.Status == TurnCompleted:
 		r.Stage = StageCompleted
 	default:
 		r.Stage, r.Hold = StageTurnFailed, HoldTurnFailed

@@ -67,6 +67,14 @@ type Thread struct {
 	BusyAfterSettings bool
 	// DropAfterSettings — update применён, а соединение рвётся до ответа.
 	DropAfterSettings bool
+
+	// OwnedElsewhere — писатель треда другой процесс (ChatGPT Desktop): демон
+	// видит тред notLoaded, а resume, queue/start и settings/update отвечают
+	// конфликтом писателя, как 0.167.0.
+	OwnedElsewhere bool
+	// OwnerTakesAfter — через сколько после queue/add владелец вычитает
+	// очередь сам; ноль — только по OwnerTakes.
+	OwnerTakesAfter time.Duration
 }
 
 // NoProfile для SettingsProfile: профиль снят.
@@ -150,6 +158,7 @@ func (f *Fake) Finish(id, status string) {
 	for i := range th.Turns {
 		if th.Turns[i].Status == codex.TurnInProgress {
 			th.Turns[i].Status = status
+			th.Turns[i].CompletedAt = time.Now().Unix()
 		}
 	}
 	th.Status = codex.ThreadStatus{Type: codex.StatusIdle}
@@ -340,6 +349,9 @@ func (f *Fake) reply(sess *session, method string, raw json.RawMessage) (any, st
 	if th == nil {
 		return nil, "thread not found: " + p.ThreadID
 	}
+	if th.OwnedElsewhere && (method == "thread/resume" || method == "thread/queue/start") {
+		return nil, writerConflict(p.ThreadID)
+	}
 	switch method {
 	case "thread/read":
 		return map[string]any{"thread": map[string]any{"id": p.ThreadID, "status": th.Status,
@@ -355,6 +367,10 @@ func (f *Fake) reply(sess *session, method string, raw json.RawMessage) (any, st
 		}
 		if th.Status.Type == codex.StatusIdle && !th.Held {
 			f.drain(th)
+		}
+		if th.OwnedElsewhere && th.OwnerTakesAfter > 0 {
+			id, d := p.ThreadID, th.OwnerTakesAfter
+			go func() { time.Sleep(d); f.OwnerTakes(id) }()
 		}
 		return map[string]any{"queuedSubmission": it}, ""
 	case "thread/resume":
@@ -461,6 +477,9 @@ func (f *Fake) settingsUpdate(sess *session, raw json.RawMessage) (any, string, 
 			return nil, "фальшивка: settings/update с " + k, notice{}
 		}
 	}
+	if th.OwnedElsewhere {
+		return nil, writerConflict(id), notice{}
+	}
 	if th.Status.Type == codex.StatusNotLoaded {
 		return nil, "thread not loaded: " + id, notice{}
 	}
@@ -545,6 +564,39 @@ func (f *Fake) AddTurns(id string, n int) {
 	}
 }
 
+func writerConflict(id string) string {
+	return "thread-store conflict: thread " + id + " already has an active writer"
+}
+
+// OwnerTakes — внешний владелец вычитал первую запись очереди и начал ход.
+// Демон об этом знает только по общей истории: тред у него остаётся notLoaded.
+func (f *Fake) OwnerTakes(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	th := f.threads[id]
+	if len(th.Queue) == 0 {
+		return
+	}
+	it := th.Queue[0]
+	th.Queue = th.Queue[1:]
+	status := th.Status
+	f.start(th, it)
+	th.Status = status
+}
+
+// SeenFromOutside — как демон видит незаконченный ход треда, загруженного
+// не у него: interrupted без completedAt.
+func (f *Fake) SeenFromOutside(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	th := f.threads[id]
+	for i := range th.Turns {
+		if th.Turns[i].Status == codex.TurnInProgress {
+			th.Turns[i].Status, th.Turns[i].CompletedAt = codex.TurnInterrupted, 0
+		}
+	}
+}
+
 func (f *Fake) allowed(id string) bool {
 	for _, p := range f.Profiles {
 		if p.ID == id && p.Allowed {
@@ -569,8 +621,9 @@ func (f *Fake) start(th *Thread, it codex.QueuedItem) codex.Turn {
 	if th.EndStatus != "" {
 		t.Status = th.EndStatus
 	}
+	t.CompletedAt = t.StartedAt
 	if th.KeepRunning {
-		t.Status = codex.TurnInProgress
+		t.Status, t.CompletedAt = codex.TurnInProgress, 0
 		th.Status = codex.ThreadStatus{Type: codex.StatusActive, ActiveFlags: []string{}}
 	}
 	th.Turns = append(th.Turns, t)

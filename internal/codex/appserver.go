@@ -117,6 +117,8 @@ type Turn struct {
 	Items  []TurnItem `json:"items"`
 	// StartedAt — unix-секунды начала хода; 0, если сервер не назвал.
 	StartedAt int64 `json:"startedAt,omitempty"`
+	// CompletedAt — unix-секунды конца хода; 0 — не кончился или не назван.
+	CompletedAt int64 `json:"completedAt,omitempty"`
 }
 
 type TurnItem struct {
@@ -156,6 +158,8 @@ type AppServer interface {
 	// TurnsPage — страница ходов, новые первыми; next пуст, когда ходов
 	// больше нет.
 	TurnsPage(ctx context.Context, thread, cursor string, limit int, view string) (turns []Turn, next string, err error)
+	// PeerPID — процесс на том конце сокета; 0 — неизвестен.
+	PeerPID() int
 	Close() error
 }
 
@@ -178,6 +182,7 @@ var Dial = func(ctx context.Context) (AppServer, error) {
 type client struct {
 	ws   *wsConn
 	next int
+	peer int
 	// settings — thread/settings/updated по тредам, пришедшие во время чужих
 	// вызовов; последнее перекрывает прежние.
 	settings map[string]Settings
@@ -195,12 +200,13 @@ func DialSocket(ctx context.Context, path string) (AppServer, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
+	peer := peerPID(c)
 	ws, err := wsHandshake(c)
 	if err != nil {
 		c.Close()
 		return nil, err
 	}
-	cl := &client{ws: ws, settings: map[string]Settings{}}
+	cl := &client{ws: ws, peer: peer, settings: map[string]Settings{}}
 	// experimentalApi нужен ради thread/queue/* и permissions. Из уведомлений
 	// нужно одно — thread/settings/updated; исход хода читается опросом, а
 	// поток дельт только занимает канал.
@@ -226,6 +232,8 @@ var noisyNotifications = []string{
 }
 
 func (c *client) Close() error { return c.ws.close() }
+
+func (c *client) PeerPID() int { return c.peer }
 
 func (c *client) notify(method string) error {
 	b, err := json.Marshal(map[string]any{"method": method})
