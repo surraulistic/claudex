@@ -33,8 +33,10 @@ type stdioOwner struct {
 
 func startOwner(t *testing.T, bin string) *stdioOwner {
 	t.Helper()
-	// Ровно та команда, которой ChatGPT Desktop поднимает свой runtime.
-	cmd := exec.Command(bin, "-c", "features.code_mode_host=true", "app-server", "--analytics-default-enabled")
+	// Команда runtime ChatGPT Desktop: у CodexCLI 0.167.0-alpha.3.2 это
+	// `app-server --listen stdio://` (снято 12.11 с живого процесса); прежняя
+	// форма с `-c features.code_mode_host=true` отличалась только флагами.
+	cmd := exec.Command(bin, "app-server", "--listen", "stdio://")
 	in, _ := cmd.StdinPipe()
 	out, _ := cmd.StdoutPipe()
 	cmd.Stderr = io.Discard
@@ -280,6 +282,77 @@ func TestLiveDaemonRoute(t *testing.T) {
 		r.Stage, r.Hold, r.Transport, r.ProfileSet, r.TurnID, r.Reason, err)
 	if err != nil || !r.Started() || r.Transport != TransportAppServer {
 		t.Fatalf("маршрут демона: %+v %v", r, err)
+	}
+	done := followDone(t, id, req.ClientID, since)
+	t.Logf("итог: stage=%s turn=%s status=%s", done.Stage, done.TurnID, done.TurnStatus)
+}
+
+// Холодный маршрут: тред демона выгружен, подписчиков и замка нет. Так
+// выглядит тред Desktop после закрытия приложения и тред remote-control после
+// ухода телефона: демон выгружает его через thread_unload_delay_secs (60 с).
+func TestLiveColdRoute(t *testing.T) {
+	dir := smokeDir(t)
+	s, err := Dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := s.(*client)
+	var raw json.RawMessage
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := cl.call(ctx, "thread/start", startParams(dir), &raw); err != nil {
+		t.Fatal(err)
+	}
+	id := threadID(t, raw)
+	if err := cl.call(ctx, "thread/inject_items", injectParams(id), nil); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	left := time.Now()
+	t.Logf("одноразовый тред %s: подписчик ушёл, ждём выгрузки", id)
+	t.Cleanup(func() {
+		s, err := Dial(context.Background())
+		if err != nil {
+			t.Log(err)
+			return
+		}
+		defer s.Close()
+		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		t.Logf("archive: %v", s.(*client).call(c, "thread/archive", map[string]any{"threadId": id}, nil))
+	})
+
+	for i := 0; ; i++ {
+		d, err := Dial(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		th, err := d.ReadThread(context.Background(), id)
+		d.Close()
+		if err == nil && th.Status.Type == StatusNotLoaded {
+			break
+		}
+		if i >= 60 {
+			t.Fatalf("тред не выгружен за 3 минуты: %+v %v", th.Status, err)
+		}
+		time.Sleep(3 * time.Second)
+	}
+	o := ThreadOwner(Home(), id)
+	t.Logf("выгружен через %s; владелец: kind=%q why=%q", time.Since(left).Round(time.Second), o.Kind, o.Why)
+	if o.Kind != OwnerNone {
+		t.Fatalf("после выгрузки замка быть не должно: %+v", o)
+	}
+
+	since := time.Now()
+	req := WakeRequest{Thread: id, ClientID: "claudex-smoke0c-reported", Task: "smoke0c",
+		Text:  TextPrefix + "smoke0c — проверка холодного пробуждения. Ответь одним словом OK.",
+		Owner: func() Owner { return ThreadOwner(Home(), id) }, Since: since,
+		StartWait: 45 * time.Second, Poll: time.Second, Each: 10 * time.Second}
+	r, err := Wake(context.Background(), req)
+	t.Logf("Wake: stage=%s hold=%s transport=%s profile=%s turn=%s reason=%q err=%v",
+		r.Stage, r.Hold, r.Transport, r.ProfileSet, r.TurnID, r.Reason, err)
+	if err != nil || !r.Started() || r.Transport != TransportAppServer || r.ProfileSet != ProfileByResume {
+		t.Fatalf("холодный маршрут: %+v %v", r, err)
 	}
 	done := followDone(t, id, req.ClientID, since)
 	t.Logf("итог: stage=%s turn=%s status=%s", done.Stage, done.TurnID, done.TurnStatus)

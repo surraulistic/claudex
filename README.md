@@ -197,7 +197,8 @@ profile `claudex-work` (сначала `permissionProfile/list` в cwd тред�
 запись потом узнаётся по отпечатку текста, а не по его началу.
 
 Тред, выгруженный в демоне, может держать другой процесс. ChatGPT Desktop
-ведёт свои треды собственным app-server на stdio (`codex -c … app-server
+ведёт свои треды собственным app-server на stdio (у CodexCLI 0.167.0-alpha.3.2
+это `codex app-server --listen stdio://`, раньше — `codex -c … app-server
 --analytics-default-enabled`): сокета у него нет, демон видит такой тред
 `notLoaded`, и второй сокет в `/private/tmp/codex-daemon-$UID/` — это
 `app-server-updater`, а не он. Кто держит замок писателя, claudex узнаёт только
@@ -207,7 +208,7 @@ profile `claudex-work` (сначала `permissionProfile/list` в cwd тред�
 |---|---|
 | нет замка | холодный `thread/resume` в демоне, как выше |
 | другой `codex app-server` (Desktop, IDE) | событие — в общую очередь через демон, без resume, `queue/start` и смены прав; ход начинает сам владелец: каждый app-server раз в 10 с смотрит общую очередь. Права — владельца, поэтому туда идёт событие, а не отчёт. Транспорт `owner_queue`; пока хода не видно — `queue_accepted` + `owner_turn_pending`, дожим только ищет ход |
-| не app-server (`codex exec`, TUI) | `thread_open_elsewhere`, ничего не кладём |
+| не app-server (`codex exec`, `codex --no-daemon`) | `thread_open_elsewhere`, ничего не кладём. Обычный `codex`/`codex resume` сюда не попадает: `daemon_auto_start` включён по умолчанию, интерактивная сессия идёт через демон, и её тред для claudex — загруженный в демоне |
 | не установлен (замок без процесса, несколько держателей, нет `lsof`) или сам демон, назвавший тред выгруженным | `thread_owner_unknown`, ничего не кладём |
 
 `CLAUDEX_CODEX_OWNER_QUEUE=off` выключает маршрут владельца: тред Desktop

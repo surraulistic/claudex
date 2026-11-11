@@ -357,3 +357,142 @@ lsof/ps не ответили → `thread_owner_unknown`. Не app-server → п
 Следующий шаг: ревью, мерж, `make install`, перезапуск наблюдателя; затем с
 открытым Desktop — `claudex send` в одноразовый тред Desktop и
 `claudex task log <id>`: ждать `owner_queue` → `turn_started`.
+
+## Ревью маршрута владельца 2026-11-12 (поручение 413b9084)
+
+Кандидат `2ca645e` (от `origin/main` 167e1e0) принят: блокеров нет, влит в
+локальный `main` fast-forward вместе с довесками ниже. Не запушено, не
+установлено; установленный `claudex` — ревизия 167e1e0, без маршрута владельца.
+
+### Что проверено
+
+- Сборка, `go vet`, `go test ./...` (go1.26.1) — зелёные; `gofmt` чист;
+  `GOOS=linux` собирается. `GOOS=windows` не собирается из-за `syscall.Flock`
+  в `internal/journal` — это до кандидата, не его.
+- Исходники `rust-v0.167.1` (commit 595a35e, через GitHub API), факты:
+  - `ext/queue/src/service.rs`, `watch_external_messages`: опрос раз в 10 с
+    (`interval(Duration::from_secs(10))`) по `change_version` SQLite;
+    `changes_since(last_revision, &manager.list_thread_ids())` — только треды,
+    **загруженные в этом процессе**; dispatch → `wake_if_loaded` →
+    `on_thread_idle` → `dispatch_if_idle` → `start_turn_if_idle`
+    (`turn_trigger: "queue"`). `enqueue` для незагруженного треда — запись в
+    очередь и ничего больше (`wake_if_loaded` не находит тред).
+  - Очередь — `LocalQueueStore` поверх `state_db` (SQLite в `$CODEX_HOME`),
+    общая для всех app-server с тем же домом; создаётся только при
+    `experimental_thread_store = local` (`message_processor.rs`). Строки этого
+    кода есть в обоих бинарях — демона 0.167.1 и CodexCLI Desktop
+    0.167.0-alpha.3.2.
+  - `rollout/src/writer_lock.rs`: замок — `try_lock` на открытом
+    `thread-writer-locks/<id>.lock`, файл держится открытым до `Drop`, поэтому
+    `lsof` видит держателя. Чужой замок — `WouldBlock`, «thread … already has
+    an active writer». Осиротевший замок (файл без держателя) снимает первый
+    же `acquire` любого процесса Codex.
+  - `thread_processor.rs`, `normalize_thread_turns_status`: у читателя, для
+    которого тред не Active, `inProgress` переписывается в `interrupted`;
+    `completedAt` в `Turn` v2 есть (`completed_at: Option<i64>`).
+  - TUI: `daemon_auto_start` — `Stage::Stable`, `default_enabled: true`
+    (`features/src/lib.rs`); `startup_orchestration.rs` поднимает managed
+    daemon и идёт через него, если нет `--no-daemon`. Значит обычный
+    `codex`/`codex resume` держит тред **в демоне**, а не сам.
+  - Документация (learn.chatgpt.com/docs/app-server): после ухода последнего
+    подписчика тред выгружается через 60 с (`thread_unload_delay_secs`).
+    `codex queue --resume` — официальный «положить и поднять на локальном
+    демоне»; без `--resume` документация не обещает старта хода.
+- Живой срез 12.11 00:44: все четыре замка — у демона pid 89328
+  (`app-server --remote-control --listen unix:// --managed-daemon`), включая
+  тред координатора; app-server Desktop pid 6362 — `codex app-server --listen
+  stdio://` (не `-c features.code_mode_host=true …`, как в тексте коммита) —
+  тредов не держал; второй сокет — updater pid 21193. В 00:56 установленный
+  `claudex done` поднял тред координатора холодным resume под `claudex-work`:
+  телефон ушёл, демон выгрузил тред — правило 60 с видно на рабочем треде.
+- Живой smoke (`-tags codexlive`, одноразовые треды, после — `thread/archive`):
+  - владелец — отдельный stdio app-server бинарём Desktop (pid 74958):
+    `ThreadOwner` → `app_server`, `Wake` через демон 7.6 с → `turn_started`
+    (`owner_queue`) → `turn_completed`; демон тред не загружал;
+  - тред, загруженный в демоне: `resume_loaded` → `turn_completed`;
+  - холодный (новый `TestLiveColdRoute`): после ухода подписчика демон выгрузил
+    тред через 61 с, замка нет, `thread/resume` под `claudex-work` →
+    `turn_started` → `turn_completed`.
+- Не проверено вживую: настоящий тред Desktop (на время ревью Desktop тредов
+  не держал, одноразового треда в нём нет) и поведение его app-server в App
+  Nap при свёрнутом окне.
+
+### Находки и довески
+
+1. Командная строка Desktop сменилась на `app-server --listen stdio://`;
+   `classifyOwner` её и так разбирает (`--listen` — флаг со значением), но
+   текст README, комментарий smoke и тесты описывали прежнюю. Исправлено,
+   случай добавлен в `TestClassifyOwner`.
+2. README относил TUI к «не app-server»: по умолчанию TUI идёт через демон, и
+   для claudex такой тред — загруженный в демоне (путь с подпиской и, если
+   нужно, сменой прав). Отказ `thread_open_elsewhere` остаётся за `codex
+   exec` и `codex --no-daemon`. Исправлено.
+3. `claudex done` без доводов закрывал единственное открытое поручение сессии
+   пустым «готово» и будил ведущего (воспроизведено на этом поручении).
+   Теперь отказ с подсказкой (`MinArgs: 1`), закреплено тестом и зондом.
+4. Косметика, оставлено: в ветке «принято, записи нет, владелец app-server»
+   `Transport` остаётся `app_server`, журнал новую запись не делает.
+5. Осиротевший замок даёт `thread_owner_unknown` — fail-closed и временно:
+   следующий `acquire` любого Codex его снимет. Оставлено.
+
+### Матрица состояний
+
+Codex 0.167.1 (демон), Desktop CodexCLI 0.167.0-alpha.3.2. «Факт» —
+проверено вживую или по исходнику; «вывод» — следует из фактов, вживую не
+снято.
+
+| состояние | кто держит тред | интерфейс claudex | кто просыпается | основание |
+|---|---|---|---|---|
+| выгружен, замка нет; демон жив (Desktop закрыт, телефон ушёл > 60 с, TUI закрыт) | никто | `thread/resume` с `claudex-work` → `queue/add` (→ `queue/start` при нужде) через демон | демон, права `claudex-work` (липко) | факт: smoke cold; координатор 00:56 |
+| загружен в демоне, idle, есть подписчик (телефон/Desktop по remote-control, обычный TUI) | демон | `resume` (подписка) → при нужде `settings/update` → `queue/add` | демон сам (`enqueue` → `wake_if_loaded`) | факт: smoke daemon |
+| загружен в демоне, active / ждёт человека | демон | ничего, `thread_busy` / `thread_waiting_on_human`; дожим | после хода демон вычитает очередь сам | факт: 00:56:57 на координаторе; `dispatch_if_idle` |
+| в app-server Desktop, Desktop открыт, тред idle | Desktop (stdio) | `queue/add` через демон в общий SQLite, событие | Desktop ≤ 10 с (`watch_external_messages`), права Desktop | факт на суррогате (тот же бинарь): 7.6 с; живой Desktop — не снято |
+| в Desktop, окно свёрнуто / в фоне | Desktop | то же | то же, пока процесс не усыплён | вывод; App Nap не проверялся |
+| в Desktop, тред занят / ждёт одобрения | Desktop | `queue_accepted` + `owner_turn_pending`, дожим ищет ход | Desktop, когда освободится | факт по исходнику (`start_turn_if_idle`) |
+| Desktop закрыт или тред в нём закрыт | через 60 с без подписчиков / сразу при выходе — никто | → строка 1 | демон | факт: 60 с (док, smoke cold) |
+| демона нет (remote-control не запущен, managed daemon не поднят) | — | `codex queue` (durable, без пробуждения) | никто до `codex queue --resume`, открытия треда человеком или появления демона (дожим) | факт по исходнику (`enqueue` без загруженного треда) и CLI-док |
+| держит `codex exec` / `codex --no-daemon` | тот процесс | `thread_open_elsewhere`, ничего | никто | факт: отказ по коду; встроенный сервер TUI с state_db очередь тоже опрашивал бы, но от `exec` по `ps` не отличим — оставлен отказ |
+| замок без процесса / два держателя / `lsof` нет | неясно | `thread_owner_unknown`, ничего | никто; осиротевший замок снимет следующий `acquire` | факт по исходнику |
+| телефон подключён, тред в демоне | демон (телефон — подписчик) | строки 2–3 | демон | факт: 00:30 замок у демона |
+| телефон отключён | через 60 с — никто | строка 1 | демон | факт: 00:56 cold resume координатора |
+| Mac спит / приложение закрыто | — | очередь durable | после пробуждения — строки 1–2 | док («remote access stops until available») |
+
+Ответы на вопросы поручения: `thread/queue/add` для незагруженного треда —
+**только durable enqueue без пробуждения** (факт). Закрытый в UI или
+завершивший ход тред **автоматически возобновляется без второго писателя
+ровно тогда, когда замка нет** — холодным `resume` в демоне; при чужом замке
+единственный законный путь — очередь, ход начинает владелец.
+
+### Минимальная архитектура (= кандидат + наблюдатель)
+
+1. Замок читается (`lsof`/`ps`), не берётся: держатель выбирает маршрут.
+2. Замка нет → `resume` под `claudex-work` в демоне (claudex — единственный
+   писатель), `queue/add`, опрос хода.
+3. Замок у `codex app-server` (Desktop, IDE) → только `queue/add` через API
+   демона (общий SQLite, но не напрямую), событие, не отчёт; ход — владельца.
+4. Замок у не-app-server или не установлен → отказ, ничего не кладём.
+5. Демона нет → `codex queue` (durable); наблюдатель поднимет холодным
+   `resume`, когда демон появится.
+6. Наблюдатель: повтор по `clientUserMessageId` без дублей, `FollowTurns`,
+   окно 72 ч.
+
+Не нужно и не делается: `codex exec resume` (новый процесс, второй писатель,
+дорого), прямая запись в SQLite, снятие замков, подмена владельца.
+
+### Невозможные гарантии и внешние ограничения
+
+- Ход у чужого владельца идёт с его правами (у Desktop — какие выставил
+  человек), сменить их снаружи нечем.
+- Нет демона и тред закрыт → никто не проснётся до человека или демона.
+- Усыплённый Desktop (App Nap) или спящий Mac — пауза до пробуждения.
+- Холодный `resume` липко переводит тред на `claudex-work`, в том числе для
+  последующих ходов человека с телефона.
+- Удалённая человеком из очереди Desktop запись неотличима от забранной:
+  `owner_turn_pending` до конца окна дожима.
+- Старые rollout с `interrupted` без `completedAt` считаются начатыми.
+- Linux — `SO_PEERCRED`; прочие ОС — маршрут владельца всегда
+  `thread_owner_unknown`.
+
+Следующий шаг (за человеком): push `main`, `make install`, перезапуск
+наблюдателя; затем с открытым Desktop — `claudex send` в одноразовый тред
+Desktop, ждать `owner_queue` → `turn_started`.

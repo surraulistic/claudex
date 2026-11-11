@@ -19,6 +19,7 @@ func TestClassifyOwner(t *testing.T) {
 	}{
 		{"desktop stdio runtime", desktop,
 			desktop + " -c features.code_mode_host=true app-server --analytics-default-enabled", OwnerAppServer, true},
+		{"desktop 0.167.0-alpha.3.2", desktop, desktop + " app-server --listen stdio://", OwnerAppServer, true},
 		{"remote-control daemon", daemon,
 			daemon + " app-server --remote-control --listen unix:// --analytics-default-enabled --managed-daemon",
 			OwnerAppServer, false},
