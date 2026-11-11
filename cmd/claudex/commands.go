@@ -42,7 +42,7 @@ func commands() []command {
 		{Name: "session", Aliases: []string{"sessions-live"}, Run: cmdSession},
 		{Name: "doctor", Run: func(o opts, _ []string) error { return cmdDoctor(o) }},
 		{Name: "supervisor", Run: cmdSupervisor},
-		{Name: "done", Run: cmdDone},
+		{Name: "done", MinArgs: 1, Need: `нужно: claudex done [<id поручения>] "<итог>"`, Run: cmdDone},
 		{Name: "version", Run: func(o opts, _ []string) error { return cmdVersion(o) }},
 
 		{Name: "sessions", Run: func(o opts, _ []string) error { return cmdSessions(o, false) }},

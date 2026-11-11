@@ -161,3 +161,12 @@ func TestArchiveAgeIsMeasuredInDays(t *testing.T) {
 		}
 	}
 }
+
+func TestDoneWithoutArgumentsIsRefused(t *testing.T) {
+	// `claudex done` без доводов закрывал единственное открытое поручение
+	// сессии пустым «готово» и будил ведущего (12.11, поручение 413b9084).
+	err := dispatch(opts{}, []string{"done"})
+	if err == nil || !strings.Contains(err.Error(), "claudex done [<id поручения>]") {
+		t.Fatalf("done без доводов — отказ с подсказкой, получено %v", err)
+	}
+}
